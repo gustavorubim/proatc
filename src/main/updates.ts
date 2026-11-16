@@ -1,11 +1,27 @@
 // Checks GitHub releases for a newer version, downloads it in the background, and installs
 // it when the user presses "Restart to update".
 
-import { app } from 'electron'
+import { app, shell } from 'electron'
 import { autoUpdater } from 'electron-updater'
 import type { UpdateState } from '../shared/protocol'
 
 const CHECK_EVERY_MS = 6 * 60 * 60 * 1000
+const RELEASES = 'https://github.com/gustavorubim/proatc/releases/latest'
+
+/**
+ * Whether this copy can replace itself. The Windows installer can. On macOS that needs an app
+ * signed with an Apple developer certificate, which this one is not. On Linux only an AppImage can.
+ * Where it cannot, a new version is announced and the download page is opened instead.
+ */
+export function canSelfUpdate(platform: string, env: NodeJS.ProcessEnv): boolean {
+  if (platform === 'win32') return true
+  return platform === 'linux' && Boolean(env.APPIMAGE)
+}
+
+/** Open the page where the new version can be downloaded by hand. */
+export function openReleases(): void {
+  void shell.openExternal(RELEASES)
+}
 
 let state: UpdateState = { state: 'none' }
 let onChange: (state: UpdateState) => void = () => {}
@@ -26,7 +42,7 @@ export async function checkForUpdates(manual = false): Promise<UpdateState> {
     return state
   }
   // Don't restart a download that is under way or already finished.
-  if (state.state === 'downloading' || state.state === 'ready') return state
+  if (state.state === 'downloading' || state.state === 'ready' || state.state === 'available') return state
   if (manual) set({ state: 'checking' })
   try {
     await autoUpdater.checkForUpdates()
@@ -51,10 +67,17 @@ export function startUpdates(listener: (state: UpdateState) => void): void {
   onChange = listener
   if (!app.isPackaged) return
 
-  autoUpdater.autoDownload = true
-  autoUpdater.autoInstallOnAppQuit = true
+  const automatic = canSelfUpdate(process.platform, process.env)
+  autoUpdater.autoDownload = automatic
+  autoUpdater.autoInstallOnAppQuit = automatic
 
-  autoUpdater.on('update-available', (info) => set({ state: 'downloading', version: info.version, percent: 0 }))
+  autoUpdater.on('update-available', (info) =>
+    set(
+      automatic
+        ? { state: 'downloading', version: info.version, percent: 0 }
+        : { state: 'available', version: info.version }
+    )
+  )
   autoUpdater.on('download-progress', (progress) => {
     if (state.state === 'downloading') set({ ...state, percent: Math.round(progress.percent) })
   })

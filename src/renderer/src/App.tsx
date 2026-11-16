@@ -208,6 +208,7 @@ function UpdatePill() {
   const view = updateView(update, version)
   const click = (): void => {
     if (view.action === 'install') void window.proatc?.installUpdate()
+    else if (view.action === 'open') void window.proatc?.openReleases()
     else if (view.action === 'check') void window.proatc?.checkForUpdates().then(setUpdate)
   }
   return (

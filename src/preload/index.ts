@@ -16,6 +16,7 @@ const api = {
   updateState: (): Promise<UpdateState> => ipcRenderer.invoke('update-state'),
   checkForUpdates: (): Promise<UpdateState> => ipcRenderer.invoke('update-check'),
   installUpdate: (): Promise<void> => ipcRenderer.invoke('update-install'),
+  openReleases: (): Promise<void> => ipcRenderer.invoke('update-open'),
   onUpdateState: (listener: (state: UpdateState) => void): void => {
     ipcRenderer.on('update-state', (_event, state: UpdateState) => listener(state))
   }

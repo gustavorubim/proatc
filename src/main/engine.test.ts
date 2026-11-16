@@ -2,6 +2,7 @@ import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { engineEnv, enginePaths, engineSteps, freePort, webDir } from './engine'
+import { canSelfUpdate } from './updates'
 
 describe('engine launcher', () => {
   it('from a source checkout, runs the engine through the developer’s uv', () => {
@@ -25,6 +26,13 @@ describe('engine launcher', () => {
       '/opt/proatc/resources/app.asar.unpacked/out/renderer'
     )
     expect(engineEnv(paths, 't', {}).PROATC_WEB_DIR).toBeUndefined()
+  })
+
+  it('replaces itself only where the system allows it', () => {
+    expect(canSelfUpdate('win32', {})).toBe(true)
+    expect(canSelfUpdate('darwin', {})).toBe(false) // needs an Apple developer certificate
+    expect(canSelfUpdate('linux', {})).toBe(false)
+    expect(canSelfUpdate('linux', { APPIMAGE: '/home/me/ProATC.AppImage' })).toBe(true)
   })
 
   it('installed, builds its own environment from the lock file and keeps data in the user folder', () => {

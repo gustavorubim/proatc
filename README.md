@@ -2,7 +2,7 @@
 
 Talk to air traffic control in X-Plane 12 with your own voice. Pro ATC is a free, open-source app that plays every controller, from clearance to landing, IFR or VFR, at any airport in the sim.
 
-**[Download for Windows](https://github.com/gustavorubim/proatc/releases/latest)**
+**[Download for Windows, macOS or Linux](https://github.com/gustavorubim/proatc/releases/latest)**
 
 ![Pro ATC window](docs/screenshot.png)
 
@@ -15,22 +15,23 @@ Talk to air traffic control in X-Plane 12 with your own voice. Pro ATC is a free
 
 ## Get started
 
-1. Download and run the installer from the [latest release](https://github.com/gustavorubim/proatc/releases/latest). Windows will warn that it is unsigned: choose "More info", then "Run anyway".
+1. Download from the [latest release](https://github.com/gustavorubim/proatc/releases/latest): the `.exe` for Windows, the `.dmg` for a Mac with Apple Silicon, the `.AppImage` for Linux. The app is not signed, so the system warns the first time ([what to do](docs/install.md)).
 2. Open Pro ATC and wait for the first-time setup (a few minutes, about 3 GB).
 3. Click "Add OpenRouter key" and paste a key from [openrouter.ai/keys](https://openrouter.ai/keys).
 4. Start X-Plane 12, load a flight, click a frequency in the app and hold right Ctrl to talk.
 
-Needs Windows 10 or 11 and X-Plane 12.1.1 or newer. Works with SimBrief and Navigraph. No plugin to install.
+Needs X-Plane 12.1.1 or newer on Windows 10 or 11, macOS 12 or newer (Apple Silicon), or Linux (x64). Works with SimBrief and Navigraph. No plugin to install. Windows is the system it is developed and flown on; the Mac and Linux builds are new.
 
 ## Good to know
 
 - Other aircraft are heard and seen, but not controlled.
 - There is no window inside the sim yet, so it is awkward in VR.
-- English only, Windows only.
+- English only.
 
 ## Help and details
 
 - Something wrong? Click **Save log** in the app and [open an issue](https://github.com/gustavorubim/proatc/issues/new/choose) with the two files.
+- [Installing on each system](docs/install.md): the first-run warnings, and what macOS and Linux need.
 - [How it works](docs/how-it-works.md): everything the controllers do.
 - [Development](docs/development.md): build from source, tests, releases.
 

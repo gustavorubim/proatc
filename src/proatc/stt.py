@@ -21,6 +21,9 @@ def _add_nvidia_dlls() -> None:
     import os
     from pathlib import Path
 
+    if os.name != "nt":
+        return
+
     spec = importlib.util.find_spec("nvidia")
     if not spec or not spec.submodule_search_locations:
         return

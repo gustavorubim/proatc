@@ -6,7 +6,7 @@ export interface UpdateView {
   label: string
   tone: 'ok' | 'wait' | 'bad' | 'quiet'
   /** What a click does: look for an update, restart into one, or nothing while busy. */
-  action: 'check' | 'install' | null
+  action: 'check' | 'install' | 'open' | null
   hint: string
 }
 
@@ -28,6 +28,13 @@ export function updateView(update: UpdateState, version: string): UpdateView {
         tone: 'ok',
         action: 'install',
         hint: 'Closes Pro ATC, installs the new version and starts it again.'
+      }
+    case 'available':
+      return {
+        label: `Get v${update.version}`,
+        tone: 'ok',
+        action: 'open',
+        hint: 'A new version is out. This opens the download page: on this system it is installed by hand.'
       }
     case 'error':
       return { label: 'Update failed, try again', tone: 'bad', action: 'check', hint: update.message ?? '' }
