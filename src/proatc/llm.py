@@ -33,6 +33,11 @@ Rules:
 - No markdown, no stage directions, no explanations."""
 
 
+INFORM_ONLY = """
+For this reply you may only give information from the context, say "standby", say "unable", or ask the pilot to say again.
+You must not issue any clearance or instruction of any kind: no taxi, takeoff, landing, climb, descent, heading, speed, route, frequency change or squawk. Those come from elsewhere. If the pilot asks for one, answer "<callsign>, unable, say again your request"."""
+
+
 class LlmError(RuntimeError):
     pass
 
@@ -94,14 +99,14 @@ class Controller:
         self.usage["completion_tokens"] += int(used.get("completion_tokens") or 0)
         self.usage["cost"] += float(used.get("cost") or 0.0)
 
-    def reply(self, transcript: str, state: dict, station_key: str = "free") -> str:
+    def reply(self, transcript: str, state: dict, station_key: str = "free", inform_only: bool = False) -> str:
         """Free-form controller reply, used where the rules engine has no answer.
 
         `station_key` keeps a separate conversation per station: tower does not remember what ground said.
         """
         history = self.histories.setdefault(station_key, [])
         user = f"Context: {json.dumps(state)}\nPilot transmission: {transcript}"
-        text = self.complete(SYSTEM_PROMPT, user, history[-8:])
+        text = self.complete(SYSTEM_PROMPT + (INFORM_ONLY if inform_only else ""), user, history[-8:])
         self.remember(station_key, transcript, text)
         return text
 

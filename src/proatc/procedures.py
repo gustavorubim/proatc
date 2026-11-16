@@ -21,7 +21,10 @@ NAV_FILES = ("Custom Data/earth_nav.dat", "Resources/default data/earth_nav.dat"
 
 # Field positions after the "SID:" / "STAR:" / "APPCH:" prefix.
 SEQ, ROUTE_TYPE, NAME, TRANSITION, FIX = 0, 1, 2, 3, 4
-ALT_DESCR, ALT1, TRANS_ALT = 22, 23, 25
+DESCRIPTION, PATH = 8, 11  # waypoint description code (its fourth letter is the fix's role), path terminator
+ALT_DESCR, ALT1, ALT2, TRANS_ALT, SPEED_DESCR, SPEED = 22, 23, 24, 25, 26, 27
+IAF_ROLES = "ACD"  # fourth letter of the description code: an initial approach fix
+FAF_ROLE = "F"
 
 # Approach type letter -> how a controller says it, best first.
 APPROACH_TYPES = {
@@ -52,8 +55,12 @@ APPROACH_IDENT = re.compile(r"([A-Z])(\d\d[LRC]?)-?([A-Z])?")
 @dataclass
 class Leg:
     fix: str
-    alt_descr: str = ""
+    alt_descr: str = ""  # "" or "@" at, "+" at or above, "-" at or below, "B" between altitude_ft (upper) and altitude2_ft
     altitude_ft: int | None = None
+    altitude2_ft: int | None = None
+    speed_kt: int | None = None  # a speed limit at this fix
+    role: str = ""  # A, C or D: initial approach fix; F: final approach fix; M: missed approach point
+    path: str = ""  # ARINC 424 path terminator: IF, TF, CF, DF, HM, ...
 
 
 @dataclass
@@ -94,6 +101,40 @@ class Procedure:
     def start_fixes(self) -> set[str]:
         return {next(leg.fix for leg in legs if leg.fix) for legs in self.transitions.values() if any(leg.fix for leg in legs)}
 
+    def chain(self, kind: str, runway: str | None, route: list[str]) -> list[Leg]:
+        """The legs as they are flown for this runway and this filed route.
+
+        A SID is its runway part, then the part common to all runways, then the en-route transition
+        that ends at a fix on the route. A STAR is the en-route transition that starts at a fix on the
+        route, then the common part, then the part for the landing runway.
+        """
+        runway_parts, common, enroute = [], [], []
+        for name, legs in self.transitions.items():
+            if name.startswith("RW"):
+                ident = name[2:]
+                ends = {ident[:-1] + side for side in "LRC"} | {ident[:-1]} if ident.endswith("B") else {ident}
+                if runway is None or runway in ends:
+                    runway_parts.append(legs)
+            elif name in ("ALL", ""):
+                common.append(legs)
+            else:
+                enroute.append((name, legs))
+        wanted = [legs for name, legs in enroute if name in route]
+        if not wanted and len(enroute) == 1 and not common:
+            wanted = [enroute[0][1]]  # the only way in or out
+        order = [runway_parts[:1], common, wanted[:1]] if kind == "SID" else [wanted[:1], common, runway_parts[:1]]
+        flown: list[Leg] = []
+        for part in order:
+            for legs in part:
+                for leg in legs:
+                    if flown and leg.fix and leg.fix == flown[-1].fix:
+                        # Where two parts join, the fix appears in both: keep whichever carries the restriction.
+                        if leg.altitude_ft or leg.speed_kt:
+                            flown[-1] = leg
+                        continue
+                    flown.append(leg)
+        return flown
+
     def top_altitude(self) -> int | None:
         """The level-off altitude of a SID: its highest 'at' or 'at or below' restriction."""
         limits = [leg.altitude_ft for legs in self.transitions.values() for leg in legs
@@ -109,6 +150,19 @@ class Approach:
     platform_ft: int | None = None  # altitude at which the final approach is intercepted
     missed_ft: int | None = None  # the altitude the published missed approach climbs to
     missed_fix: str | None = None  # where the missed approach ends (usually a hold)
+    transitions: dict[str, list[Leg]] = field(default_factory=dict)  # initial approach fix -> legs to the final segment
+    final: list[Leg] = field(default_factory=list)  # the final segment, up to the runway
+    faf: str | None = None  # the final approach fix
+
+    def initial_fixes(self) -> list[tuple[str, int | None]]:
+        """(fix, altitude to cross it at) for each published way into the approach."""
+        found = []
+        for name, legs in self.transitions.items():
+            first = next((leg for leg in legs if leg.fix), None)
+            if first:
+                altitude = first.altitude_ft or next((leg.altitude_ft for leg in legs if leg.altitude_ft), None)
+                found.append((first.fix or name, altitude))
+        return found
 
     @property
     def spoken(self) -> str:
@@ -142,11 +196,22 @@ def parse_cifp(lines) -> Procedures:
         if len(f) <= TRANS_ALT:
             continue
         altitude = _altitude(f[ALT1])
+        speed = f[SPEED] if len(f) > SPEED else ""
+        leg = Leg(
+            f[FIX], f[ALT_DESCR], altitude, _altitude(f[ALT2]), int(speed) if speed.isdigit() else None,
+            f[DESCRIPTION][3:4].strip() if len(f[DESCRIPTION]) >= 4 else "", f[PATH],
+        )  # fmt: skip
         if kind == "APPCH":
             match = APPROACH_IDENT.fullmatch(f[NAME])
             if not match:
                 continue
             approach = found.approaches.setdefault(f[NAME], Approach(f[NAME], match.group(1), match.group(2)))
+            if f[ROUTE_TYPE] == "A":
+                approach.transitions.setdefault(f[TRANSITION] or f[FIX], []).append(leg)
+            elif f[NAME] not in past_runway:
+                approach.final.append(leg)
+                if leg.role == FAF_ROLE and leg.fix:
+                    approach.faf = leg.fix
             if f[ROUTE_TYPE] != "A":
                 if f[NAME] in past_runway:
                     if altitude:
@@ -166,7 +231,7 @@ def parse_cifp(lines) -> Procedures:
             continue
         table = found.sids if kind == "SID" else found.stars
         procedure = table.setdefault(f[NAME], Procedure(f[NAME]))
-        procedure.transitions.setdefault(f[TRANSITION] or "ALL", []).append(Leg(f[FIX], f[ALT_DESCR], altitude))
+        procedure.transitions.setdefault(f[TRANSITION] or "ALL", []).append(leg)
         transition = _altitude(f[TRANS_ALT])
         if kind == "SID" and transition:
             found.transition_altitude_ft = transition

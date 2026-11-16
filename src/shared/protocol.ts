@@ -62,6 +62,7 @@ export interface EngineState {
     stand?: string
     hold_short?: string
     service?: string
+    cleared_level?: string
   } | null
   plan: {
     origin?: string
@@ -155,6 +156,7 @@ export type Command =
   | { cmd: 'save_log' }
   | { cmd: 'reset_cost' }
   | { cmd: 'debrief' }
+  | { cmd: 'new_flight' }
 
 export interface UpdateState {
   state: 'none' | 'checking' | 'downloading' | 'ready' | 'error'

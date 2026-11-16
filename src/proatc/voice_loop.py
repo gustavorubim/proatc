@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import queue
+import re
 import threading
 import time
 
@@ -32,7 +33,7 @@ from .navdata import AirportDB
 from .navfix import open_navfix
 from .procedures import NavaidNames, route_fixes
 from .ptt import PushToTalk
-from .radio import AtisBroadcaster, briefing, current_station, observe, station_voice
+from .radio import AtisBroadcaster, SimClock, briefing, current_station, observe, station_voice
 from .radio_fx import radio_effect
 from .stt import SpeechToText
 from .tts import TextToSpeech, download_models, models_present
@@ -154,8 +155,9 @@ class Session:
         self.db.metars = self.metars
         self.engine = Engine(
             self.db, centers=self.centers, navaids=NavaidNames(root), navfix=self.navfix, metars=self.metars,
-            holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root),
+            holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root), clock=SimClock(),
         )  # fmt: skip
+        self.engine.clock = self.engine.now
         radio_db = AirportDB()  # the background thread's own connection
         radio_db.centers, radio_db.metars = self.centers, self.metars
         self.broadcaster = AtisBroadcaster(
@@ -461,6 +463,19 @@ def _exchange(config, bridge, db, book, stt, tts, controller, player, ptt, recor
     _respond(transcript, "voice", None, started, config, bridge, db, book, tts, controller, player, ptt, engine, parser, emit)
 
 
+INSTRUCTION = re.compile(
+    r"\b(cleared|clearance|climb|descend|turn (left|right)|fly heading|heading \w+ \w+ \w+|taxi|cross|line up|take ?off|"
+    r"cleared to land|contact|squawk|hold (short|position|at)|maintain|approved|proceed|direct|vectors?|reduce speed|"
+    r"increase speed|expect|push ?back|start ?up|go around|enter|join|report)\b",
+    re.I,
+)
+
+
+def informational(text: str) -> bool:
+    """Whether a free-form reply only informs. Anything that reads like a clearance or an instruction is refused."""
+    return not INSTRUCTION.search(text)
+
+
 def known_names(engine) -> list[str]:
     """Identifiers this flight is likely to mention: its airports, its route's waypoints, its procedures."""
     flight, plan = engine.flight, engine.flight.plan
@@ -545,7 +560,11 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
         emit({"type": "silent", "text": note} if note else {"type": "silent"})
         return
     label = context["station"]["you_are"] if "station" in context else "ATC"
-    emit({"type": "atc", "station": label, "text": answer, "unprompted": False})
+    event = {"type": "atc", "station": label, "text": answer, "unprompted": False}
+    if engine is not None and engine.flight.last_event:
+        event["event"] = engine.flight.last_event
+        engine.flight.last_event = ""
+    emit(event)
 
     samples, rate = tts.speak(answer, **station_voice(tts, station))
     if config.radio.enabled:
@@ -559,16 +578,24 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
 
 def _answer(transcript, intent, context, station_key, station, issue, raw, controller, engine, parser, emit: Emit) -> str:
     """The controller's words: from the rules engine when it covers the request, else a free-form reply."""
-    if not controller:
-        return f"Readback check. {transcript}"
-    if station and engine and parser:
+    # A clicked call carries its own intent: it needs no language model at all.
+    if station and engine and (intent is not None or parser):
         if intent is None:
             intent = parser.parse(transcript, engine.flight.last_said.get(station_key, ""), known_names(engine))
         emit({"type": "understood", "intent": intent.intent})
         reply = engine.handle(intent, station, issue, raw, magnetic_variation(raw))
         engine.flight.last_note = reply.note if reply is not None else ""
+        engine.flight.last_event = reply.event if reply is not None else ""
         if reply is not None:
-            controller.remember(station_key, transcript, reply.text)
+            if controller:
+                controller.remember(station_key, transcript, reply.text)
             return reply.text
         context["flight"] = engine.summary()
+    if not controller:
+        return f"Readback check. {transcript}"
+    if station and engine:
+        # The rules engine has no answer. The model may inform or decline; it may not clear or instruct,
+        # because nothing it says would be known to the engine or checked against the airport's data.
+        text = controller.reply(transcript, context, station_key, inform_only=True)
+        return text if informational(text) else f"{engine._callsign(raw)}, unable, say again your request"
     return controller.reply(transcript, context, station_key)

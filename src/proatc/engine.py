@@ -36,6 +36,20 @@ READBACK_WAIT_S = 30  # how long an instruction waits for a readback before it i
 CONTINUE_BEYOND_NM = 5  # further out than this, tower says "continue approach"
 CLEAR_TO_LAND_NM = 4.5
 GO_AROUND_NM = 1.0  # still no landing clearance this close in: go around
+LATE_GO_AROUND_NM = 2.0  # a runway that becomes occupied after the landing clearance: go around from this close in
+# What must be read back. A readback that leaves one of these out is asked for once more.
+CRITICAL = ("runway", "squawk", "frequency", "altitude", "heading", "hold_short", "crossing")
+READBACK_WORDS = {
+    "runway": "the runway",
+    "squawk": "the squawk",
+    "frequency": "the frequency",
+    "altitude": "your cleared level",
+    "heading": "the heading",
+    "hold_short": "the runway to hold short of",
+    "crossing": "the runway to cross",
+}
+REPOSITION_NM = 2.0  # on the ground, then on the ground this far away at the next look: the aircraft was moved
+REPOSITION_AIRBORNE_NM = 10.0  # on the ground, then airborne this far away
 ON_RUNWAY_NM = 0.022  # this close to a runway's centreline is on it
 HOLDING_SHORT_NM = 0.075  # stopped this close to a runway to be crossed: holding short of it
 CROSSING_FINAL_NM = 3.0  # an aircraft on final this close in keeps a crossing waiting
@@ -58,6 +72,8 @@ class Reply:
     on_correct: str = ""  # said after a correct readback (delivery's "readback correct")
     correction: bool = False  # a repeat of the pending instruction after a wrong readback
     note: str = ""  # with no text: why nobody answered (a blind call at an airfield without a controller)
+    event: str = ""  # what this transmission is, for the debrief: readback_corrected, go_around, level_bust, ...
+    asked: bool = False  # the pilot was already asked once to read back what was left out
 
 
 @dataclass
@@ -121,6 +137,13 @@ class Flight:
     special_vfr: bool = False
     airspace_called: set[str] = field(default_factory=set)  # airspaces already warned about
     last_note: str = ""  # why the last call got no answer, for the app
+    last_event: str = ""  # the kind of the last controller transmission, for the flight log
+    seen_at: tuple | None = None  # (lat, lon, on the ground) at the last look at the aircraft
+    sid_path: list = field(default_factory=list)  # the SID's track over the ground, for route watching
+    star_path: list = field(default_factory=list)
+    off_route_since: float | None = None
+    off_route_called: set[str] = field(default_factory=set)
+    qnh_told: bool = False  # the destination's pressure was given with a descent to an altitude
 
 
 def _squawk(rng: random.Random) -> str:
@@ -150,6 +173,7 @@ class Engine:
         self.centers = centers  # centers.CenterIndex or None
         self.navaids = navaids  # procedures.NavaidNames or None
         self.flight = Flight()
+        self.last_raw: dict = {}  # the latest sim snapshot the engine was shown
         self.lock = threading.RLock()
         self._networks: dict[str, TaxiNetwork] = {}
         self._rng = random.Random(seed)
@@ -168,8 +192,20 @@ class Engine:
         return self._procedures[ident]
 
     def set_plan(self, plan) -> None:
+        """A new plan for a flight that has not started, or has ended, begins a new flight."""
         with self.lock:
+            flight = self.flight
+            parked = bool(self.last_raw.get("on_ground", True)) and self.last_raw.get("groundspeed_ms", 0.0) < 1
+            if parked and (flight.has_been_airborne or flight.squawk or flight.contacted):
+                self.reset()
             self.flight.plan = plan
+
+    def reset(self) -> None:
+        """Start a new flight: every clearance, contact and counter is forgotten. The plan is kept."""
+        with self.lock:
+            plan = self.flight.plan
+            self.flight = Flight(plan=plan)
+            self._traffic_seen.clear()
 
     @staticmethod
     def active_runways(airport: Airport, issue: Issue | None) -> list[str]:
@@ -261,21 +297,40 @@ class Engine:
     # ---- readbacks ----------------------------------------------------------
 
     @staticmethod
-    def _readback_errors(expect: dict, intent: Intent) -> list[str]:
-        """Items the pilot read back wrongly. Items the pilot left out are not counted:
-        the speech-to-text often drops them, and a false correction is worse than none."""
+    def _readback_heard(expect: dict, intent: Intent) -> set[str]:
+        """The expected items the pilot said something for, right or wrong."""
+        said = {
+            "runway": intent.runway,
+            "squawk": intent.squawk,
+            "frequency": intent.frequency,
+            "qnh": intent.qnh,
+            "altitude": intent.altitude,
+            "heading": intent.heading,
+            "hold_short": intent.runway,
+            "crossing": intent.runway,
+        }
+        return {key for key in expect if said.get(key) is not None}
+
+    @staticmethod
+    def _readback_errors(expect: dict, intent: Intent, own_runway: str | None = None) -> list[str]:
+        """Items the pilot read back wrongly. What was left out is handled separately (see _check_readback)."""
         errors = []
         if "runway" in expect and intent.runway and intent.runway != expect["runway"]:
             errors.append("runway")
+        for key in ("hold_short", "crossing"):
+            # 'Hold short runway 27L' on the way to 27R: either of those runways is a correct thing to say back.
+            if key in expect and intent.runway and intent.runway not in (*expect[key].split("/"), own_runway):
+                errors.append("runway")
         if "squawk" in expect and intent.squawk and intent.squawk != expect["squawk"]:
             errors.append("squawk")
         if "frequency" in expect and intent.frequency and abs(float(intent.frequency) - float(expect["frequency"])) > 0.006:
             errors.append("frequency")
         if "qnh" in expect and intent.qnh and abs(intent.qnh - expect["qnh"]) > (0.011 if expect["qnh"] < 100 else 0.5):
             errors.append("qnh")
-        if "altitude" in expect and intent.altitude and abs(intent.altitude - expect["altitude"]) > 50:
+        if "altitude" in expect and intent.altitude is not None and abs(intent.altitude - expect["altitude"]) > 50:
             errors.append("altitude")
-        if "heading" in expect and intent.heading and abs((intent.heading - expect["heading"] + 180) % 360 - 180) > 2:
+        # Heading zero is north, not a missing value.
+        if "heading" in expect and intent.heading is not None and abs((intent.heading - expect["heading"] + 180) % 360 - 180) > 2:
             errors.append("heading")
         return errors
 
@@ -288,20 +343,41 @@ class Engine:
                 body = body[len(lead) :]
         return body
 
+    @staticmethod
+    def _readback_intent(expect: dict) -> dict:
+        """A complete, correct readback of these items, as the 'Read back' button and the copilot send it."""
+        intent = {"intent": "readback", **expect}
+        for key in ("hold_short", "crossing"):
+            if key in expect:
+                intent["runway"] = expect[key].split("/")[0]
+        return intent
+
     def _check_readback(self, intent: Intent, callsign: str, station) -> Reply | None:
         pending = self.flight.pending
         # A request that happens to carry a number (a level asked for, a runway named) is not a readback.
         if pending is None or intent.intent not in ("readback", "other"):
             return None
-        said_something = any((intent.runway, intent.squawk, intent.frequency, intent.qnh, intent.altitude, intent.heading))
-        if intent.intent != "readback" and not said_something:
+        values = (intent.runway, intent.squawk, intent.frequency, intent.qnh, intent.altitude, intent.heading)
+        if intent.intent != "readback" and all(value is None for value in values):
             return None
-        errors = self._readback_errors(pending.expect, intent)
+        errors = self._readback_errors(pending.expect, intent, self.flight.runway)
         if errors:
             body = self.instruction_body(pending.text, station.callsign)
-            return Reply(f"{callsign}, negative, {body}", pending.expect, pending.on_correct, correction=True)
+            return Reply(
+                f"{callsign}, negative, {body}", pending.expect, pending.on_correct, correction=True, event="readback_corrected"
+            )
         if intent.intent != "readback":
             return None  # something else that happens to mention a correct value
+        # "Roger" is not a readback. What was left out is asked for, once: after that the readback is
+        # taken as given, because speech recognition does drop words and a loop helps nobody.
+        heard = self._readback_heard(pending.expect, intent)
+        missing = [key for key in pending.expect if key in CRITICAL and key not in heard]
+        if missing and not pending.asked:
+            pending.asked = True
+            items = say.join([READBACK_WORDS[key] for key in missing])
+            return Reply(
+                f"{callsign}, read back {items}", pending.expect, pending.on_correct, correction=True, event="readback_incomplete"
+            )
         self.flight.pending = None
         return Reply(f"{callsign}, {pending.on_correct}" if pending.on_correct else "")
 
@@ -415,6 +491,12 @@ class Engine:
 
         # Clearance: delivery, or the next station down when the airport has no delivery.
         gives_clearance = self._gives_clearance(station, kinds, raw)
+        if intent.intent == "request_clearance" and on_ground and flight.has_been_airborne and raw.get("groundspeed_ms", 0.0) < 1:
+            # Landed, parked, and asking for a clearance: this is the next leg.
+            self.reset()
+            flight = self.flight
+            flight.contacted.add(station.key)
+            flight.origin_ident = airport.ident
         if intent.intent in ("request_circuits", "request_special_vfr") and on_ground:
             # Both are VFR departure clearances with something extra.
             if not gives_clearance and station.kind in ("ground", "tower"):
@@ -603,7 +685,7 @@ class Engine:
         if offset < ON_RUNWAY_NM:
             flight.crossings.pop(0)
             flight.pending = None
-            return Reply(f"{callsign}, you were to hold short of runway {spoken}, expedite crossing")
+            return Reply(f"{callsign}, you were to hold short of runway {spoken}, expedite crossing", event="runway_incursion")
         if offset < HOLDING_SHORT_NM and raw.get("groundspeed_ms", 99.0) < 1.0 and flight.pending is None:
             return self._crossing(station, raw, callsign, "", faa, asked=False)
         return None
@@ -706,7 +788,7 @@ class Engine:
             return vfr.inbound(self, intent, station, issue, raw, callsign, hello, faa, runway, pressure_tail)
         flight.touch_and_go = flight.touch_and_go or intent.touch_and_go or intent.intent == "request_touch_and_go"
         if intent.intent == "going_around":
-            flight.phase = Phase.AIRBORNE
+            flight.phase, flight.go_around_told = Phase.AIRBORNE, False
             if flight.rules == "IFR" or flight.arrival:
                 return ifr.go_around(self, station, callsign)
             return Reply(f"{callsign}, roger, rejoin the circuit runway {spoken}, report downwind", {"runway": runway})
@@ -764,10 +846,21 @@ class Engine:
     def _observe(self, raw: dict) -> None:
         """Follow the flight from the sim: takeoff, landing, and where it was parked."""
         flight = self.flight
+        self.last_raw = raw
         if "on_ground" not in raw:
             return
         on_ground = bool(raw["on_ground"])
         speed = raw.get("groundspeed_ms", 0.0)
+        if "lat" in raw:
+            # On the ground in one look and somewhere else on the ground (or far away in the air) in the next:
+            # the pilot moved the aircraft in the sim. That is a new flight.
+            before, flight.seen_at = flight.seen_at, (raw["lat"], raw["lon"], on_ground)
+            if before and before[2]:
+                moved = distance_nm(before[0], before[1], raw["lat"], raw["lon"])
+                if moved > (REPOSITION_NM if on_ground else REPOSITION_AIRBORNE_NM):
+                    self.reset()
+                    flight = self.flight
+                    flight.seen_at = (raw["lat"], raw["lon"], on_ground)
         if on_ground and flight.origin is None and speed < 1 and "lat" in raw and not flight.has_been_airborne:
             flight.origin = (raw["lat"], raw["lon"])
         if not on_ground and raw.get("agl_m", 0.0) > 15:
@@ -810,7 +903,10 @@ class Engine:
             ):
                 flight.reminded = True
                 body = self.instruction_body(flight.pending.text, station.callsign)
-                return Reply(f"{callsign}, {station.callsign}, I say again, {body}", flight.pending.expect, correction=True)
+                return Reply(
+                    f"{callsign}, {station.callsign}, I say again, {body}", flight.pending.expect, correction=True,
+                    event="readback_missed",
+                )  # fmt: skip
             if station.kind in ifr.RADAR_KINDS:
                 reply = ifr.tick(self, station, issue, raw, magnetic_variation(raw), callsign)
                 if reply:
@@ -840,7 +936,26 @@ class Engine:
                 if gone:
                     flight.last_said[key] = gone.text
                     return gone
-            if flight.awaiting_landing and airborne and miles is not None and miles <= CLEAR_TO_LAND_NM:
+            occupied = self.traffic_enabled and flight.runway is not None and traffic.on_runway(raw, airport, flight.runway)
+            if (
+                flight.phase == Phase.LANDING_CLEARED
+                and airborne
+                and occupied
+                and miles is not None
+                and miles <= LATE_GO_AROUND_NM
+                and not flight.go_around_told
+            ):
+                # Cleared to land, and now something is on the runway: the clearance does not stand.
+                flight.go_around_told, flight.phase, flight.pending = True, Phase.AIRBORNE, None
+                reply = Reply(f"{callsign}, go around, I say again, go around, traffic on the runway", event="go_around")
+            elif flight.phase == Phase.TAKEOFF_CLEARED and not airborne and occupied and raw.get("groundspeed_ms", 0.0) < 15:
+                flight.phase, flight.waiting_takeoff, flight.pending = Phase.TAXI_OUT, True, None
+                reply = Reply(
+                    f"{callsign}, hold position, cancel takeoff clearance, I say again, cancel takeoff clearance, "
+                    "traffic on the runway",
+                    event="takeoff_cancelled",
+                )
+            elif flight.awaiting_landing and airborne and miles is not None and miles <= CLEAR_TO_LAND_NM:
                 blocked = self.traffic_enabled and (
                     traffic.on_runway(raw, airport, flight.runway)
                     or traffic.on_final(raw, airport, flight.runway, max(miles - 0.5, 0.0)) is not None
@@ -852,7 +967,7 @@ class Engine:
                     )
                 elif miles <= GO_AROUND_NM and not flight.go_around_told:
                     flight.awaiting_landing, flight.go_around_told = False, True
-                    reply = Reply(f"{callsign}, go around, I say again, go around, traffic on the runway")
+                    reply = Reply(f"{callsign}, go around, I say again, go around, traffic on the runway", event="go_around")
             elif flight.waiting_takeoff and not airborne and flight.runway:
                 clear = traffic.on_final(raw, airport, flight.runway, traffic.FINAL_BLOCKS_NM) is None and not traffic.on_runway(
                     raw, airport, flight.runway
@@ -919,7 +1034,7 @@ class Engine:
                     {
                         "label": "Read back",
                         "text": f"{said[0].upper()}{said[1:]}, {callsign}",
-                        "intent": {"intent": "readback", **flight.pending.expect},
+                        "intent": self._readback_intent(flight.pending.expect),
                         "primary": True,
                     }
                 )
@@ -985,6 +1100,20 @@ class Engine:
             add("Radio check", "radio check", "radio_check")
             return items
 
+    def _level_label(self, flight) -> str | None:
+        """The cleared level as the controller means it: a flight level above the transition altitude, else feet."""
+        if flight.cleared_ft is None:
+            return None
+        near = flight.arrival.airport if flight.arrival else flight.origin_ident
+        if flight.descent_given and flight.plan and flight.plan.destination:
+            near = flight.plan.destination
+        faa = uses_faa_style(near or "")
+        procedures = self.procedures(near) if near else None
+        transition = 18000 if faa else ((procedures.transition_altitude_ft if procedures else None) or 6000)
+        if flight.cleared_ft > transition:
+            return f"FL{flight.cleared_ft // 100:03d}"
+        return f"{flight.cleared_ft:,} ft"
+
     def summary(self) -> dict:
         """What the engine knows, for the app and for the free-form fallback's context."""
         flight = self.flight
@@ -1009,6 +1138,7 @@ class Engine:
             "next_frequency": flight.next_frequency,
             "holding": flight.arrival.hold.fix if flight.arrival and flight.arrival.hold else None,
             "service": flight.service if flight.following else None,
+            "cleared_level": self._level_label(flight),
             "stand": flight.stand.name if flight.stand and flight.stand.name else None,
             "hold_short": flight.crossings[0].split("/")[0] if flight.crossings else None,
         }

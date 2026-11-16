@@ -18,6 +18,22 @@ from .weather import Weather, from_snapshot
 from .xpbridge import magnetic_variation, tuned_khz
 
 
+class SimClock:
+    """Seconds of simulated flight: it stops while the sim is paused, so a hold or a reminder does not run out."""
+
+    def __init__(self):
+        self.running = True
+        self._total = 0.0
+        self._since = time.monotonic()
+
+    def __call__(self) -> float:
+        now = time.monotonic()
+        if self.running:
+            self._total += now - self._since
+        self._since = now
+        return self._total
+
+
 def current_station(db: AirportDB, state: dict) -> tuple[int | None, Station | None]:
     """(tuned frequency in kHz, station in range on it)."""
     khz = tuned_khz(state)
@@ -126,6 +142,11 @@ class AtisBroadcaster(threading.Thread):
         if not self.bridge.connected or self.busy.is_set():
             return
         state = self.bridge.snapshot()
+        clock = getattr(self.engine, "clock", None) if self.engine else None
+        if clock is not None:
+            clock.running = not state.get("paused")
+        if state.get("paused"):
+            return  # the sim is paused: controllers do not carry on without the aircraft
         khz, station = current_station(self.db, state)
         if station and station.kind != "atis" and self.engine:
             if not self._unprompted(station, state):
@@ -159,7 +180,10 @@ class AtisBroadcaster(threading.Thread):
         if not reply or not reply.text:
             return False
         self._chatter_until = 0.0
-        self.emit({"type": "atc", "station": station.callsign, "text": reply.text, "unprompted": True})
+        event = {"type": "atc", "station": station.callsign, "text": reply.text, "unprompted": True}
+        if reply.event:
+            event["event"] = reply.event
+        self.emit(event)
         samples, rate = self.tts.speak(reply.text, **station_voice(self.tts, station))
         if self.config.radio.enabled:
             samples = radio_effect(samples, rate, self.config.radio.noise)

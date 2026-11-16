@@ -10,7 +10,24 @@ from __future__ import annotations
 from datetime import datetime
 
 # (what to look for in a controller transmission, what it means, points lost, kind)
+# The engine names what each of its transmissions is (Reply.event). event -> (what it means, points lost, kind)
+EVENTS = {
+    "readback_corrected": ("Readback corrected by the controller", 6, "readback"),
+    "readback_incomplete": ("Readback incomplete: asked to read back what was left out", 2, "incomplete"),
+    "readback_missed": ("Instruction not read back, and repeated", 4, "missed"),
+    "level_bust": ("Level bust: you went through your cleared level", 15, "level"),
+    "low_altitude": ("Low altitude alert", 20, "terrain"),
+    "runway_incursion": ("Runway entered without a crossing clearance", 25, "runway"),
+    "restriction_missed": ("Procedure restriction missed", 6, "restriction"),
+    "heading_not_flown": ("Assigned heading not flown", 5, "heading"),
+    "off_route": ("Off the cleared route", 6, "route"),
+    "go_around": ("Sent around by the tower", 0, "go_around"),
+    "takeoff_cancelled": ("Takeoff clearance cancelled by the tower", 0, "go_around"),
+}
+# For transmissions with no event (older logs): what to look for in the words. Order matters: a go-around
+# also says "I say again".
 FINDINGS = (
+    ("go around, I say again", "Sent around by the tower", 0, "go_around"),
     (", negative, ", "Readback corrected by the controller", 6, "readback"),
     ("I say again, ", "Instruction not read back, and repeated", 4, "missed"),
     ("check your level", "Level bust: you went through your cleared level", 15, "level"),
@@ -19,7 +36,6 @@ FINDINGS = (
     ("you were to hold short", "Runway entered without a crossing clearance", 25, "runway"),
     ("you were to be level", "Arrival restriction missed", 6, "restriction"),
     ("you were to cross", "Departure crossing restriction missed", 6, "restriction"),
-    ("go around, I say again", "Sent around by the tower", 0, "go_around"),
 )
 HEADING_PROMPT = "fly heading"  # unprompted, with nothing else: the assigned heading was not being flown
 DEAD_CALL = "nobody answers"
@@ -38,6 +54,12 @@ def review(records) -> dict:
     lost = 0
     for entry in spoken:
         text = entry.get("text", "")
+        if entry.get("event"):
+            if entry["event"] in EVENTS:
+                meaning, points, kind = EVENTS[entry["event"]]
+                findings.append({"time": _clock(entry["t"]), "kind": kind, "text": meaning, "said": text})
+                lost += points
+            continue
         for needle, meaning, points, kind in FINDINGS:
             if needle in text:
                 findings.append({"time": _clock(entry["t"]), "kind": kind, "text": meaning, "said": text})

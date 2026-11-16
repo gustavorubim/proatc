@@ -45,7 +45,14 @@ NEXT_STEP_WITHIN_FT = 2000  # the next step is given this close to the cleared l
 LOW_AGL_FT = 1000  # descending below this height above the ground, away from the approach, draws an alert
 BUST_FT = 400  # how far through a cleared level before the controller says something
 HEADING_GRACE_S = 45  # time to roll onto an assigned heading before being asked about it
-STAGES = ["descend", "downwind", "base", "intercept", "tower"]
+STAGES = ["descend", "downwind", "base", "intercept", "procedure", "tower"]
+ON_APPROACH = ("intercept", "procedure")  # cleared for the approach: by vectors, or by its own initial fix
+PROCEDURAL_KINDS = "RHP"  # R NAV, R N P and G P S approaches are flown from an initial fix when one is published
+PROCEDURE_WITHIN_NM = 45
+OFF_TRACK_NM = 4.0
+OFF_TRACK_AFTER_S = 45
+CROSSING_NM = 2.5
+SPEED_MARGIN_KT = 15
 SPEEDS_KT = {"descend": 250, "downwind": 220, "base": 180, "intercept": 160}
 JOIN_NM = (9, 10, 12)  # how far out final is joined; it differs from one arrival to the next
 EXTEND_UP_TO_NM = 8  # a downwind leg is extended at most this far beyond the usual base turn
@@ -54,6 +61,7 @@ VISUAL_VISIBILITY_SM = 5
 VISUAL_CEILING_FT = 3000
 CIRCLING_VISIBILITY_SM = 3
 CIRCLING_CEILING_FT = 1500
+MAX_TAILWIND_KT = 7  # an approach to the other end is used straight in with no more tailwind than this
 DIVERSION_TOP_FT = 24000
 FAMILY_WORDS = {"ILS": "I L S", "LOC": "localiser", "RNAV": "R NAV", "VOR": "V O R", "NDB": "N D B"}
 
@@ -80,6 +88,10 @@ class Arrival:
     go_arounds: int = 0
     extended: bool = False  # told the downwind leg is being extended for traffic
     circling_given: bool = False
+    procedure: object | None = None  # procedures.Approach: the approach being flown, with its initial fixes
+    via: str | None = None  # the initial approach fix an approach flown as a procedure starts at
+    unavailable: bool = False  # no instrument approach, and weather that rules out a visual one
+    unavailable_told: bool = False
 
     @property
     def flown(self) -> str:
@@ -115,10 +127,17 @@ def _faa(station) -> bool:
     return _centre_faa(station) if station.kind == "center" else uses_faa_style(station.airport.ident)
 
 
-def _reply(engine, text: str, expect: dict | None = None):
+def _reply(engine, text: str, expect: dict | None = None, event: str = ""):
     from .engine import Reply
 
-    return Reply(text, expect or {})
+    return Reply(text, expect or {}, event=event)
+
+
+def safe_floor_ft(engine, raw: dict) -> int:
+    """The lowest level that may be given where the aircraft is: the minimum off-route altitude of the terrain below."""
+    if not engine.navfix or "lat" not in raw:
+        return 0
+    return int(engine.navfix.grid_safe_ft(raw["lat"], raw["lon"]) or 0)
 
 
 def _contact_word(faa: bool) -> str:
@@ -154,7 +173,10 @@ def clearance(engine, station, issue, raw, callsign, hello, faa, atis_part, on_c
         initial = min(initial, plan.cruise_ft)
     flight.rules, flight.destination, flight.runway = "IFR", where, runway
     flight.sid, flight.cleared_ft = (sid.name if sid else None), initial
-    flight.sid_constraints = restrictions.build_sid(engine, sid, airport) if sid else []
+    fixes = route_fixes(plan.route)
+    flight.sid_constraints = restrictions.build_sid(engine, sid, airport, runway, fixes) if sid else []
+    track = restrictions.path(engine, sid, "SID", airport, runway, fixes) if sid else []
+    flight.sid_path = [(airport.lat, airport.lon), *track] if track else []
     flight.squawk = flight.squawk if flight.squawk and flight.squawk not in ("1200", "7000") else _squawk(engine._rng)
 
     level = _level(engine, initial, airport.ident, faa)
@@ -252,9 +274,25 @@ def _climb(engine, target: int, ident: str | None, faa: bool, callsign: str, lea
     return _reply(engine, f"{callsign}, {lead}{verb} {_level(engine, target, ident, faa)}", {"altitude": target})
 
 
+def _destination_pressure(engine, ident: str | None, target: int, faa: bool) -> str:
+    """', Q N H one zero zero niner' with the first descent to an altitude, from the destination's own weather report."""
+    flight, raw = engine.flight, engine.last_raw
+    if not ident or flight.qnh_told or not engine.metars or raw.get("wx_source") != 1:
+        return ""
+    airport = engine.db.airport(ident)
+    if airport is None or target > _transition_ft(engine, ident, faa):
+        return ""
+    reported = engine.metars.weather(ident, airport.elev_ft)
+    if not reported:
+        return ""
+    flight.qnh_told = True
+    return f", {_sentences(atis_text._pressure(reported, faa))}"
+
+
 def _descend(engine, target: int, ident: str | None, faa: bool, callsign: str, lead: str, tail: str = ""):
     flight = engine.flight
     flight.cleared_ft, flight.descent_given = target, True
+    tail = f"{_destination_pressure(engine, ident, target, faa)}{tail}"
     verb = "descend and maintain" if faa else "descend"
     return _reply(engine, f"{callsign}, {lead}{verb} {_level(engine, target, ident, faa)}{tail}", {"altitude": target})
 
@@ -305,8 +343,12 @@ def _star(engine, destination: Airport):
     """Choose the STAR and place its level restrictions, once."""
     flight, plan = engine.flight, engine.flight.plan
     if flight.constraints is None:
-        flight.star_procedure = choose_star(engine.procedures(destination.ident), plan.route, plan.star) if plan else None
-        flight.constraints = restrictions.build(engine, flight.star_procedure, destination) if flight.star_procedure else []
+        star = choose_star(engine.procedures(destination.ident), plan.route, plan.star) if plan else None
+        flight.star_procedure = star
+        fixes = route_fixes(plan.route) if plan else []
+        runway = plan.arrival_runway if plan else None
+        flight.constraints = restrictions.build(engine, star, destination, runway, fixes) if star else []
+        flight.star_path = restrictions.path(engine, star, "STAR", destination, runway, fixes) if star else []
     return flight.star_procedure
 
 
@@ -340,7 +382,14 @@ def _center(engine, intent, station, raw, callsign, hello):
     lead = f"{hello}{_contact_word(faa)}, " if hello else ""
     if intent.intent == "request_descent":
         if intent.altitude and intent.altitude < _feet(raw) - 500:
-            return _descend(engine, int(intent.altitude), None, faa, callsign, lead)
+            # A level the pilot asks for is checked against the terrain like any other.
+            wanted, floor = int(intent.altitude), int(math.ceil(safe_floor_ft(engine, raw) / 1000) * 1000)
+            if wanted >= floor:
+                return _descend(engine, wanted, None, faa, callsign, lead)
+            low = _level(engine, floor, None, faa)
+            if floor >= _feet(raw) - 500:
+                return _reply(engine, f"{callsign}, {lead}unable lower, the minimum safe altitude in your area is {low}")
+            return _descend(engine, floor, None, faa, callsign, f"{lead}unable {_level(engine, wanted, None, faa)} due terrain, ")
         return _descent(engine, station, raw, callsign, lead, faa)
     if intent.intent == "request_climb":
         target = int(intent.altitude) if intent.altitude else cruise
@@ -453,11 +502,19 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
     procedures = engine.procedures(airport.ident)
     approach = choose_approach(procedures, runway)
     flown = runway
-    if approach is None and _weather_allows(issue, CIRCLING_VISIBILITY_SM, CIRCLING_CEILING_FT):
-        # No approach to the runway in use: fly one to another runway and circle.
+    unavailable = False
+    if approach is None:
+        # No approach to the runway in use. In order: circle from another runway's approach if the weather
+        # allows circling; land straight in from that approach if the tailwind is acceptable; a visual
+        # approach if the weather allows one; otherwise there is no way in, and the pilot is told so.
         others = [ident for rw in airport.runways for ident, _ in rw.ends() if ident != runway]
-        approach = circling_approach(procedures, others)
-        flown = approach.runway if approach else runway
+        other = circling_approach(procedures, others)
+        if other and _weather_allows(issue, CIRCLING_VISIBILITY_SM, CIRCLING_CEILING_FT):
+            approach, flown = other, other.runway
+        elif other and _tailwind_kt(airport, other.runway, issue) <= MAX_TAILWIND_KT:
+            approach, flown, runway = other, other.runway, other.runway
+        elif issue is not None and not _weather_allows(issue, VISUAL_VISIBILITY_SM, VISUAL_CEILING_FT):
+            unavailable = True
     platform = approach.platform_ft if approach and approach.platform_ft else int(math.ceil((airport.elev_ft + 3000) / 500) * 500)
     course = next(heading for rw in airport.runways for ident, heading in rw.ends() if ident == flown)
     # Final is joined no closer than a three degree path from the joining altitude allows.
@@ -466,9 +523,17 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
     flight.arrival = Arrival(
         airport.ident, runway, approach.spoken if approach else "visual", platform, course, engine._threshold(airport, flown),
         final_nm=min(join, 16), approach_runway=flown if flown != runway else None,
-        missed_ft=approach.missed_ft if approach else None, go_arounds=flight.go_arounds,
+        missed_ft=approach.missed_ft if approach else None, go_arounds=flight.go_arounds, unavailable=unavailable,
+        procedure=approach,
     )  # fmt: skip
     return flight.arrival
+
+
+def _tailwind_kt(airport: Airport, runway: str, issue) -> float:
+    if issue is None:
+        return 0.0
+    course = next(heading for rw in airport.runways for ident, heading in rw.ends() if ident == runway)
+    return -issue.weather.wind_kt * math.cos(math.radians(issue.weather.wind_dir_true - course))
 
 
 def _weather_allows(issue, visibility_sm: float, ceiling_ft: float) -> bool:
@@ -503,7 +568,19 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     position = locate(raw["lat"], raw["lon"], arrival.threshold, arrival.course_true)
     if arrival.hold:
         return None
+    if arrival.unavailable:
+        # Nothing can be cleared: no vectors toward an approach that does not exist.
+        if arrival.unavailable_told:
+            return None
+        arrival.unavailable_told = True
+        runway = say.runway(arrival.runway)
+        text = f"no instrument approach is available for runway {runway} and the weather is below visual minima, say intentions"
+        return _reply(engine, f"{callsign}, {lead}{text}", event="no_approach")
     safe = (engine.navfix.airport_safe_ft(airport.ident) if engine.navfix else None) or 0
+    if arrival.stage in (None, "descend") and position.distance_nm <= PROCEDURE_WITHIN_NM:
+        procedural = _via_initial_fix(engine, station, issue, raw, callsign, lead, position, safe, faa)
+        if procedural:
+            return procedural
     # Another aircraft on final where this one would turn in: the downwind leg runs on.
     extend = (
         engine.traffic_enabled
@@ -567,6 +644,54 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     return _reply(engine, f"{callsign}, {lead}{', '.join(parts)}", expect)
 
 
+def _initial_fix(engine, airport, arrival, raw, position):
+    """(fix, crossing altitude, position) of the published initial approach fix that suits where the aircraft is."""
+    approach = arrival.procedure
+    if not approach or approach.kind not in PROCEDURAL_KINDS or not engine.navfix:
+        return None
+    best = None
+    for fix, altitude in approach.initial_fixes():
+        where = engine.navfix.position(fix, airport.lat, airport.lon, 80)
+        if not where:
+            continue
+        out = distance_nm(*where, *arrival.threshold)
+        if out < 5 or position.distance_nm < out - 3:
+            continue  # too close in to be a way in, or already behind the aircraft
+        miles = distance_nm(raw["lat"], raw["lon"], *where)
+        if best is None or miles < best[0]:
+            best = (miles, fix, altitude, where)
+    return best[1:] if best else None
+
+
+def _via_initial_fix(engine, station, issue, raw, callsign, lead, position, safe, faa):
+    """An R NAV approach is not vectored: direct to its initial approach fix, and cleared for the procedure."""
+    flight, arrival, airport = engine.flight, engine.flight.arrival, station.airport
+    found = _initial_fix(engine, airport, arrival, raw, position)
+    if not found:
+        return None
+    fix, crossing_ft, where = found
+    word = _fix_word(engine, fix, *where)
+    arrival.stage, arrival.via, arrival.heading, flight.direct_to = "procedure", fix, None, fix
+    altitude = max(crossing_ft or arrival.platform_ft, int(math.ceil(safe / 100) * 100))
+    parts = [f"{'proceed' if faa else 'route'} direct {word}"]
+    expect: dict = {}
+    cleared = flight.cleared_ft if flight.cleared_ft is not None else _feet(raw)
+    if altitude < min(cleared, _feet(raw) + 200):
+        flight.cleared_ft, flight.descent_given = altitude, True
+        transition = _transition_ft(engine, airport.ident, faa)
+        text = f"descend {'and maintain ' if faa else ''}{say.level(altitude, transition, faa)}"
+        if altitude <= transition and not arrival.qnh_given and issue:
+            arrival.qnh_given = True
+            text += f", {engine._pressure(issue, faa)[0]}"
+        parts.append(text)
+        expect["altitude"] = altitude
+    parts.append(f"cleared {arrival.words()} via {word}")
+    parts.append("report established")
+    if not arrival.approach_runway:
+        expect["runway"] = arrival.runway
+    return _reply(engine, f"{callsign}, {lead}{', '.join(parts)}", expect)
+
+
 def _to_tower(engine, station, callsign):
     arrival = engine.flight.arrival
     arrival.stage = "tower"
@@ -582,7 +707,7 @@ def _arrival(engine, intent, station, issue, raw, variation, callsign, hello):
     if "lat" not in raw:
         return None
     if intent.intent == "established":
-        if flight.arrival and flight.arrival.stage == "intercept":
+        if flight.arrival and flight.arrival.stage in ON_APPROACH:
             return _to_tower(engine, station, callsign)
         return None
     if intent.intent == "cancel_hold":
@@ -631,6 +756,7 @@ def _visual(engine, station, issue, raw, callsign, lead: str):
             return _reply(engine, f"{callsign}, {lead}roger, continue present heading")
         return _reply(engine, f"{callsign}, {lead}unable visual approach, expect {arrival.words()}")
     arrival.approach, arrival.approach_runway, arrival.hold, arrival.heading = "visual", None, None, None
+    arrival.procedure = None
     arrival.course_true = next(heading for rw in airport.runways for ident, heading in rw.ends() if ident == arrival.runway)
     arrival.threshold, arrival.stage = engine._threshold(airport, arrival.runway), "tower"
     text = f"{callsign}, {lead}cleared visual approach runway {say.runway(arrival.runway)}"
@@ -656,7 +782,9 @@ def _other_approach(engine, intent, station, callsign, lead: str):
         return _reply(
             engine, f"{callsign}, {lead}unable, no {FAMILY_WORDS[family]} approach runway {runway}, expect {arrival.words()}"
         )
-    arrival.approach, arrival.missed_ft = found.spoken, found.missed_ft
+    arrival.approach, arrival.missed_ft, arrival.procedure = found.spoken, found.missed_ft, found
+    # The next tick starts again for this approach: by its initial fix if it has one, otherwise by vectors.
+    arrival.stage, arrival.heading = ("descend" if arrival.stage else None), None
     if found.platform_ft:
         arrival.platform_ft = found.platform_ft
     return _reply(engine, f"{callsign}, {lead}roger, expect {arrival.words()}")
@@ -742,6 +870,7 @@ def go_around(engine, station, callsign):
         return None
     faa = uses_faa_style(airport.ident)
     arrival.stage, arrival.heading, arrival.speed_kt, arrival.extended = None, None, None, False
+    arrival.via, flight.direct_to = None, None
     arrival.go_arounds += 1
     flight.go_arounds = arrival.go_arounds
     # The published missed approach when the sim's data has one, otherwise straight ahead to the joining altitude.
@@ -786,6 +915,47 @@ def _centre_handoff(engine, raw, callsign, exclude=None):
     return _reply(engine, text, {"frequency": f"{station.khz / 1000:.3f}"})
 
 
+def _crossing_missed(engine, crossing, raw, ident: str, faa: bool, callsign: str):
+    """What the controller says when a SID crossing is flown outside its restriction: too low, too high or too fast."""
+    feet = _feet(raw)
+    word = _fix_word(engine, crossing.fix, crossing.lat, crossing.lon)
+    lower = crossing.lower_ft
+    if crossing.altitude_ft and lower and feet < lower - 400:
+        level = _level(engine, lower, ident, faa)
+        return _reply(
+            engine, f"{callsign}, you were to cross {word} at or above {level}, expedite climb", event="restriction_missed"
+        )
+    if crossing.altitude_ft and crossing.upper and feet > crossing.altitude_ft + 400:
+        level = _level(engine, crossing.altitude_ft, ident, faa)
+        return _reply(engine, f"{callsign}, you were to cross {word} at or below {level}", event="restriction_missed")
+    if crossing.speed_kt and raw.get("ias_kt", 0.0) > crossing.speed_kt + SPEED_MARGIN_KT:
+        text = f"{callsign}, speed restriction {say.digits(crossing.speed_kt)} knots at {word}, reduce speed"
+        return _reply(engine, text, event="restriction_missed")
+    return None
+
+
+def _route_watch(engine, raw, callsign, points, name: str | None, kind: str):
+    """Tell a flight that has left the track of its SID or STAR, once, after it has been off it for a while."""
+    flight = engine.flight
+    if not points or not name or name in flight.off_route_called or flight.direct_to or flight.deviating or flight.emergency:
+        return None
+    gap = restrictions.off_track_nm(points, raw["lat"], raw["lon"])
+    if gap is None or gap <= OFF_TRACK_NM:
+        flight.off_route_since = None
+        return None
+    if flight.off_route_since is None:
+        flight.off_route_since = engine.now()
+        return None
+    if engine.now() - flight.off_route_since < OFF_TRACK_AFTER_S:
+        return None
+    flight.off_route_called.add(name)
+    flight.off_route_since = None
+    text = (
+        f"{callsign}, you appear to be {say.digits(round(gap))} miles off the {kind} track, confirm you are following the {kind}"
+    )
+    return _reply(engine, text, event="off_route")
+
+
 def _watch(engine, station, raw, callsign):
     """Things a radar controller notices: a level bust, an assigned heading not being flown."""
     flight, arrival = engine.flight, engine.flight.arrival
@@ -798,7 +968,7 @@ def _watch(engine, station, raw, callsign):
         if climbing_through or descending_through:
             flight.bust_called_for = cleared
             text = f"{callsign}, check your {'altitude' if faa else 'level'}, cleared {_level(engine, cleared, ident, faa)}"
-            return _reply(engine, text)  # a prompt to correct, not an instruction to read back
+            return _reply(engine, text, event="level_bust")  # a prompt to correct, not an instruction to read back
     height = raw["agl_m"] / 0.3048 if "agl_m" in raw else None
     if height is not None:
         on_approach = arrival is not None and arrival.stage in ("intercept", "tower")
@@ -808,7 +978,7 @@ def _watch(engine, station, raw, callsign):
             flight.low_altitude_called = True
             safe = engine.navfix.grid_safe_ft(raw["lat"], raw["lon"]) if engine.navfix else None
             tail = f", minimum safe altitude {say.altitude(safe)} feet" if safe else ""
-            return _reply(engine, f"{callsign}, low altitude alert, check your altitude immediately{tail}")
+            return _reply(engine, f"{callsign}, low altitude alert, check your altitude immediately{tail}", event="low_altitude")
     if (
         arrival
         and arrival.heading is not None
@@ -819,7 +989,9 @@ def _watch(engine, station, raw, callsign):
         and abs((raw["heading_mag"] - arrival.heading + 180) % 360 - 180) > 25
     ):
         arrival.heading_asked = True
-        return _reply(engine, f"{callsign}, fly heading {say.heading(arrival.heading)}", {"heading": arrival.heading})
+        return _reply(
+            engine, f"{callsign}, fly heading {say.heading(arrival.heading)}", {"heading": arrival.heading}, "heading_not_flown"
+        )
     # A Basic Service gives no traffic information; every other service, and every IFR flight, gets it.
     if engine.traffic_enabled and not (flight.following and flight.service == "basic"):
         call = traffic.advisory(raw, engine._traffic_seen, engine.now())
@@ -844,12 +1016,14 @@ def tick(engine, station, issue, raw, variation, callsign):
     if part == "departure":
         airport = station.airport
         for crossing in flight.sid_constraints or []:
-            if not crossing.passed and crossing.miles(raw) <= 2.5:
+            if not crossing.passed and crossing.miles(raw) <= CROSSING_NM:
                 crossing.passed = True
-                if _feet(raw) < crossing.altitude_ft - 400:
-                    level = _level(engine, crossing.altitude_ft, airport.ident, faa)
-                    word = _fix_word(engine, crossing.fix, crossing.lat, crossing.lon)
-                    return _reply(engine, f"{callsign}, you were to cross {word} at or above {level}, expedite climb")
+                missed = _crossing_missed(engine, crossing, raw, airport.ident, faa, callsign)
+                if missed:
+                    return missed
+        strayed = _route_watch(engine, raw, callsign, flight.sid_path, flight.sid, "departure")
+        if strayed:
+            return strayed
         if flight.diverting and plan and plan.destination and not flight.told_approach:
             # A short diversion never reaches a centre: straight to the other airport's approach.
             other = engine.db.airport(plan.destination)
@@ -888,12 +1062,31 @@ def tick(engine, station, issue, raw, variation, callsign):
             if crossed and restrictions.late(crossed, _feet(raw)):
                 level = _level(engine, crossed.altitude_ft, destination.ident, faa)
                 word = _fix_word(engine, crossed.fix, crossed.lat, crossed.lon)
-                return _reply(engine, f"{callsign}, you were to be level {level} by {word}, expedite descent")
+                return _reply(
+                    engine, f"{callsign}, you were to be level {level} by {word}, expedite descent", event="restriction_missed"
+                )
+            if crossed and crossed.issued and crossed.speed_kt and raw.get("ias_kt", 0.0) > crossed.speed_kt + SPEED_MARGIN_KT:
+                word = _fix_word(engine, crossed.fix, crossed.lat, crossed.lon)
+                text = f"{callsign}, speed restriction {say.digits(crossed.speed_kt)} knots at {word}, reduce speed"
+                return _reply(engine, text, event="restriction_missed")
+            if flight.star and not (flight.arrival and flight.arrival.stage):
+                strayed = _route_watch(engine, raw, callsign, flight.star_path, flight.star, "arrival")
+                if strayed:
+                    return strayed
             ahead = restrictions.next_ahead(flight.constraints, _feet(raw))
-            if ahead and not ahead.issued and restrictions.due(ahead, raw, _feet(raw)):
+            if ahead and not ahead.issued and ahead.altitude_ft >= 60000:
+                # A speed limit with no level: said as the waypoint comes up.
+                if ahead.miles(raw) <= 25:
+                    ahead.issued = True
+                    word = _fix_word(engine, ahead.fix, ahead.lat, ahead.lon)
+                    speed = say.digits(ahead.speed_kt)
+                    star = _announce_star(engine, destination)
+                    return _reply(engine, f"{callsign}, cross {word} at {speed} knots or less{star}")
+            elif ahead and not ahead.issued and restrictions.due(ahead, raw, _feet(raw)):
                 ahead.issued = True
                 word = _fix_word(engine, ahead.fix, ahead.lat, ahead.lon)
-                tail = f", level by {word}{_announce_star(engine, destination)}"
+                speed = f", speed {say.digits(ahead.speed_kt)} knots or less at {word}" if ahead.speed_kt else ""
+                tail = f", level by {word}{speed}{_announce_star(engine, destination)}"
                 return _descend(engine, ahead.altitude_ft, destination.ident, faa, callsign, "", tail)
             if any(not c.passed for c in flight.constraints):
                 return None  # the arrival's restrictions set the pace
@@ -915,7 +1108,7 @@ def tick(engine, station, issue, raw, variation, callsign):
         return None
     if not arrival or arrival.airport != station.airport.ident or arrival.stage in (None, "tower"):
         return None
-    if arrival.stage == "intercept":
+    if arrival.stage in ON_APPROACH:
         position = locate(raw["lat"], raw["lon"], arrival.threshold, arrival.course_true)
         if established(position, arrival.final_nm) or 0 < position.along_nm < arrival.final_nm - 4:
             return _to_tower(engine, station, callsign)
@@ -947,7 +1140,7 @@ def suggestions(engine, station, raw, add, callsign) -> None:
         elif not flight.arrival or flight.arrival.stage in (None, "descend"):
             add("Request hold", "request holding", "request_hold")
         arrival = flight.arrival
-        if arrival and arrival.stage == "intercept":
+        if arrival and arrival.stage in ON_APPROACH:
             add("Established", f"established {arrival.approach} runway {say.runway(arrival.flown)}", "established")
         if arrival and arrival.stage in ("descend", "downwind", "base", "intercept") and arrival.approach != "visual":
             add("Field in sight", "field in sight, request visual approach", "request_visual")
@@ -956,7 +1149,7 @@ def suggestions(engine, station, raw, add, callsign) -> None:
             if choose_approach(engine.procedures(station.airport.ident), arrival.flown, other):
                 words = FAMILY_WORDS[other]
                 add(f"Request {other} approach", f"request the {words} approach", "request_approach", approach=other)
-        if flight.go_arounds and plan and plan.alternate:
+        if (flight.go_arounds or (arrival and arrival.unavailable)) and plan and plan.alternate:
             add(f"Divert to {plan.alternate}", f"request diversion to {plan.alternate}", "request_diversion",
                 destination=plan.alternate)  # fmt: skip
         return
