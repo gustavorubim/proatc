@@ -79,6 +79,49 @@ describe('store', () => {
     expect(store.savedLog).toBe('C:\\logs\\flight-1.txt')
   })
 
+  it('shows other aircraft faintly, without replacing the last instruction', () => {
+    const store = feed([
+      { type: 'atc', station: 'Heathrow Tower', text: 'Speedbird 12, cleared to land', unprompted: false },
+      {
+        type: 'chatter',
+        station: 'Heathrow Tower',
+        callsign: 'Shamrock four five',
+        said: 'Shamrock four five, line up and wait',
+        answered: 'Line up and wait, Shamrock four five'
+      }
+    ])
+    expect(store.log.map((line) => [line.kind, line.who])).toEqual([
+      ['atc', 'Heathrow Tower'],
+      ['chatter', 'Heathrow Tower'],
+      ['chatter', 'Shamrock four five']
+    ])
+    expect(store.lastInstruction?.text).toBe('Speedbird 12, cleared to land')
+  })
+
+  it('opens and closes the debrief, and asks another device for its pairing code', () => {
+    const debrief = {
+      type: 'debrief' as const,
+      minutes: 42,
+      transmissions: 18,
+      controller_calls: 21,
+      stations: ['Heathrow Ground'],
+      readbacks: { given: 9, corrected: 1, missed: 0 },
+      say_again: 0,
+      findings: [{ time: '10:02:11', kind: 'readback', text: 'Readback corrected by the controller', said: '' }],
+      score: 94,
+      verdict: 'Good radio work, with a few things to tidy up.'
+    }
+    const open = feed([debrief])
+    expect(open.debrief?.score).toBe(94)
+    expect(open.log).toHaveLength(0)
+    expect(reduce(open, { type: 'close_debrief' }).debrief).toBeNull()
+
+    expect(initialStore.pairing).toBe('no')
+    const asked = reduce(initialStore, { type: 'pair', pairing: 'wrong' })
+    expect(asked.pairing).toBe('wrong')
+    expect(reduce(asked, { type: 'pair', pairing: 'no' }).pairing).toBe('no')
+  })
+
   it('fills the destination into a suggested call', () => {
     expect(fillDestination('Delivery, request I F R clearance to {destination}', ' Paris ')).toBe(
       'Delivery, request I F R clearance to Paris'

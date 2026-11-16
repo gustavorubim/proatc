@@ -21,13 +21,24 @@ from . import phraseology as say
 from .atis import Issue, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
 from .navdata import Airport, AirportDB, Station, distance_nm
-from .taxi import TaxiNetwork, nearest_parking, parse_taxi, route_to_point, route_to_runway
+from .taxi import (
+    TaxiNetwork,
+    aircraft_category,
+    assign_stand,
+    nearest_parking,
+    parse_taxi,
+    route_to_point,
+    route_to_runway,
+)
 from .vectors import locate
 
 READBACK_WAIT_S = 30  # how long an instruction waits for a readback before it is repeated
 CONTINUE_BEYOND_NM = 5  # further out than this, tower says "continue approach"
 CLEAR_TO_LAND_NM = 4.5
 GO_AROUND_NM = 1.0  # still no landing clearance this close in: go around
+ON_RUNWAY_NM = 0.022  # this close to a runway's centreline is on it
+HOLDING_SHORT_NM = 0.075  # stopped this close to a runway to be crossed: holding short of it
+CROSSING_FINAL_NM = 3.0  # an aircraft on final this close in keeps a crossing waiting
 
 
 class Phase(Enum):
@@ -92,6 +103,12 @@ class Flight:
     pending_at: float = 0.0  # when the pending instruction was given (engine clock)
     pending_key: str | None = None  # the station that gave it
     reminded: bool = False
+    # Taxi (see _taxi_out, _taxi_in)
+    crossings: list[str] = field(default_factory=list)  # runways ("09R/27L") still to be crossed, each needing a clearance
+    taxi_goal: tuple | None = None  # ("runway", ident) or ("stand", lat, lon, spoken name)
+    stand: object | None = None  # taxi.Parking assigned after landing
+    go_arounds: int = 0
+    diverting: bool = False  # on the way to another airport after a missed approach
 
 
 def _squawk(rng: random.Random) -> str:
@@ -422,6 +439,11 @@ class Engine:
                     return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]}", {"frequency": target[2]})
             return None
 
+        if on_ground and station.kind in ("ground", "tower"):
+            if intent.intent == "request_crossing" and flight.crossings:
+                return self._crossing(station, raw, callsign, hello, faa, asked=True)
+            if intent.intent == "request_progressive":
+                return self._progressive(station, raw, callsign, hello, faa)
         if station.kind == "ground":
             return self._ground(intent, station, issue, raw, callsign, hello, faa, pressure_tail, on_ground)
         if station.kind == "tower":
@@ -439,12 +461,15 @@ class Engine:
         route = None
         if "lat" in raw:
             route = route_to_runway(self.network(airport), raw["lat"], raw["lon"], runway, self._threshold(airport, runway))
-        via, cross = self._route_words(route), self._crossings(route)
+        via = self._route_words(route)
+        flight.taxi_goal, flight.crossings = ("runway", runway), list(route.crossings) if route else []
+        limit = self._limit()
         if faa:
-            text = f"{callsign}, {hello}runway {say.runway(runway)}, taxi{via}{cross}{pressure_tail}"
+            text = f"{callsign}, {hello}runway {say.runway(runway)}, taxi{via}{limit}{pressure_tail}"
         else:
-            text = f"{callsign}, {hello}taxi to holding point runway {say.runway(runway)}{via}{cross}{pressure_tail}"
-        return Reply(text, {"runway": runway})
+            text = f"{callsign}, {hello}taxi to holding point runway {say.runway(runway)}{via}{limit}{pressure_tail}"
+        # With a runway to hold short of, two runways are said: the readback is not checked against one of them.
+        return Reply(text, {"hold_short": flight.crossings[0]} if flight.crossings else {"runway": runway})
 
     def _taxi_in(self, station, raw, callsign, hello, faa) -> Reply:
         airport, flight = station.airport, self.flight
@@ -454,12 +479,115 @@ class Engine:
         if "lat" in raw and network.usable:
             # Back to where the flight started if that was here, otherwise the nearest stand.
             home = flight.origin if flight.origin and distance_nm(*flight.origin, airport.lat, airport.lon) < 5 else None
-            stand = nearest_parking(network, *(home or (raw["lat"], raw["lon"])))
+            if home:
+                stand = nearest_parking(network, *home)
+            else:
+                plan = flight.plan
+                filed = plan.callsign.upper() if plan and plan.callsign else ""
+                airline = filed[:3] if say.airline_callsign(filed) else None
+                category = aircraft_category(raw.get("aircraft_type"), bool(airline))
+                stand = flight.stand or assign_stand(network, category, airline, (raw["lat"], raw["lon"]), self._rng)
+                stand = stand or nearest_parking(network, raw["lat"], raw["lon"])
             if stand:
                 route = route_to_point(network, raw["lat"], raw["lon"], (stand.lat, stand.lon))
         named = stand and stand.name and len(stand.name) <= 12
         destination = f"{'gate' if faa else 'stand'} {say.stand(stand.name)}" if named else "parking"
-        return Reply(f"{callsign}, {hello}taxi to {destination}{self._route_words(route)}{self._crossings(route)}")
+        flight.stand = stand
+        flight.crossings = list(route.crossings) if route else []
+        flight.taxi_goal = ("stand", stand.lat, stand.lon, destination) if stand else None
+        limit = self._limit()
+        return Reply(
+            f"{callsign}, {hello}taxi to {destination}{self._route_words(route)}{limit}",
+            {"hold_short": flight.crossings[0]} if flight.crossings else {},
+        )
+
+    # ---- runway crossings and progressive taxi ------------------------------
+
+    def _limit(self) -> str:
+        """', hold short runway two seven left' while a runway on the route has not been cleared for crossing."""
+        crossings = self.flight.crossings
+        return f", hold short runway {say.runway(crossings[0].split('/')[0])}" if crossings else ""
+
+    def _goal_words(self, faa: bool) -> str:
+        goal = self.flight.taxi_goal
+        if not goal:
+            return ""
+        if goal[0] == "runway":
+            return f"runway {say.runway(goal[1])}" if faa else f"holding point runway {say.runway(goal[1])}"
+        return goal[3]
+
+    @staticmethod
+    def _runway_named(airport: Airport, name: str):
+        ends = name.split("/")
+        return next((r for r in airport.runways if r.end1 in ends or r.end2 in ends), None)
+
+    def _offset_nm(self, airport: Airport, name: str, raw: dict) -> float | None:
+        """Distance from the centreline of this runway, while abeam it; None when not beside it."""
+        runway = self._runway_named(airport, name)
+        if not runway or "lat" not in raw:
+            return None
+        position = locate(raw["lat"], raw["lon"], (runway.lat2, runway.lon2), runway.ends()[0][1])
+        if not -0.05 < position.along_nm < runway.length_m / 1852 + 0.05:
+            return None
+        return position.cross_nm
+
+    def _crossing(self, station: Station, raw: dict, callsign: str, hello: str, faa: bool, asked: bool) -> Reply | None:
+        """Clearance to cross the next runway on the taxi route, unless traffic is using it."""
+        flight, airport = self.flight, station.airport
+        if not flight.crossings:
+            return None
+        name = flight.crossings[0]
+        runway = self._runway_named(airport, name)
+        spoken = say.runway(name.split("/")[0])
+        if self.traffic_enabled and runway:
+            landing = any(
+                traffic.on_final(raw, airport, end, CROSSING_FINAL_NM) is not None for end in (runway.end1, runway.end2)
+            )
+            if landing or traffic.on_runway(raw, airport, runway.end1):
+                why = "landing traffic" if landing else "traffic on the runway"
+                return Reply(f"{callsign}, {hello}hold short runway {spoken}, {why}") if asked else None
+        flight.crossings.pop(0)
+        goal = self._goal_words(faa)
+        tail = self._limit() or (f", continue to {goal}" if goal else "")
+        expect = {"hold_short": flight.crossings[0]} if flight.crossings else {"crossing": name}
+        return Reply(f"{callsign}, {hello}cross runway {spoken}{tail}", expect)
+
+    def _crossing_watch(self, station: Station, raw: dict, callsign: str, faa: bool) -> Reply | None:
+        """Unprompted: the crossing clearance for an aircraft stopped at the runway, and a word to one that did not stop."""
+        flight = self.flight
+        offset = self._offset_nm(station.airport, flight.crossings[0], raw)
+        if offset is None:
+            return None
+        spoken = say.runway(flight.crossings[0].split("/")[0])
+        if offset < ON_RUNWAY_NM:
+            flight.crossings.pop(0)
+            flight.pending = None
+            return Reply(f"{callsign}, you were to hold short of runway {spoken}, expedite crossing")
+        if offset < HOLDING_SHORT_NM and raw.get("groundspeed_ms", 99.0) < 1.0 and flight.pending is None:
+            return self._crossing(station, raw, callsign, "", faa, asked=False)
+        return None
+
+    def _progressive(self, station: Station, raw: dict, callsign: str, hello: str, faa: bool) -> Reply | None:
+        """The next part of the taxi route, from where the aircraft is now."""
+        flight, airport = self.flight, station.airport
+        goal = flight.taxi_goal
+        if not goal or "lat" not in raw:
+            return None
+        network = self.network(airport)
+        if goal[0] == "runway":
+            route = route_to_runway(network, raw["lat"], raw["lon"], goal[1], self._threshold(airport, goal[1]))
+        else:
+            route = route_to_point(network, raw["lat"], raw["lon"], (goal[1], goal[2]))
+        where = self._goal_words(faa)
+        if not route or not route.taxiways:
+            return Reply(f"{callsign}, {hello}continue straight ahead to {where}")
+        text = f"continue on {say.taxiway(route.taxiways[0])}"
+        if len(route.taxiways) > 1:
+            turn = route.turns[0] if route.turns else ""
+            text += f", then {f'turn {turn} onto' if turn else 'continue onto'} {say.taxiway(route.taxiways[1])}"
+        else:
+            text += f" to {where}"
+        return Reply(f"{callsign}, {hello}{text}{self._limit()}")
 
     def _ground(self, intent, station, issue, raw, callsign, hello, faa, pressure_tail, on_ground) -> Reply | None:
         airport, flight = station.airport, self.flight
@@ -589,6 +717,7 @@ class Engine:
             if flight.phase != Phase.LANDING_CLEARED and flight.phase != Phase.AIRBORNE:
                 # New airborne segment: the departure runway no longer applies.
                 flight.phase, flight.runway, flight.pending = Phase.AIRBORNE, None, None
+                flight.crossings, flight.taxi_goal = [], None
                 flight.told_vacate = False
             flight.has_been_airborne = True
         elif on_ground and flight.has_been_airborne and flight.phase in (Phase.AIRBORNE, Phase.LANDING_CLEARED):
@@ -631,9 +760,16 @@ class Engine:
                     if reply.expect:
                         self._await_readback(reply, key)
                 return reply
+            airborne = not bool(raw.get("on_ground", True))
+            if station.kind in ("ground", "tower") and flight.crossings and not airborne and key in flight.contacted:
+                reply = self._crossing_watch(station, raw, callsign, uses_faa_style(airport.ident))
+                if reply:
+                    flight.last_said[key] = reply.text
+                    if reply.expect:
+                        self._await_readback(reply, key)
+                    return reply
             if station.kind != "tower":
                 return None
-            airborne = not bool(raw.get("on_ground", True))
             miles = (
                 distance_nm(raw["lat"], raw["lon"], *self._threshold(airport, flight.runway))
                 if flight.runway and "lat" in raw
@@ -755,6 +891,12 @@ class Engine:
             elif arrived:
                 if station.kind in ("tower", "ground"):
                     add("Runway vacated", "runway vacated", "runway_vacated")
+            if on_ground and station.kind in ("tower", "ground"):
+                if flight.crossings:
+                    short = say.runway(flight.crossings[0].split("/")[0])
+                    add("Holding short", f"holding short runway {short}, request crossing", "request_crossing")
+                if flight.taxi_goal and flight.phase in (Phase.TAXI_OUT, Phase.TAXI_IN):
+                    add("Progressive taxi", "request progressive taxi", "request_progressive")
             elif station.kind == "tower":
                 runway = f" runway {say.runway(flight.runway)}" if flight.runway else ""
                 if flight.arrival and flight.arrival.stage == "tower":
@@ -782,7 +924,9 @@ class Engine:
             "sid": flight.sid,
             "star": flight.star,
             "cleared_altitude_ft": flight.cleared_ft,
-            "approach": f"{flight.arrival.approach} runway {flight.arrival.runway}" if flight.arrival else None,
+            "approach": f"{flight.arrival.approach} runway {flight.arrival.approach_runway or flight.arrival.runway}"
+            if flight.arrival
+            else None,
             "heading": flight.arrival.heading
             if flight.arrival and flight.arrival.stage in ("downwind", "base", "intercept")
             else None,
@@ -791,5 +935,7 @@ class Engine:
             "emergency": flight.emergency,
             "next_frequency": flight.next_frequency,
             "holding": flight.arrival.hold.fix if flight.arrival and flight.arrival.hold else None,
+            "stand": flight.stand.name if flight.stand and flight.stand.name else None,
+            "hold_short": flight.crossings[0].split("/")[0] if flight.crossings else None,
         }
         return {key: value for key, value in facts.items() if value}

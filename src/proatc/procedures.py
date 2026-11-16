@@ -38,6 +38,14 @@ APPROACH_TYPES = {
     "Q": "N D B D M E",
     "N": "N D B",
 }
+# What a pilot asks for -> the approach type letters that answer it.
+APPROACH_FAMILIES = {
+    "ILS": "IJ",
+    "LOC": "LX",
+    "RNAV": "RHP",
+    "VOR": "DVS",
+    "NDB": "QN",
+}
 APPROACH_IDENT = re.compile(r"([A-Z])(\d\d[LRC]?)-?([A-Z])?")
 
 
@@ -99,6 +107,8 @@ class Approach:
     kind: str  # I
     runway: str  # 27R
     platform_ft: int | None = None  # altitude at which the final approach is intercepted
+    missed_ft: int | None = None  # the altitude the published missed approach climbs to
+    missed_fix: str | None = None  # where the missed approach ends (usually a hold)
 
     @property
     def spoken(self) -> str:
@@ -123,6 +133,7 @@ def _altitude(text: str) -> int | None:
 def parse_cifp(lines) -> Procedures:
     found = Procedures()
     finals: dict[str, list[int]] = {}
+    past_runway: set[str] = set()  # approaches whose final segment has reached the runway: the rest is the missed approach
     for line in lines:
         kind, _, rest = line.partition(":")
         if kind not in ("SID", "STAR", "APPCH"):
@@ -136,6 +147,15 @@ def parse_cifp(lines) -> Procedures:
             if not match:
                 continue
             approach = found.approaches.setdefault(f[NAME], Approach(f[NAME], match.group(1), match.group(2)))
+            if f[ROUTE_TYPE] != "A":
+                if f[NAME] in past_runway:
+                    if altitude:
+                        approach.missed_ft = max(approach.missed_ft or 0, altitude)
+                    if f[FIX] and not f[FIX].startswith("RW"):
+                        approach.missed_fix = f[FIX]
+                    continue
+                if f[FIX].startswith("RW"):
+                    past_runway.add(f[NAME])
             # The final segment (route type = approach type) and the last leg of each transition
             # carry the altitude the approach is joined at.
             if altitude and f[ROUTE_TYPE] != "A" and not f[FIX].startswith("RW"):
@@ -204,10 +224,18 @@ def choose_star(procedures: Procedures, route: list[str], filed: str | None = No
     return None
 
 
-def choose_approach(procedures: Procedures, runway: str) -> Approach | None:
-    """The most precise approach published for this runway."""
+def choose_approach(procedures: Procedures, runway: str, family: str | None = None) -> Approach | None:
+    """The most precise approach published for this runway, or the best of one family ('RNAV', 'VOR', ...)."""
     order = list(APPROACH_TYPES)
-    options = [a for a in procedures.approaches.values() if a.runway == runway and a.kind in order]
+    kinds = APPROACH_FAMILIES.get(family, "") if family else order
+    options = [a for a in procedures.approaches.values() if a.runway == runway and a.kind in order and a.kind in kinds]
+    return min(options, key=lambda a: (order.index(a.kind), a.ident), default=None)
+
+
+def circling_approach(procedures: Procedures, runways: list[str]) -> Approach | None:
+    """An approach to another runway of the airport, to circle from: the most precise one."""
+    order = list(APPROACH_TYPES)
+    options = [a for a in procedures.approaches.values() if a.runway in runways and a.kind in order]
     return min(options, key=lambda a: (order.index(a.kind), a.ident), default=None)
 
 

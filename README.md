@@ -11,12 +11,12 @@ With a flight plan loaded (from SimBrief, or a destination and cruise level type
 | Step | Controller | What you get |
 |---|---|---|
 | Clearance | Delivery | Destination, the SID that fits your route and runway, initial altitude from the SID, squawk |
-| Push, taxi | Ground | Push and start, a taxi route over the airport's real taxiways |
+| Push, taxi | Ground | Push and start, a taxi route over the airport's real taxiways, a clearance for each runway crossed on the way |
 | Takeoff | Tower | Takeoff clearance with the wind, then a hand-off once airborne |
 | Climb | Departure | Identified, step climbs up to FL240 or your cruise level, hand-off to the centre whose airspace you are in |
 | Cruise | Centres | Climb to cruise, hand-offs as you cross sector boundaries, step descents starting at the right distance, with the STAR |
-| Arrival | Approach | Descent, radar vectors (downwind, base, intercept) with speed control, approach clearance for the best published approach |
-| Landing | Tower, Ground | Landing clearance, vacate, taxi to a stand |
+| Arrival | Approach | Descent, radar vectors that depend on where you come from, speed control, clearance for the best published approach or the one you ask for |
+| Landing | Tower, Ground | Landing clearance, vacate, taxi to a stand that fits your aircraft and airline |
 
 Readbacks are checked at every step: a wrong runway, squawk, frequency, pressure, level or heading gets "negative" and the instruction again. Procedures come from X-Plane's CIFP data (`procedures.py`; Navigraph data in `Custom Data` is used when present), centres and their boundaries from `atc.dat` (`centers.py`), the vectoring pattern is in `vectors.py` and the radar controllers' logic in `ifr.py`. VFR circuits are covered too. Anything the engine does not cover falls back to a free-form reply constrained to the same facts.
 
@@ -28,9 +28,17 @@ Weather: while X-Plane is on real weather, each airport's ATIS, runway in use an
 
 Other aircraft: with X-Plane's AI aircraft enabled, controllers see them (`traffic.py`). Radar controllers call traffic ("traffic, two o'clock, five miles, opposite direction, one thousand feet above"), tower holds a departure for an aircraft on final and clears it when the runway is free, tells an arrival it is number two, and sends it around if the runway is still occupied at one mile. The app does not control those aircraft. Parallel runways are split between landing and departure. Mayday and pan-pan are acknowledged on any frequency and the landing is cleared at once. A VFR flight can ask a radar controller for flight following. A SID's "at or above" crossing flown low is called.
 
-In the app: a settings screen (microphone, speakers, push-to-talk on a keyboard key or a joystick or yoke button, voices, model, holding, traffic); a copilot that reads instructions back, or also tunes hand-off frequencies and checks in with the next controller; an instructor that explains the last instruction and tells you what to say next; "Save log", which writes the flight's radio work to a transcript and a JSON file for bug reports; and what the session has spent on OpenRouter, in the header.
+Approaches: vectors are a downwind, base and intercept from behind or abeam the airport, a 45 degree dogleg onto final for an aircraft already out on the approach side, and straight in for one nearly lined up; how far out final is joined differs from arrival to arrival, and a downwind leg is extended while another aircraft is on final. You can ask for another type of approach ("request the R NAV approach"), and "field in sight" gets a visual approach when the reported weather allows it. A runway with no approach of its own is reached by an approach to another runway and circling, in weather good enough to circle. If the runway in use changes while you are being vectored, approach says so and starts again for the new runway. A go-around flies the published missed approach to its altitude (from the CIFP data) and goes back to approach, where you can try again or ask to divert: to the alternate filed in SimBrief, or to any airport by its code. A diversion gives a heading and a level and hands you on, and the flight continues to the new destination.
 
-Known simplifications: the sim's other aircraft are seen but not controlled, so there is no sequencing between them; vectors follow one fixed pattern; station names are whatever X-Plane's data calls them.
+On the ground: a taxi route that crosses another runway stops there ("hold short runway two seven left"). The crossing clearance comes when you report holding short, or by itself once you have stopped at the runway, and waits for an aircraft landing on it; entering the runway without it gets a word from the controller. "Request progressive taxi" gives the next taxiway and which way to turn onto it, from where you are. After landing you are sent to a stand that takes your aircraft's size, your airline's own where the scenery says which airline uses which stand.
+
+Voices and chatter: each controller has a voice of their own and keeps it (`voices.py`), British in the United Kingdom and Ireland, American in the United States and Canada. With radio chatter on (`[atc] chatter`: `off`, `some`, `busy`) you hear other flights being worked on the frequency (`chatter.py`). That is sound only: those aircraft are not in the sim and the controller does not sequence you against them. It uses the real runway in use, wind, taxiways and frequencies, pauses while a controller is waiting for your readback, and stops the moment you transmit.
+
+In the app, since 0.4: "Debrief" reviews the flight's radio work from the log (readbacks corrected or missed, level busts, runway incursions, restrictions missed, calls on a dead frequency) with a score and, with a language model, a few sentences from the instructor (`debrief.py`); it is also written into the saved log. The waypoints, procedures and airports of your flight plan are given to the speech recogniser and to the model that interprets you, so "BIBAX" is heard as a waypoint rather than as two words. The language model can run on your own machine instead of OpenRouter: Settings, Language model, "Local model" takes any OpenAI-compatible address such as Ollama or LM Studio, needs no key and costs nothing (a small local model understands less than Claude Haiku does; clicked calls need no model at all). And the app's screen can be opened on a phone or tablet on the same network: Settings, Phone or tablet shows an address and a pairing code. The microphone stays the computer's; the device shows the conversation and sends clicked and typed calls. It is off by default, asks for the code, refuses a device that keeps guessing, and cannot change the key or the model.
+
+Earlier: a settings screen (microphone, speakers, push-to-talk on a keyboard key or a joystick or yoke button, voices, model, holding, traffic); a copilot that reads instructions back, or also tunes hand-off frequencies and checks in with the next controller; an instructor that explains the last instruction and tells you what to say next; "Save log", which writes the flight's radio work to a transcript and a JSON file for bug reports; and what the session has spent on OpenRouter, in the header.
+
+Known simplifications: the sim's other aircraft are seen but not controlled, so there is no sequencing between them; an R NAV approach is flown from vectors to final like an I L S, not from its initial fix; a circling approach is cleared but the circling itself is not watched; station names are whatever X-Plane's data calls them.
 
 Phase 2, still in place:
 
@@ -114,7 +122,9 @@ Most settings are changed in the app's settings screen and remembered in `settin
 - `src/proatc/procedures.py`, `centers.py`, `flightplan.py`, `taxi.py`: SIDs/STARs/approaches, en-route centres, the filed plan, taxi routes
 - `src/proatc/radio.py`: station on the tuned frequency, controller briefing, ATIS broadcast thread
 - `src/proatc/stt.py`, `tts.py`, `radio_fx.py`, `audio_io.py`, `ptt.py`: audio chain
-- `src/proatc/llm.py`: OpenRouter client and placeholder controller prompt
+- `src/proatc/llm.py`: OpenRouter or local-model client and the free-form controller prompt
+- `src/proatc/voices.py`, `chatter.py`, `debrief.py`: a voice per controller, other aircraft on the frequency, the post-flight review
+- `src/proatc/server.py`: the app's WebSocket, and the page and pairing for a phone or tablet
 
 The app reads from the sim and changes one thing only, when you ask it to: clicking a frequency in the app, or the "Tune" button that appears after a hand-off, sets that frequency on the COM radio you transmit on. Set `allow_tuning = false` under `[sim]` in `config.toml` to switch that off. Some add-on aircraft manage their own radios; if the aircraft does not take the frequency the app says so.
 

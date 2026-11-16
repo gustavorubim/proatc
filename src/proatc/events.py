@@ -14,6 +14,8 @@ Every event is a dict with a "type":
   coach      {text}                             the instructor: an explanation, or what to say next
   capture    {active}                           waiting for the key or button to use for push-to-talk
   log_saved  {path}                             the flight log was written to this file
+  chatter    {station, callsign, said, answered} another aircraft heard on the frequency (sound only)
+  debrief    {score, verdict, findings, ...}    the review of the flight's radio work (see debrief.py)
 """
 
 from __future__ import annotations
@@ -46,6 +48,12 @@ def console(event: dict) -> None:
         )
     elif kind == "coach":
         print(f"INSTRUCTOR: {event['text']}")
+    elif kind == "chatter":
+        print(f"       ~ {event['said']} / {event['answered']}")
+    elif kind == "debrief":
+        from .debrief import as_text
+
+        print(as_text(event))
     elif kind == "log_saved":
         print(f"  (flight log saved to {event['path']})")
     elif kind == "atis":

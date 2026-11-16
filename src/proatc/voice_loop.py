@@ -19,6 +19,7 @@ from .atis import AtisBook
 from .audio_io import MIC_RATE, Player, Recorder
 from .centers import CenterIndex
 from .config import PROJECT_DIR, Config, _apply, openrouter_key, save_overrides, validate
+from .debrief import as_text, review
 from .engine import Engine
 from .events import Emit, console
 from .flightlog import WITH_CONTEXT, FlightLog
@@ -28,9 +29,9 @@ from .llm import Controller, LlmError
 from .metar import MetarStore
 from .navdata import AirportDB
 from .navfix import open_navfix
-from .procedures import NavaidNames
+from .procedures import NavaidNames, route_fixes
 from .ptt import PushToTalk
-from .radio import AtisBroadcaster, briefing, current_station, observe
+from .radio import AtisBroadcaster, briefing, current_station, observe, station_voice
 from .radio_fx import radio_effect
 from .stt import SpeechToText
 from .tts import TextToSpeech, download_models, models_present
@@ -43,6 +44,11 @@ INSTRUCTOR = (
     "You are a flight instructor sitting next to a pilot in a flight simulator. In plain language and at most three "
     "short sentences, say what the controller's instruction means, what the pilot should do, and what to read back. "
     "No markdown, no lists, no lecture on phraseology."
+)
+DEBRIEFER = (
+    "You are a flight instructor debriefing a pilot's radio work after a flight in a flight simulator. You get counts "
+    "and a list of events. In at most four short sentences, say what went well, what to work on first, and one concrete "
+    "tip. Plain language, no markdown, no lists, no score."
 )
 GENERIC_CALLS = ("Say again", "Radio check", "Deviate left", "Deviate right", "Destination weather", "Clear of weather")
 
@@ -163,8 +169,7 @@ class Session:
         self.recorder = Recorder(config.audio.input_device)
         try:
             self.options.update(audio_options())
-            voices = [voice for voice in self.tts.engine.get_voices() if voice[:2] in ("af", "am", "bf", "bm")]
-            self.options["voices"] = sorted(voices)
+            self.options["voices"] = self.tts.voices()
         except Exception:
             pass  # the settings screen then offers no choices; everything else works
         self.ready = True
@@ -176,8 +181,9 @@ class Session:
         self.ptt.press() if down else self.ptt.release()
 
     def set_key(self, key: str | None) -> None:
-        """Use this OpenRouter key from now on (None: echo mode)."""
-        self.controller = Controller(self.config.llm, key, self.usage) if key else None
+        """Use this OpenRouter key from now on (None: echo mode). A local model needs no key."""
+        usable = key or self.config.llm.provider == "local"
+        self.controller = Controller(self.config.llm, key, self.usage) if usable else None
         self.parser = IntentParser(self.controller) if self.controller else None
 
     # ---- settings -----------------------------------------------------------
@@ -187,6 +193,8 @@ class Session:
         cleaned = validate(changes)
         _apply(self.config, cleaned)
         save_overrides(cleaned)
+        if {"provider", "local_url", "local_model"} & set(cleaned.get("llm", {})):
+            self.set_key(openrouter_key())
         if not self.ready:
             return
         audio, ptt, atc = cleaned.get("audio", {}), cleaned.get("ptt", {}), cleaned.get("atc", {})
@@ -271,9 +279,24 @@ class Session:
         """Queue a question for the instructor: 'explain' the last instruction, or 'what_next'."""
         self.jobs.put((what, None, None))
 
+    def debrief(self) -> dict:
+        """Review the radio work so far; with a language model, add the instructor's remarks."""
+        result = review(self.log.records)
+        if self.controller and result["transmissions"] >= 5:  # too little to say anything useful about
+            try:
+                facts = {key: result[key] for key in ("minutes", "transmissions", "readbacks", "say_again", "stations")}
+                facts["events"] = [f"{f['time']} {f['text']}" for f in result["findings"]][:30]
+                result["notes"] = self.controller.complete(DEBRIEFER, json.dumps(facts), max_tokens=260, temperature=0.3)
+            except LlmError:
+                pass  # the counts stand on their own
+        self.emit({"type": "debrief", **result})
+        return result
+
     def save_log(self) -> None:
         extra = {"flight": self.engine.summary() if self.ready else None, "openrouter_usage": dict(self.usage),
                  "model": self.config.llm.model}  # fmt: skip
+        extra["debrief"] = review(self.log.records)
+        extra["debrief_text"] = "\n" + as_text(extra["debrief"])
         if self.ready and self.engine.flight.plan:
             extra["plan"] = self.engine.flight.plan.summary()
         path = self.log.save(PROJECT_DIR / "logs", extra)
@@ -292,6 +315,8 @@ class Session:
                                       self.player, self.ptt, self.recorder, self.engine, self.parser, self.emit)  # fmt: skip
                         elif kind in ("explain", "what_next"):
                             self._instructor(kind)
+                        elif kind == "debrief":
+                            self.debrief()
                         else:
                             self._spoken_for_you(text)
                             _respond(text, kind, intent, time.perf_counter(), self.config, self.bridge, self.db, self.book,
@@ -425,11 +450,49 @@ def _exchange(config, bridge, db, book, stt, tts, controller, player, ptt, recor
         return
     raw = bridge.snapshot() if bridge.connected else {}
     hints = engine._callsign(raw) if engine and raw else describe(raw).get("callsign_spoken", "")
+    if engine and raw:
+        _, station = current_station(db, raw)
+        hints = hearing_hints(engine, hints, station)
     transcript = stt.transcribe(audio, hints=hints)
     if not transcript:
         emit({"type": "info", "text": "nothing heard"})
         return
     _respond(transcript, "voice", None, started, config, bridge, db, book, tts, controller, player, ptt, engine, parser, emit)
+
+
+def known_names(engine) -> list[str]:
+    """Identifiers this flight is likely to mention: its airports, its route's waypoints, its procedures."""
+    flight, plan = engine.flight, engine.flight.plan
+    names: list[str] = []
+    if plan:
+        names += [name for name in (plan.origin, plan.destination, plan.alternate) if name]
+        names += route_fixes(plan.route)
+    for procedure in (flight.star_procedure,):
+        if procedure:
+            names += [fix for fix in procedure.fixes() if fix.isalpha()]
+    names += [name for name in (flight.sid, flight.star, flight.direct_to) if name]
+    if flight.arrival and flight.arrival.hold:
+        names.append(flight.arrival.hold.fix)
+    return list(dict.fromkeys(names))
+
+
+def hearing_hints(engine, callsign: str, station) -> str:
+    """Words the speech recogniser should expect: the callsign, who is being called, and the flight's own names.
+
+    Waypoints are five-letter inventions that no recogniser knows; seeing them written makes it far
+    more likely to write "BIBAX" than "bee backs"."""
+    parts = [callsign]
+    if station is not None:
+        parts.append(station.callsign)
+    plan = engine.flight.plan
+    if plan and plan.destination:
+        airport = engine.db.airport(plan.destination)
+        if airport:
+            parts.append(airport.spoken_name)
+    names = [name.title() if len(name) > 3 else name for name in known_names(engine) if name.isalpha()][:24]
+    if names:
+        parts.append("Waypoints: " + ", ".join(names))
+    return ". ".join(part for part in parts if part) + "."
 
 
 def _someone_listening(bridge, db, emit: Emit) -> bool:
@@ -482,7 +545,7 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
     label = context["station"]["you_are"] if "station" in context else "ATC"
     emit({"type": "atc", "station": label, "text": answer, "unprompted": False})
 
-    samples, rate = tts.speak(answer)
+    samples, rate = tts.speak(answer, **station_voice(tts, station))
     if config.radio.enabled:
         samples = radio_effect(samples, rate, config.radio.noise)
     voiced = time.perf_counter()
@@ -498,7 +561,7 @@ def _answer(transcript, intent, context, station_key, station, issue, raw, contr
         return f"Readback check. {transcript}"
     if station and engine and parser:
         if intent is None:
-            intent = parser.parse(transcript, engine.flight.last_said.get(station_key, ""))
+            intent = parser.parse(transcript, engine.flight.last_said.get(station_key, ""), known_names(engine))
         emit({"type": "understood", "intent": intent.intent})
         reply = engine.handle(intent, station, issue, raw, magnetic_variation(raw))
         if reply is not None:

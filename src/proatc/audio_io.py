@@ -69,6 +69,12 @@ class Player:
             self._ends_at = time.monotonic() + len(samples) / sample_rate
             return self._generation
 
+    @property
+    def playing(self) -> bool:
+        import time
+
+        return time.monotonic() < self._ends_at
+
     def stop(self) -> None:
         with self._lock:
             self._generation += 1

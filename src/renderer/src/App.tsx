@@ -1,5 +1,5 @@
 import { type FormEvent, useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import type { Command, EngineMessage, EngineState, Suggestion, UpdateState } from '../../shared/protocol'
+import type { Command, Debrief, EngineMessage, EngineState, Suggestion, UpdateState } from '../../shared/protocol'
 import logo from './assets/logo.svg'
 import { SettingsDialog } from './Settings'
 import { fillDestination, initialStore, type Line, reduce } from './store'
@@ -15,22 +15,47 @@ const KIND_LABEL: Record<string, string> = {
   unicom: 'Unicom'
 }
 
+const CODE_KEY = 'proatc-pairing-code'
+
+/** In a browser on another device there is no app around the page: it pairs with a code instead. */
+const inApp = Boolean(window.proatc)
+
+function savedCode(): string {
+  try {
+    return localStorage.getItem(CODE_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 function useEngine() {
   const [store, dispatch] = useReducer(reduce, initialStore)
   const socket = useRef<WebSocket | null>(null)
+  const [attempt, setAttempt] = useState(0)
 
   useEffect(() => {
     let closed = false
     let retry: ReturnType<typeof setTimeout> | undefined
 
     const open = async (): Promise<void> => {
-      const connection = await window.proatc?.connection()
-      if (closed) return
-      if (!connection) {
-        dispatch({ type: 'fatal', text: 'This window must be opened by the Pro ATC app.' })
-        return
+      let address: string
+      if (inApp) {
+        const connection = await window.proatc?.connection()
+        if (closed) return
+        if (!connection) {
+          dispatch({ type: 'fatal', text: 'The engine has not been started.' })
+          return
+        }
+        address = `ws://127.0.0.1:${connection.port}/?token=${connection.token}`
+      } else {
+        const code = savedCode()
+        if (!code) {
+          dispatch({ type: 'pair', pairing: 'ask' })
+          return
+        }
+        address = `ws://${window.location.host}/?token=${encodeURIComponent(code)}`
       }
-      const ws = new WebSocket(`ws://127.0.0.1:${connection.port}/?token=${connection.token}`)
+      const ws = new WebSocket(address)
       socket.current = ws
       ws.onopen = () => dispatch({ type: 'link', link: 'open' })
       ws.onmessage = (event) => {
@@ -40,9 +65,13 @@ function useEngine() {
           // A malformed message is dropped; the next state message repairs the view.
         }
       }
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (closed) return
         dispatch({ type: 'link', link: 'connecting' })
+        if (!inApp && event.code === 1008) {
+          dispatch({ type: 'pair', pairing: 'wrong' }) // the code was refused: ask again instead of retrying
+          return
+        }
         retry = setTimeout(() => void open(), 1000) // the engine takes a moment to start listening
       }
     }
@@ -61,13 +90,101 @@ function useEngine() {
       clearTimeout(retry)
       socket.current?.close()
     }
+  }, [attempt])
+
+  const pair = useCallback((code: string) => {
+    try {
+      localStorage.setItem(CODE_KEY, code.trim().toUpperCase())
+    } catch {
+      // Without storage the code is asked for again on the next visit.
+    }
+    dispatch({ type: 'pair', pairing: 'no' })
+    setAttempt((count) => count + 1)
   }, [])
 
   const send = useCallback((command: Command) => {
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(command))
   }, [])
 
-  return { store, send }
+  return { store, send, pair, closeDebrief: () => dispatch({ type: 'close_debrief' }) }
+}
+
+function PairDialog({ wrong, onPair }: { wrong: boolean; onPair: (code: string) => void }) {
+  const [code, setCode] = useState('')
+  return (
+    <div className="scrim">
+      <form
+        className="dialog"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (code.trim()) onPair(code)
+        }}
+      >
+        <h2>Connect to Pro ATC</h2>
+        <p>
+          {wrong ? 'That code was not accepted. ' : ''}
+          Enter the pairing code shown in the app on your computer, under Settings, Phone or tablet.
+        </p>
+        <input
+          autoFocus
+          className="mono"
+          placeholder="8 characters"
+          value={code}
+          autoCapitalize="characters"
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(event) => setCode(event.target.value)}
+        />
+        <div className="row">
+          <button type="submit" className="primary" disabled={!code.trim()}>
+            Connect
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+function DebriefDialog({ debrief, onClose }: { debrief: Debrief; onClose: () => void }) {
+  const { readbacks } = debrief
+  return (
+    <div className="scrim" onClick={onClose}>
+      <div className="dialog debrief" onClick={(event) => event.stopPropagation()}>
+        <div className="settings-head">
+          <h2>Debrief</h2>
+          <button className="ghost" onClick={onClose}>
+            Done
+          </button>
+        </div>
+        <div className="debrief-top">
+          {debrief.score !== null && (
+            <div className="score">
+              {debrief.score}
+              <small>of 100</small>
+            </div>
+          )}
+          <div>
+            <div className="verdict">{debrief.verdict}</div>
+            <div className="muted">
+              {debrief.transmissions} transmissions in {debrief.minutes} min · {debrief.stations.length} stations ·
+              readbacks: {readbacks.given} given, {readbacks.corrected} corrected, {readbacks.missed} missed
+            </div>
+          </div>
+        </div>
+        {debrief.notes && <p className="debrief-notes">{debrief.notes}</p>}
+        {debrief.findings.length > 0 && (
+          <ul className="findings">
+            {debrief.findings.map((finding, index) => (
+              <li key={index} className={`finding finding-${finding.kind}`} title={finding.said}>
+                <span className="mono">{finding.time}</span>
+                {finding.text}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  )
 }
 
 function UpdatePill() {
@@ -231,7 +348,12 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
           {flight?.phase ?? 'no flight'}
           {flight?.destination ? ` · ${flight.flight_rules ?? ''} to ${flight.destination}` : ''}
         </div>
-        {(flight?.sid || flight?.star || flight?.cleared_altitude_ft || flight?.approach) && (
+        {(flight?.sid ||
+          flight?.star ||
+          flight?.cleared_altitude_ft ||
+          flight?.approach ||
+          flight?.hold_short ||
+          flight?.stand) && (
           <div className="chips ifr">
             {flight.cleared_altitude_ft ? (
               <span className="chip chip-atis" title="Last level you were cleared to">
@@ -245,6 +367,8 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
             {flight.speed_kt ? <span className="chip">{flight.speed_kt} kt</span> : null}
             {flight.direct_to && <span className="chip">DCT {flight.direct_to}</span>}
             {flight.holding && <span className="chip chip-atis">HOLD {flight.holding}</span>}
+            {flight.hold_short && <span className="chip chip-alert">HOLD SHORT {flight.hold_short}</span>}
+            {flight.stand && <span className="chip">STAND {flight.stand}</span>}
             {flight.emergency && <span className="chip chip-alert">{flight.emergency.toUpperCase()}</span>}
           </div>
         )}
@@ -357,7 +481,7 @@ function KeyDialog({
 }
 
 export function App() {
-  const { store, send } = useEngine()
+  const { store, send, pair, closeDebrief } = useEngine()
   const engine = store.engine
   const [draft, setDraft] = useState('')
   const [asking, setAsking] = useState<Suggestion | null>(null)
@@ -409,7 +533,7 @@ export function App() {
           <small>VOICE ATC</small>
         </div>
         <div className="pills">
-          <UpdatePill />
+          {inApp && <UpdatePill />}
           {engine && engine.cost.calls > 0 && (
             <span
               className="cost mono"
@@ -428,6 +552,14 @@ export function App() {
           >
             Save log
           </button>
+          <button
+            className="quiet"
+            disabled={!ready}
+            title="Review this flight's radio work"
+            onClick={() => send({ cmd: 'debrief' })}
+          >
+            Debrief
+          </button>
           <button className="quiet" disabled={!engine} onClick={() => setSettingsOpen(true)}>
             Settings
           </button>
@@ -436,13 +568,19 @@ export function App() {
             ok={Boolean(engine?.status.sim)}
             label={engine?.status.sim ? 'X-Plane connected' : 'X-Plane not connected'}
           />
-          <button className="pill-button" onClick={() => setKeyOpen(true)}>
-            <Pill
-              ok={Boolean(engine?.status.has_key)}
-              label={engine?.status.has_key ? 'OpenRouter key set' : 'Add OpenRouter key'}
-              detail={engine?.status.model}
-            />
-          </button>
+          {engine?.status.provider === 'local' ? (
+            <Pill ok label="Local model" detail={engine.status.model} />
+          ) : (
+            inApp && (
+              <button className="pill-button" onClick={() => setKeyOpen(true)}>
+                <Pill
+                  ok={Boolean(engine?.status.has_key)}
+                  label={engine?.status.has_key ? 'OpenRouter key set' : 'Add OpenRouter key'}
+                  detail={engine?.status.model}
+                />
+              </button>
+            )
+          )}
         </div>
       </header>
 
@@ -544,6 +682,14 @@ export function App() {
                 onMouseDown={() => send({ cmd: 'ptt', down: true })}
                 onMouseUp={() => send({ cmd: 'ptt', down: false })}
                 onMouseLeave={() => store.transmitting && send({ cmd: 'ptt', down: false })}
+                onTouchStart={(event) => {
+                  event.preventDefault() // a touch must not also arrive as a mouse click
+                  send({ cmd: 'ptt', down: true })
+                }}
+                onTouchEnd={(event) => {
+                  event.preventDefault()
+                  send({ cmd: 'ptt', down: false })
+                }}
               >
                 {store.transmitting ? 'Transmitting' : 'Hold to talk'}
               </button>
@@ -567,8 +713,11 @@ export function App() {
           send={send}
           onClose={() => setSettingsOpen(false)}
           onKey={() => setKeyOpen(true)}
+          inApp={inApp}
         />
       )}
+      {store.debrief && <DebriefDialog debrief={store.debrief} onClose={closeDebrief} />}
+      {store.pairing !== 'no' && <PairDialog wrong={store.pairing === 'wrong'} onPair={pair} />}
       {keyOpen && (
         <KeyDialog
           hasKey={Boolean(engine?.status.has_key)}

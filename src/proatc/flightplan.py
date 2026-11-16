@@ -24,6 +24,7 @@ class FlightPlan:
     departure_runway: str | None = None
     arrival_runway: str | None = None
     callsign: str | None = None  # as filed, e.g. BAW123
+    alternate: str | None = None
     source: str = "manual"
 
     def summary(self) -> dict:
@@ -44,6 +45,9 @@ def from_simbrief(data: dict) -> FlightPlan:
     if not _text(origin.get("icao_code")) or not _text(destination.get("icao_code")):
         raise PlanError("The SimBrief briefing has no origin or destination.")
     cruise = _text(str(general.get("initial_altitude", "")))
+    alternate = data.get("alternate")
+    alternate = alternate[0] if isinstance(alternate, list) and alternate else alternate
+    alternate = _text(alternate.get("icao_code")) if isinstance(alternate, dict) else None
     return FlightPlan(
         origin=origin["icao_code"].upper(),
         destination=destination["icao_code"].upper(),
@@ -54,6 +58,7 @@ def from_simbrief(data: dict) -> FlightPlan:
         departure_runway=_text(origin.get("plan_rwy")),
         arrival_runway=_text(destination.get("plan_rwy")),
         callsign=_text((data.get("atc") or {}).get("callsign")),
+        alternate=alternate.upper() if alternate else None,
         source="simbrief",
     )
 

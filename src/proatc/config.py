@@ -18,6 +18,8 @@ MODELS_DIR = PROJECT_DIR / "models"
 
 HOLDING = ("never", "sometimes", "always")
 COPILOT = ("off", "readbacks", "full")
+CHATTER = ("off", "some", "busy")
+PROVIDERS = ("openrouter", "local")
 
 
 @dataclass
@@ -55,6 +57,11 @@ class Llm:
     model: str = "anthropic/claude-haiku-5.5"
     fallback_models: list[str] = field(default_factory=lambda: ["google/gemini-2.5-flash-lite"])
     max_tokens: int = 200
+    # "openrouter" (your key, any model) or "local": a model on this machine or network behind an
+    # OpenAI-compatible address, such as Ollama or LM Studio. No key, no cost, nothing leaves the machine.
+    provider: str = "openrouter"
+    local_url: str = "http://localhost:11434/v1/chat/completions"
+    local_model: str = "llama3.1"
 
 
 @dataclass
@@ -65,6 +72,7 @@ class Tts:
     atis_speed: float = 1.25
     pilot_voice: str = "am_adam"  # reads typed, clicked and copilot calls aloud
     speak_pilot_text: bool = True
+    vary_voices: bool = True  # every controller has a voice of their own; off: they all use `voice`
 
 
 @dataclass
@@ -82,6 +90,15 @@ class Atc:
     # (also tunes hand-off frequencies and checks in with the next controller).
     copilot: str = "off"
     traffic: bool = True  # traffic calls and runway sequencing against X-Plane's AI aircraft
+    chatter: str = "some"  # other aircraft heard on the frequency: "off", "some" or "busy". Sound only.
+
+
+@dataclass
+class Remote:
+    """The app's screen in a browser on another device on your network (a phone or a tablet)."""
+
+    enabled: bool = False
+    port: int = 8787
 
 
 @dataclass
@@ -94,17 +111,26 @@ class Config:
     tts: Tts = field(default_factory=Tts)
     radio: Radio = field(default_factory=Radio)
     atc: Atc = field(default_factory=Atc)
+    remote: Remote = field(default_factory=Remote)
 
 
 # What the app's settings screen may change, and what each value must look like.
 EDITABLE: dict[str, dict[str, object]] = {
     "audio": {"input_device": (int, type(None)), "output_device": (int, type(None))},
     "ptt": {"key": str, "joystick": (str, type(None)), "joystick_button": (int, type(None))},
-    "tts": {"voice": str, "atis_voice": str, "pilot_voice": str, "speed": (int, float), "speak_pilot_text": bool},
-    "llm": {"model": str},
+    "tts": {
+        "voice": str,
+        "atis_voice": str,
+        "pilot_voice": str,
+        "speed": (int, float),
+        "speak_pilot_text": bool,
+        "vary_voices": bool,
+    },  # fmt: skip
+    "llm": {"model": str, "provider": PROVIDERS, "local_url": str, "local_model": str},
     "radio": {"enabled": bool},
-    "atc": {"holding": HOLDING, "copilot": COPILOT, "traffic": bool},
+    "atc": {"holding": HOLDING, "copilot": COPILOT, "traffic": bool, "chatter": CHATTER},
     "sim": {"allow_tuning": bool, "auto_tune": bool},
+    "remote": {"enabled": bool},
 }
 
 
@@ -139,6 +165,8 @@ def validate(changes: dict) -> dict:
                 ok = False
             if ok and (section, key) == ("tts", "speed"):
                 ok = 0.7 <= value <= 1.6
+            if ok and (section, key) == ("llm", "local_url"):
+                ok = value.startswith(("http://", "https://"))
             if not ok:
                 raise ValueError(f"'{value}' is not a valid value for {section}.{key}.")
             cleaned.setdefault(section, {})[key] = value

@@ -59,7 +59,7 @@ async function launchEngine(): Promise<void> {
   if (paths.home) mkdirSync(paths.home, { recursive: true })
   engine = startEngine(
     engineSteps(paths, port, Boolean(process.env.PROATC_NO_GPU_LIBS)),
-    engineEnv(paths, token, process.env),
+    engineEnv(paths, token, process.env, join(__dirname, '../renderer')),
     paths.packaged ? app.getPath('userData') : paths.projectDir,
     (line) => {
       engineLog.push(line)
