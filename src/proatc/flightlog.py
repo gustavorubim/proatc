@@ -14,7 +14,7 @@ from pathlib import Path
 
 KEPT = 5000
 WITH_CONTEXT = ("pilot", "atc", "atis", "understood", "silent", "info", "error", "coach")
-SKIPPED = ("tx", "timings", "status", "settings", "log_saved")
+SKIPPED = ("tx", "timings", "status", "settings", "log_saved", "chatter", "debrief", "capture")
 
 
 class FlightLog:
@@ -60,7 +60,8 @@ class FlightLog:
         """Write the transcript (.txt) and the full record (.json). Returns the transcript's path."""
         folder.mkdir(parents=True, exist_ok=True)
         stem = folder / f"flight-{datetime.now():%Y%m%d-%H%M%S}"
-        stem.with_suffix(".txt").write_text(self.text(), encoding="utf-8")
+        extra = dict(extra or {})
+        stem.with_suffix(".txt").write_text(self.text() + extra.pop("debrief_text", ""), encoding="utf-8")
         payload = {"started": self.started.isoformat(timespec="seconds"), **(extra or {}), "events": list(self.records)}
         stem.with_suffix(".json").write_text(json.dumps(payload, indent=1, default=str), encoding="utf-8")
         return stem.with_suffix(".txt")

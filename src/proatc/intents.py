@@ -33,6 +33,11 @@ INTENTS = {
     "request_weather": "asks for the wind, the Q N H or altimeter, or the weather at an airport",
     "request_deviation": "asks to deviate left or right of track, usually to avoid weather",
     "clear_of_weather": "reports clear of weather or able to resume navigation",
+    "request_approach": "asks for a particular type of instrument approach (I L S, R NAV, V O R, localiser, N D B)",
+    "request_visual": "reports the field or the runway in sight, or asks for a visual approach",
+    "request_diversion": "asks to divert to another airport or to the alternate",
+    "request_crossing": "on the ground, holding short of a runway or asking to cross it",
+    "request_progressive": "asks for progressive taxi instructions, or is unsure where to taxi",
     "request_touch_and_go": "asks for a touch and go",
     "going_around": "going around / missed approach",
     "runway_vacated": "reports the runway vacated / clear of the runway",
@@ -58,6 +63,7 @@ Keys:
 - "heading": a heading said, as a number of degrees, or null
 - "direction": "left" or "right" for a requested deviation, or null
 - "fix": the waypoint or navaid of a "direct to" request, as its identifier in capital letters (e.g. "BIBAX"), or null
+- "approach": the type of approach asked for or read back: "ILS", "LOC", "RNAV", "VOR", "NDB" or "visual", or null
 - "touch_and_go": true if a touch and go is requested or read back, else false
 
 Rules:
@@ -86,6 +92,7 @@ class Intent:
     heading: float | None = None
     fix: str | None = None
     direction: str | None = None
+    approach: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> Intent:
@@ -134,6 +141,14 @@ def _clean(data: dict) -> Intent:
         intent.direction = data["direction"]
     if data.get("position") in ("downwind", "base", "final"):
         intent.position = data["position"]
+    approach = str(data.get("approach", "")).upper().replace(" ", "").replace(".", "")
+    approach = {"RNP": "RNAV", "GPS": "RNAV", "GNSS": "RNAV", "LOCALISER": "LOC", "LOCALIZER": "LOC", "GLS": "ILS"}.get(
+        approach, approach
+    )
+    if approach in ("ILS", "LOC", "RNAV", "VOR", "NDB"):
+        intent.approach = approach
+    elif approach == "VISUAL":
+        intent.approach = "visual"
     intent.touch_and_go = data.get("touch_and_go") is True
     for key, low, high in (("altitude", 0, 60000), ("heading", 0, 360)):
         try:
@@ -159,6 +174,9 @@ class IntentParser:
     def __init__(self, controller):
         self.controller = controller  # reuses the OpenRouter client, retries and fallback models
 
-    def parse(self, transcript: str, last_instruction: str = "") -> Intent:
+    def parse(self, transcript: str, last_instruction: str = "", known: list[str] | None = None) -> Intent:
+        """`known` lists waypoint and airport identifiers of this flight, so a misheard name can be matched."""
         user = f"Controller's last instruction: {last_instruction or '(none)'}\nPilot transmission: {transcript}"
+        if known:
+            user = f"Waypoints and airports of this flight: {' '.join(known[:40])}\n{user}"
         return parse_json(self.controller.complete(SYSTEM, user, max_tokens=200, temperature=0))

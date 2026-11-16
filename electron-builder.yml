@@ -9,6 +9,10 @@ files:
   - out/**
   - package.json
 
+# The page is also served to a phone or tablet by the engine, which cannot read inside the archive.
+asarUnpack:
+  - out/renderer/**
+
 # Switch off the ways a packaged Electron app can be made to run other code: as a plain
 # Node.js runtime, through NODE_OPTIONS or --inspect, or from files outside the archive.
 electronFuses:

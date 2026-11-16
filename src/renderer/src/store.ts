@@ -1,8 +1,8 @@
 // What the window shows, as a pure function of the messages received from the engine.
 
-import type { EngineMessage, EngineState } from '../../shared/protocol'
+import type { Debrief, EngineMessage, EngineState } from '../../shared/protocol'
 
-export type LineKind = 'pilot' | 'atc' | 'atis' | 'note' | 'error' | 'coach'
+export type LineKind = 'pilot' | 'atc' | 'atis' | 'note' | 'error' | 'coach' | 'chatter'
 
 export interface Line {
   id: number
@@ -21,6 +21,9 @@ export interface Store {
   lastInstruction: { station: string; text: string } | null
   fatal: string | null
   savedLog: string | null
+  debrief: Debrief | null
+  /** A browser on another device: 'ask' for the pairing code, 'wrong' when the engine refused it. */
+  pairing: 'no' | 'ask' | 'wrong'
   nextId: number
 }
 
@@ -35,11 +38,17 @@ export const initialStore: Store = {
   lastInstruction: null,
   fatal: null,
   savedLog: null,
+  debrief: null,
+  pairing: 'no',
   nextId: 1
 }
 
 export type Action =
-  { type: 'link'; link: Store['link'] } | { type: 'fatal'; text: string } | { type: 'message'; message: EngineMessage }
+  | { type: 'link'; link: Store['link'] }
+  | { type: 'fatal'; text: string }
+  | { type: 'message'; message: EngineMessage }
+  | { type: 'pair'; pairing: Store['pairing'] }
+  | { type: 'close_debrief' }
 
 function push(store: Store, kind: LineKind, who: string, text: string, meta?: string): Store {
   const line: Line = { id: store.nextId, kind, who, text, meta }
@@ -63,6 +72,8 @@ const SOURCE_LABEL = { voice: 'voice', typed: 'typed', clicked: 'clicked', copil
 export function reduce(store: Store, action: Action): Store {
   if (action.type === 'link') return { ...store, link: action.link }
   if (action.type === 'fatal') return { ...store, fatal: action.text }
+  if (action.type === 'pair') return { ...store, pairing: action.pairing }
+  if (action.type === 'close_debrief') return { ...store, debrief: null }
 
   const message = action.message
   switch (message.type) {
@@ -100,6 +111,11 @@ export function reduce(store: Store, action: Action): Store {
       return push(store, 'coach', 'Instructor', message.text)
     case 'log_saved':
       return { ...push(store, 'note', '', `Flight log saved: ${message.path}`), savedLog: message.path }
+    case 'chatter':
+      // Other aircraft on the frequency: shown faintly, and never as the last instruction.
+      return push(push(store, 'chatter', message.station, message.said), 'chatter', message.callsign, message.answered)
+    case 'debrief':
+      return { ...store, debrief: message }
     case 'capture':
       return store
     default:

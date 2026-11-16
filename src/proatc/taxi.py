@@ -5,7 +5,7 @@ from __future__ import annotations
 import heapq
 from dataclasses import dataclass, field
 
-from .navdata import distance_nm
+from .navdata import bearing, distance_nm
 
 CROSSING_PENALTY_M = 3000  # prefer routes that do not cross another runway
 FULL_LENGTH_M = 400  # runway entries this close to the threshold count as full-length departures
@@ -24,7 +24,10 @@ class Parking:
     name: str
     lat: float
     lon: float
-    kind: str
+    kind: str  # gate, tie_down, hangar or misc
+    categories: set[str] = field(default_factory=set)  # heavy, jets, turboprops, props, helos
+    operation: str = ""  # airline, cargo, general_aviation or military (row 1301)
+    airlines: set[str] = field(default_factory=set)  # ICAO airline codes that use this stand
 
 
 @dataclass
@@ -59,6 +62,7 @@ class Route:
     taxiways: list[str]  # names in order, consecutive repeats collapsed
     crossings: list[str]  # other runways crossed on the way
     distance_m: float
+    turns: list[str] = field(default_factory=list)  # "left" / "right" / "" onto each taxiway after the first
 
 
 def parse_taxi(lines: list[str]) -> TaxiNetwork:
@@ -76,7 +80,13 @@ def parse_taxi(lines: list[str]) -> TaxiNetwork:
         elif line.startswith("1300 "):
             t = line.split(None, 6)
             if len(t) >= 6:
-                net.parking.append(Parking(t[6].strip() if len(t) > 6 else "", float(t[1]), float(t[2]), t[4]))
+                categories = set(t[5].split("|")) if len(t) > 5 else set()
+                net.parking.append(Parking(t[6].strip() if len(t) > 6 else "", float(t[1]), float(t[2]), t[4], categories))
+        elif line.startswith("1301 ") and net.parking:
+            t = line.split()
+            if len(t) >= 3:
+                net.parking[-1].operation = t[2]
+                net.parking[-1].airlines = {code.upper() for code in t[3:]}
     for a, b, twoway, runway, name in pending:
         if a not in net.nodes or b not in net.nodes:
             continue
@@ -114,22 +124,31 @@ def _shortest(net: TaxiNetwork, graph: dict[int, list[Edge]], start: int, target
 
 
 def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str | None) -> Route:
-    names: list[str] = []
     crossings: list[str] = []
+    steps: list[tuple[str, float]] = []  # (taxiway, direction of travel) per edge, goal first
     distance = 0.0
     node = goal
     while node != start:
         prior, edge = previous[node]
         distance += edge.length_m
-        if edge.name and (not names or names[-1] != edge.name):
-            names.append(edge.name)
+        steps.append((edge.name, bearing(*net.nodes[prior], *net.nodes[node])))
         crossed = net.runway_of(node, excluding=target_runway) if node != goal else None
         if crossed and crossed not in crossings:
             crossings.append(crossed)
         node = prior
-    names.reverse()
+    steps.reverse()
     crossings.reverse()
-    return Route(names, crossings, distance)
+    names: list[str] = []
+    turns: list[str] = []
+    heading = None
+    for name, direction in steps:
+        if name and (not names or names[-1] != name):
+            if names:
+                change = (direction - heading + 180) % 360 - 180 if heading is not None else 0.0
+                turns.append("right" if change > 25 else "left" if change < -25 else "")
+            names.append(name)
+        heading = direction
+    return Route(names, crossings, distance, turns)
 
 
 def _route(net: TaxiNetwork, start: int, goals: dict[int, float], target_runway: str | None) -> Route | None:
@@ -162,6 +181,43 @@ def route_to_runway(net: TaxiNetwork, lat: float, lon: float, runway_end: str, t
 
 def nearest_parking(net: TaxiNetwork, lat: float, lon: float) -> Parking | None:
     return min(net.parking, key=lambda p: distance_nm(lat, lon, p.lat, p.lon), default=None)
+
+
+HEAVY_TYPES = ("B74", "B77", "B78", "B76", "B75", "A33", "A34", "A35", "A38", "A30", "A31", "MD1")
+JET_TYPES = ("A2", "A3", "B7", "E1", "E2", "E7", "CR", "MD", "BC", "F7", "F1", "C5", "C6", "C7", "GL", "LJ")
+TURBOPROP_TYPES = ("AT", "DH", "SF", "B3", "PC", "TB", "SW")
+
+
+def aircraft_category(icao_type: str | None, airline: bool = False) -> str:
+    """The apt.dat stand category an aircraft belongs to, from its ICAO type."""
+    kind = (icao_type or "").upper()
+    if kind[:3] in HEAVY_TYPES:
+        return "heavy"
+    if kind[:2] in JET_TYPES:
+        return "jets"
+    if kind[:2] in TURBOPROP_TYPES:
+        return "turboprops"
+    return "jets" if airline else "props"
+
+
+def assign_stand(net: TaxiNetwork, category: str, airline: str | None, near: tuple[float, float], rng) -> Parking | None:
+    """A stand for an arriving aircraft: one that takes its size, its airline's if the scenery says so,
+    otherwise one of the nearer suitable ones (not always the same, as at a real airport)."""
+    stands = [p for p in net.parking if p.kind in ("gate", "tie_down") and p.name]
+    fits = [p for p in stands if category in p.categories]
+    if not fits:
+        return None
+    wanted = "airline" if category in ("heavy", "jets") else "general_aviation"
+    for pool in (
+        [p for p in fits if airline and airline in p.airlines],
+        [p for p in fits if p.operation == wanted and (category == "props" or p.kind == "gate")],
+        [p for p in fits if p.operation == wanted],
+        fits,
+    ):
+        if pool:
+            nearest = sorted(pool, key=lambda p: distance_nm(*near, p.lat, p.lon))[:6]
+            return rng.choice(nearest)
+    return None
 
 
 def route_to_point(net: TaxiNetwork, lat: float, lon: float, target: tuple[float, float]) -> Route | None:

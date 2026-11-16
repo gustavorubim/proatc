@@ -6,16 +6,28 @@ another program or a web page on this machine cannot key the microphone or chang
 Engine -> app: every event from events.py, plus a "state" message about once a second.
 App -> engine: {"cmd": "ptt", "down": bool}, {"cmd": "say", "text": str},
                {"cmd": "click", "text": str, "intent": {...}}, {"cmd": "set_key", "key": str}
+
+The view for other devices (a phone or tablet on the same network) is a second listener, off
+until it is switched on in the settings. It serves the app's own page over HTTP and accepts the
+same messages, but asks for a pairing code instead of the app's token, may not change the key,
+the language model or its own switch, and locks out a device that keeps guessing the code.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
+import secrets
+import socket
 import threading
+import time
 from collections import deque
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 from websockets.sync.server import serve
 
 from . import phraseology as say
@@ -29,6 +41,46 @@ from .voice_loop import Session
 from .xpbridge import SimUnavailable, describe, magnetic_variation
 
 BACKLOG = 200
+CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I: the code is typed on a phone
+MAX_BAD_CODES = 10  # wrong pairing codes within LOCKOUT_S before other devices are refused for a while
+LOCKOUT_S = 300
+CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".ico": "image/x-icon",
+    ".woff2": "font/woff2",
+    ".json": "application/json",
+}
+
+
+def web_dir() -> Path | None:
+    """The app's built page, which the desktop app points to. None from a bare `proatc serve`."""
+    folder = os.environ.get("PROATC_WEB_DIR")
+    return Path(folder) if folder and (Path(folder) / "index.html").exists() else None
+
+
+def lan_address() -> str:
+    """This machine's address on the local network. Nothing is sent: connecting a UDP socket only picks a route."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("10.255.255.255", 1))
+        return probe.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        probe.close()
+
+
+def pairing_code() -> str:
+    """The code another device must enter. Made once and kept, so a bookmarked phone keeps working."""
+    code = load_settings().get("remote_code")
+    if not isinstance(code, str) or len(code) != 8:
+        code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
+        save_settings({"remote_code": code})
+    return code
 
 
 def save_key(key: str) -> None:
@@ -53,7 +105,8 @@ def build_state(session: Session, db: AirportDB) -> dict:
         "status": {
             "sim": bool(session.ready and session.bridge.connected),
             "has_key": session.controller is not None,
-            "model": config.llm.model,
+            "model": config.llm.local_model if config.llm.provider == "local" else config.llm.model,
+            "provider": config.llm.provider,
             "ptt_key": config.ptt.key,
             "stt_device": session.stt.device if session.ready else None,
         },
@@ -132,6 +185,9 @@ class AppServer:
         self.backlog: deque = deque(maxlen=BACKLOG)
         self.lock = threading.Lock()
         self._last_state = ""
+        self.remote = None  # the listener for other devices, while it is switched on
+        self._bad_codes: deque = deque(maxlen=MAX_BAD_CODES)
+        self._address = lan_address()
 
     # ---- outgoing -----------------------------------------------------------
 
@@ -160,7 +216,9 @@ class AppServer:
                 if self.session.ready and db is None:
                     db = AirportDB()
                     db.centers, db.metars = self.session.centers, self.session.metars
-                message = json.dumps(build_state(self.session, db))
+                state = build_state(self.session, db)
+                state["remote"] = self.remote_info()
+                message = json.dumps(state)
             except Exception as error:
                 message = json.dumps({"type": "error", "text": f"state: {type(error).__name__}: {error}"})
             if message != self._last_state:
@@ -169,9 +227,20 @@ class AppServer:
 
     # ---- incoming -----------------------------------------------------------
 
-    def _handle(self, connection) -> None:
+    def _allowed(self, token: str, remote: bool) -> bool:
+        if not remote:
+            return hmac.compare_digest(token, self.token)
+        now = time.monotonic()
+        if len(self._bad_codes) == MAX_BAD_CODES and now - self._bad_codes[0] < LOCKOUT_S:
+            return False  # too many wrong codes: nobody gets in from outside for a while
+        if hmac.compare_digest(token.upper(), pairing_code()):
+            return True
+        self._bad_codes.append(now)
+        return False
+
+    def _handle(self, connection, remote: bool = False) -> None:
         query = parse_qs(urlparse(connection.request.path).query)
-        if query.get("token", [""])[0] != self.token:
+        if not self._allowed(query.get("token", [""])[0], remote):
             connection.close(1008, "bad token")
             return
         with self.lock:
@@ -183,7 +252,7 @@ class AppServer:
                 connection.send(self._last_state)
             for message in connection:
                 try:
-                    self._command(json.loads(message))
+                    self._command(json.loads(message), remote)
                 except (PlanError, SimUnavailable, ValueError) as error:
                     self.emit({"type": "error", "text": str(error) or "That did not work."})
                 except Exception as error:
@@ -192,8 +261,20 @@ class AppServer:
             with self.lock:
                 self.clients.discard(connection)
 
-    def _command(self, command: dict) -> None:
+    def _command(self, command: dict, remote: bool = False) -> None:
         session, name = self.session, command.get("cmd")
+        if remote and name == "set_key":
+            raise ValueError("The key can only be changed in the app on the computer.")
+        if name == "settings":
+            # Before the engine is ready too: the model and the view for other devices do not need it.
+            changes = dict(command.get("changes") or {})
+            if remote:
+                changes.pop("remote", None)
+                changes.pop("llm", None)
+            session.apply_settings(changes)
+            if "remote" in changes:
+                self.set_remote(session.config.remote.enabled)
+            return
         if name == "set_key":
             key = str(command.get("key", "")).strip()
             if key:
@@ -217,13 +298,11 @@ class AppServer:
             session.engine.set_plan(None)
         elif name == "tune":
             session.tune(str(command.get("mhz", "")))
-        elif name == "settings":
-            session.apply_settings(command.get("changes") or {})
         elif name == "capture_ptt":
             session.capture_ptt()
         elif name == "clear_joystick":
             session.apply_settings({"ptt": {"joystick": None, "joystick_button": None}})
-        elif name in ("explain", "what_next"):
+        elif name in ("explain", "what_next", "debrief"):
             session.ask(name)
         elif name == "save_log":
             session.save_log()
@@ -235,6 +314,58 @@ class AppServer:
             session.submit(str(command["text"]).strip()[:500])
         elif name == "click" and str(command.get("text", "")).strip():
             session.submit(str(command["text"]).strip()[:500], Intent.from_dict(command.get("intent") or {}))
+
+    # ---- the view for other devices ------------------------------------------
+
+    def remote_info(self) -> dict:
+        config = self.session.config.remote
+        return {
+            "available": web_dir() is not None,
+            "enabled": config.enabled,
+            "running": self.remote is not None,
+            "url": f"http://{self._address}:{config.port}",
+            "code": pairing_code() if config.enabled else "",
+        }
+
+    def set_remote(self, on: bool) -> None:
+        """Start or stop listening for other devices on the network."""
+        if not on:
+            if self.remote:
+                self.remote.shutdown()
+                self.remote = None
+            return
+        if self.remote:
+            return
+        if web_dir() is None:
+            raise ValueError("The view for other devices needs the desktop app: its page was not found.")
+        port = self.session.config.remote.port
+        try:
+            self.remote = serve(lambda connection: self._handle(connection, True), "0.0.0.0", port, process_request=self._page)
+        except OSError as error:
+            raise ValueError(f"Port {port} could not be opened for other devices: {error}") from error
+        threading.Thread(target=self.remote.serve_forever, name="remote-view", daemon=True).start()
+        self._address = lan_address()
+
+    @staticmethod
+    def _page(connection, request):
+        """Serve the app's page to a browser; let WebSocket requests through."""
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return None
+        root = web_dir()
+        path = urlparse(request.path).path
+        target = (root / (path.lstrip("/") or "index.html")).resolve() if root else None
+        if target is None or not target.is_file() or root.resolve() not in target.parents:
+            return connection.respond(404, "Not found\n")
+        body = target.read_bytes()
+        headers = Headers(
+            {
+                "Content-Type": CONTENT_TYPES.get(target.suffix.lower(), "application/octet-stream"),
+                "Content-Length": str(len(body)),
+                "Cache-Control": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            }
+        )
+        return Response(200, "OK", headers, body)
 
     # ---- lifecycle ----------------------------------------------------------
 
@@ -265,10 +396,16 @@ class AppServer:
         if os.environ.get("PROATC_SELFTEST"):
             self._selftest()
             return
+        if self.session.config.remote.enabled:
+            try:
+                self.set_remote(True)
+            except ValueError as error:
+                self.emit({"type": "error", "text": str(error)})
         try:
             self.session.load()
             self.session.run_forever()
         finally:
+            self.set_remote(False)
             server.shutdown()
 
 

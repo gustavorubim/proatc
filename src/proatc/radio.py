@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import random
 import threading
+import time
 
+import numpy as np
+
+from . import chatter
 from . import phraseology as say
 from .atis import AtisBook, runways_in_use, uses_faa_style
 from .events import Emit, console
@@ -33,6 +38,16 @@ def observe(db: AirportDB, airport, state: dict) -> Weather | None:
         if reported:
             return reported
     return from_snapshot(state, airport.elev_ft)
+
+
+def station_voice(tts, station) -> dict:
+    """The arguments for `tts.speak` that give this station its own voice."""
+    pick = getattr(tts, "for_station", None)
+    if station is None or pick is None:
+        return {}
+    airport = getattr(station, "airport", None)
+    ident = airport.ident if airport else getattr(getattr(station, "center", None), "facility", None)
+    return pick(station.key, ident)
 
 
 def briefing(station: Station, weather: Weather | None, letter: str | None, variation: float) -> dict:
@@ -91,6 +106,10 @@ class AtisBroadcaster(threading.Thread):
         self._halt = threading.Event()
         self._text = ""
         self._audio = None
+        self._rng = random.Random()
+        self._chatter_key: str | None = None  # the station whose frequency the chatter is on
+        self._chatter_at = 0.0  # when the next exchange is due
+        self._chatter_until = 0.0  # while an exchange is playing
 
     def stop(self) -> None:
         self._halt.set()
@@ -109,7 +128,10 @@ class AtisBroadcaster(threading.Thread):
         state = self.bridge.snapshot()
         khz, station = current_station(self.db, state)
         if station and station.kind != "atis" and self.engine:
-            self._unprompted(station, state)
+            if not self._unprompted(station, state):
+                self._chatter(station, state)
+        elif self._chatter_key:
+            self._quiet()
         if not station or station.kind != "atis":
             return
         weather = observe(self.db, station.airport, state)
@@ -129,17 +151,62 @@ class AtisBroadcaster(threading.Thread):
         )
         self._halt.wait(2)  # pause between repeats
 
-    def _unprompted(self, station: Station, state: dict) -> None:
+    def _unprompted(self, station: Station, state: dict) -> bool:
+        """Say what the controller has to say without being asked. True when something was said."""
         weather = observe(self.db, station.airport, state) if station.airport else None
         issue = self.book.current(station.airport, weather, state.get("zulu_seconds", 0.0)) if weather else None
         reply = self.engine.tick(station, issue, state)
         if not reply or not reply.text:
-            return
+            return False
+        self._chatter_until = 0.0
         self.emit({"type": "atc", "station": station.callsign, "text": reply.text, "unprompted": True})
-        samples, rate = self.tts.speak(reply.text)
+        samples, rate = self.tts.speak(reply.text, **station_voice(self.tts, station))
         if self.config.radio.enabled:
             samples = radio_effect(samples, rate, self.config.radio.noise)
         ticket = self.player.play(samples, rate)
         self.player.wait(ticket, should_stop=lambda: self._halt.is_set() or self.busy.is_set())
         if self.after:
             self.after()
+        return True
+
+    # ---- other aircraft on the frequency (sound only) -----------------------
+
+    def _quiet(self) -> None:
+        """The frequency was left: an exchange still playing belongs to it and stops."""
+        if time.monotonic() < self._chatter_until:
+            self.player.stop()
+        self._chatter_key, self._chatter_until = None, 0.0
+
+    def _chatter(self, station: Station, state: dict) -> None:
+        mode = self.config.atc.chatter
+        now = time.monotonic()
+        if self._chatter_key != station.key:
+            self._quiet()
+            self._chatter_key = station.key
+            self._chatter_at = now + self._rng.uniform(*chatter.FIRST_AFTER_S)
+            return
+        if mode not in ("some", "busy") or now < self._chatter_at or now < self._chatter_until:
+            return
+        flight = self.engine.flight
+        if flight.pending is not None or getattr(self.player, "playing", False):
+            self._chatter_at = now + 4  # the controller is waiting for your readback, or someone is talking
+            return
+        weather = observe(self.db, station.airport, state) if station.airport else None
+        issue = self.book.current(station.airport, weather, state.get("zulu_seconds", 0.0)) if weather else None
+        self._chatter_at = now + chatter.gap_seconds(station.kind, mode, self._rng)
+        found = chatter.exchange(station, issue, self.engine, self._rng, self.engine._callsign(state))
+        if not found:
+            return
+        callsign, said, answered = found
+        voice = station_voice(self.tts, station)
+        first, rate = self.tts.speak(said, **voice)
+        others = [n for n in getattr(self.tts, "voices", list)() if n != voice.get("voice") and "santa" not in n]
+        second, _ = self.tts.speak(answered, **({"voice": self._rng.choice(others)} if others else {}))
+        samples = np.concatenate([first, np.zeros(int(rate * 0.35), dtype=np.float32), second])
+        if self.config.radio.enabled:
+            samples = radio_effect(samples, rate, self.config.radio.noise * 1.5)
+        if self.busy.is_set() or self._halt.is_set() or getattr(self.player, "playing", False):
+            return  # you keyed the microphone, or a controller started talking, while this was being prepared
+        self.emit({"type": "chatter", "station": station.callsign, "callsign": callsign, "said": said, "answered": answered})
+        self.player.play(samples * 0.6, rate)
+        self._chatter_until = time.monotonic() + len(samples) / rate

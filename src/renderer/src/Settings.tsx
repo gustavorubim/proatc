@@ -41,15 +41,22 @@ export function SettingsDialog({
   engine,
   send,
   onClose,
-  onKey
+  onKey,
+  inApp
 }: {
   engine: EngineState
   send: Send
   onClose: () => void
   onKey: () => void
+  /** False in a browser on another device, where the key and the model cannot be changed. */
+  inApp: boolean
 }) {
   const { values, options, capturing } = engine.settings
   const [model, setModel] = useState(values.llm.model)
+  const [localModel, setLocalModel] = useState(values.llm.local_model)
+  const [localUrl, setLocalUrl] = useState(values.llm.local_url)
+  const local = values.llm.provider === 'local'
+  const remote = engine.remote
   const change = (section: string, key: string, value: unknown): void =>
     send({ cmd: 'settings', changes: { [section]: { [key]: value } } })
   const device = (value: string): number | null => (value === '' ? null : Number(value))
@@ -153,11 +160,24 @@ export function SettingsDialog({
           <Row label="Other traffic" hint="Traffic calls and runway sequencing against X-Plane's AI aircraft">
             <Toggle on={values.atc.traffic} onChange={(on) => change('atc', 'traffic', on)} />
           </Row>
+          <Row label="Radio chatter" hint="Other aircraft heard on the frequency. Sound only: they are not in the sim">
+            <select value={values.atc.chatter} onChange={(e) => change('atc', 'chatter', e.target.value)}>
+              <option value="off">Off</option>
+              <option value="some">Some</option>
+              <option value="busy">Busy</option>
+            </select>
+          </Row>
 
           <h3>Voices</h3>
+          <Row
+            label="A voice for each controller"
+            hint="British voices in the UK, American in the US and Canada. Off: one voice for all"
+          >
+            <Toggle on={values.tts.vary_voices} onChange={(on) => change('tts', 'vary_voices', on)} />
+          </Row>
           {(
             [
-              ['voice', 'Controllers'],
+              ['voice', values.tts.vary_voices ? 'Controllers (when not varied)' : 'Controllers'],
               ['atis_voice', 'ATIS'],
               ['pilot_voice', 'Copilot and typed calls']
             ] as const
@@ -188,17 +208,62 @@ export function SettingsDialog({
           </Row>
 
           <h3>Language model</h3>
-          <Row label="OpenRouter model" hint="Used to understand what you say">
-            <input
-              value={model}
-              spellCheck={false}
-              onChange={(e) => setModel(e.target.value)}
-              onBlur={() => model.trim() && model !== values.llm.model && change('llm', 'model', model.trim())}
-            />
-          </Row>
-          <Row label="OpenRouter key" hint={engine.status.has_key ? 'A key is saved' : 'No key yet'}>
-            <button onClick={onKey}>{engine.status.has_key ? 'Replace…' : 'Add…'}</button>
-          </Row>
+          {inApp && (
+            <Row
+              label="Where the model runs"
+              hint={
+                local
+                  ? 'On this computer or network, through Ollama or LM Studio: no key, no cost'
+                  : 'OpenRouter, with your own key'
+              }
+            >
+              <select value={values.llm.provider} onChange={(e) => change('llm', 'provider', e.target.value)}>
+                <option value="openrouter">OpenRouter</option>
+                <option value="local">Local model</option>
+              </select>
+            </Row>
+          )}
+          {inApp && local && (
+            <>
+              <Row label="Local model" hint="As the local server names it, for example llama3.1 or qwen2.5:7b">
+                <input
+                  value={localModel}
+                  spellCheck={false}
+                  onChange={(e) => setLocalModel(e.target.value)}
+                  onBlur={() =>
+                    localModel.trim() &&
+                    localModel !== values.llm.local_model &&
+                    change('llm', 'local_model', localModel.trim())
+                  }
+                />
+              </Row>
+              <Row label="Address" hint="An OpenAI-compatible chat address">
+                <input
+                  value={localUrl}
+                  spellCheck={false}
+                  onChange={(e) => setLocalUrl(e.target.value)}
+                  onBlur={() =>
+                    localUrl.trim() && localUrl !== values.llm.local_url && change('llm', 'local_url', localUrl.trim())
+                  }
+                />
+              </Row>
+            </>
+          )}
+          {inApp && !local && (
+            <>
+              <Row label="OpenRouter model" hint="Used to understand what you say">
+                <input
+                  value={model}
+                  spellCheck={false}
+                  onChange={(e) => setModel(e.target.value)}
+                  onBlur={() => model.trim() && model !== values.llm.model && change('llm', 'model', model.trim())}
+                />
+              </Row>
+              <Row label="OpenRouter key" hint={engine.status.has_key ? 'A key is saved' : 'No key yet'}>
+                <button onClick={onKey}>{engine.status.has_key ? 'Replace…' : 'Add…'}</button>
+              </Row>
+            </>
+          )}
           <Row
             label="Spent this session"
             hint={`${cost.calls} requests · ${(cost.prompt_tokens + cost.completion_tokens).toLocaleString('en-US')} tokens`}
@@ -208,6 +273,28 @@ export function SettingsDialog({
               Reset
             </button>
           </Row>
+
+          {inApp && remote && (
+            <>
+              <h3>Phone or tablet</h3>
+              <Row
+                label="Show this screen on another device"
+                hint={
+                  remote.available
+                    ? 'On the same network only. Windows may ask to allow the connection the first time'
+                    : 'Available in the installed app'
+                }
+              >
+                <Toggle on={values.remote.enabled} onChange={(on) => change('remote', 'enabled', on)} />
+              </Row>
+              {remote.enabled && remote.running && (
+                <Row label="Open in the device's browser" hint="Then enter the pairing code">
+                  <span className="mono remote-url">{remote.url}</span>
+                  <span className="mono remote-code">{remote.code}</span>
+                </Row>
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>

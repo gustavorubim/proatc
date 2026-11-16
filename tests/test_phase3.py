@@ -279,7 +279,7 @@ def test_suggested_calls_follow_the_flight_and_carry_their_intent(db):
 
     engine.handle(Intent("request_taxi"), ground, ISSUE, here)
     engine.handle(Intent("readback", runway="27"), ground, ISSUE, here)
-    assert labels(ground) == ["Ready for departure", "Say again", "Radio check"]
+    assert labels(ground) == ["Ready for departure", "Progressive taxi", "Say again", "Radio check"]
     ready = [item for item in engine.suggestions(tower, ISSUE, here) if item["label"] == "Ready for departure"][0]
     assert ready["text"] == "Testfield Tower, Golf Alfa Bravo Charlie Delta, holding short runway two seven, ready for departure"
 

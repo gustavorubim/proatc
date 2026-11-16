@@ -56,8 +56,22 @@ export function engineSteps(paths: EnginePaths, port: number, skipGpuLibs = fals
   ]
 }
 
-export function engineEnv(paths: EnginePaths, token: string, base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+/**
+ * Where the engine finds the app's own page, to show it to a phone or tablet. In the installed
+ * app the page is kept outside the archive (asarUnpack) so that Python can read it.
+ */
+export function webDir(rendererDir: string): string {
+  return rendererDir.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1')
+}
+
+export function engineEnv(
+  paths: EnginePaths,
+  token: string,
+  base: NodeJS.ProcessEnv,
+  rendererDir?: string
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base, PROATC_TOKEN: token, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' }
+  if (rendererDir) env.PROATC_WEB_DIR = webDir(rendererDir)
   if (paths.home) env.PROATC_HOME = paths.home
   if (paths.venv) env.UV_PROJECT_ENVIRONMENT = paths.venv
   return env

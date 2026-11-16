@@ -1,9 +1,10 @@
 """Radar vectors to final approach: where the aircraft is relative to the runway, and what to say next.
 
-Without other traffic there is nobody to sequence behind, so the pattern is the simplest one
-that works from any direction: a downwind leg if the aircraft is not yet far enough out, a
-base leg toward the extended centreline, then a 30 degree intercept with the approach clearance.
-Terrain is not considered.
+The pattern depends on where the aircraft comes from. From behind or abeam the airport it is a
+downwind leg, a base leg and a 30 degree intercept. An aircraft already well out along the
+approach is not turned through 90 degrees: it closes the centreline on a 45 degree dogleg. One
+nearly lined up goes straight in. How far out final is joined differs from arrival to arrival
+(`final_nm`), and a downwind leg is extended while other traffic is on final.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ BASE_AT_NM = 12  # how far out a downwind leg runs before the base turn
 CLOSE_NM = 3.5  # lateral distance at which base becomes the intercept heading
 VECTOR_RANGE_NM = 30  # further out than this, only a descent is given
 INTERCEPT_DEG = 30
+DOGLEG_DEG = 45
+DOGLEG_BEYOND_NM = 4  # this much further out than the joining point, a dogleg replaces the base leg
 
 
 @dataclass
@@ -48,11 +51,16 @@ def _round_up(feet: float, step: int = 1000) -> int:
     return int(math.ceil(feet / step) * step)
 
 
-def next_vector(position: Position, course_true: float, platform_ft: int, current_ft: float, safe_ft: int = 0) -> Vector:
+def next_vector(
+    position: Position, course_true: float, platform_ft: int, current_ft: float, safe_ft: int = 0,
+    final_nm: float = FINAL_NM, extend: bool = False, inbound: bool = False,
+) -> Vector:  # fmt: skip
     """The instruction that fits where the aircraft is now.
 
     `safe_ft` is the minimum safe altitude around the airport: nothing above the published
-    approach's own joining altitude is given below it.
+    approach's own joining altitude is given below it. `final_nm` is where final is joined.
+    `extend` keeps the aircraft on its downwind leg (traffic on final). `inbound` says it has not
+    flown a downwind leg: it is coming from outside, and may close the centreline on a dogleg.
     """
     pattern_ft = max(platform_ft + 1000, int(math.ceil(safe_ft / 100) * 100))
     reciprocal = (course_true + 180) % 360
@@ -60,15 +68,18 @@ def next_vector(position: Position, course_true: float, platform_ft: int, curren
 
     if position.distance_nm > VECTOR_RANGE_NM:
         # Roughly three degrees: 300 ft for every mile beyond the point where final is joined.
-        target = platform_ft + 300 * (position.distance_nm - FINAL_NM - 5)
+        target = platform_ft + 300 * (position.distance_nm - final_nm - 5)
         return Vector("descend", None, max(pattern_ft, min(_round_up(target), _round_up(current_ft))))
 
-    far_enough = position.along_nm >= FINAL_NM - 2
+    far_enough = position.along_nm >= final_nm - 2
     if far_enough and position.cross_nm <= CLOSE_NM:
         turn = 0 if position.cross_nm < 0.7 else INTERCEPT_DEG
         return Vector("intercept", (course_true + toward * turn) % 360, platform_ft)
+    if far_enough and not extend:
+        dogleg = inbound and position.along_nm >= final_nm + DOGLEG_BEYOND_NM
+        return Vector("base", (course_true + toward * (DOGLEG_DEG if dogleg else 90)) % 360, platform_ft)
     if far_enough:
-        return Vector("base", (course_true + toward * 90) % 360, platform_ft)
+        return Vector("downwind", reciprocal, pattern_ft)
     # Not far enough out: fly away from the airport, parallel to the runway, drifting off the
     # centreline first if the aircraft is close to it so there is room for the base turn.
     drift = 20 if position.cross_nm < 4 else 0
@@ -79,5 +90,5 @@ def turn_direction(current: float, target: float) -> str:
     return "right" if (target - current) % 360 <= 180 else "left"
 
 
-def established(position: Position) -> bool:
-    return position.cross_nm < 0.6 and 0 < position.along_nm < FINAL_NM + 3
+def established(position: Position, final_nm: float = FINAL_NM) -> bool:
+    return position.cross_nm < 0.6 and 0 < position.along_nm < final_nm + 3

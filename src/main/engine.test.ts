@@ -1,7 +1,7 @@
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { engineEnv, enginePaths, engineSteps, freePort } from './engine'
+import { engineEnv, enginePaths, engineSteps, freePort, webDir } from './engine'
 
 describe('engine launcher', () => {
   it('from a source checkout, runs the engine through the developer’s uv', () => {
@@ -13,6 +13,18 @@ describe('engine launcher', () => {
     expect(env).toMatchObject({ PATH: 'x', PROATC_TOKEN: 'secret', PYTHONUNBUFFERED: '1' })
     expect(env.PROATC_HOME).toBeUndefined()
     expect(env.UV_PROJECT_ENVIRONMENT).toBeUndefined()
+  })
+
+  it('tells the engine where the page is, outside the archive in the installed app', () => {
+    const paths = enginePaths('C:\\proatc', 'C:\\res', 'C:\\data', false)
+    expect(engineEnv(paths, 't', {}, 'C:\\proatc\\out\\renderer').PROATC_WEB_DIR).toBe('C:\\proatc\\out\\renderer')
+    expect(webDir('C:\\Apps\\Pro ATC\\resources\\app.asar\\out\\renderer')).toBe(
+      'C:\\Apps\\Pro ATC\\resources\\app.asar.unpacked\\out\\renderer'
+    )
+    expect(webDir('/opt/proatc/resources/app.asar/out/renderer')).toBe(
+      '/opt/proatc/resources/app.asar.unpacked/out/renderer'
+    )
+    expect(engineEnv(paths, 't', {}).PROATC_WEB_DIR).toBeUndefined()
   })
 
   it('installed, builds its own environment from the lock file and keeps data in the user folder', () => {

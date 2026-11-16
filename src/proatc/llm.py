@@ -38,14 +38,13 @@ class LlmError(RuntimeError):
 
 
 class Controller:
-    def __init__(self, settings: Llm, api_key: str, usage: dict | None = None):
+    def __init__(self, settings: Llm, api_key: str | None, usage: dict | None = None):
         self.settings = settings
+        self.local = settings.provider == "local"  # a model behind an OpenAI-compatible address: no key, no cost
         # Running totals for this session, as OpenRouter reports them with each answer.
         self.usage = usage if usage is not None else {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
-        self.client = httpx.Client(
-            timeout=30,
-            headers={"Authorization": f"Bearer {api_key}", "X-Title": "Pro ATC"},
-        )
+        headers = {} if self.local else {"Authorization": f"Bearer {api_key}", "X-Title": "Pro ATC"}
+        self.client = httpx.Client(timeout=60 if self.local else 30, headers=headers)
         self.histories: dict[str, list[dict]] = {}
 
     def complete(
@@ -62,16 +61,25 @@ class Controller:
             "reasoning": {"enabled": False},
             "usage": {"include": True},  # ask for the cost of this request
         }
+        url, name = URL, "OpenRouter"
+        if self.local:
+            url, name = self.settings.local_url, "The local model"
+            body = {"model": self.settings.local_model, "messages": body["messages"], "max_tokens": body["max_tokens"],
+                    "temperature": temperature, "stream": False}  # fmt: skip
         for attempt in range(3):
             try:
-                response = self.client.post(URL, json=body)
+                response = self.client.post(url, json=body)
             except httpx.HTTPError as error:
+                if self.local:
+                    raise LlmError(
+                        f"The local model could not be reached at {url}. Is Ollama (or LM Studio) running? ({error})"
+                    ) from error
                 raise LlmError(f"OpenRouter request failed: {error}") from error
             if response.status_code not in (429, 502, 503) or attempt == 2:
                 break
             time.sleep(0.6 * (attempt + 1))
         if response.status_code != 200:
-            raise LlmError(f"OpenRouter returned {response.status_code}: {response.text[:300]}")
+            raise LlmError(f"{name} returned {response.status_code}: {response.text[:300]}")
         payload = response.json()
         self._count(payload.get("usage") or {})
         choice = payload["choices"][0]
