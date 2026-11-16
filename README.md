@@ -1,147 +1,74 @@
-# Pro ATC for X-Plane 12
+# Pro ATC: free AI voice ATC for X-Plane 12
 
-Free voice ATC: your own OpenRouter key for the language model, local speech-to-text (faster-whisper) and local text-to-speech (Kokoro).
+Pro ATC is a free, open-source air traffic control app for the X-Plane 12 flight simulator. You talk to controllers by voice, from clearance to landing, IFR or VFR, at any airport in the sim. Speech recognition and the controller voices run on your own computer.
 
-**Status: a full instrument flight, gate to gate, without other traffic.**
+[![Latest release](https://img.shields.io/github/v/release/gustavorubim/proatc)](https://github.com/gustavorubim/proatc/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/gustavorubim/proatc/total)](https://github.com/gustavorubim/proatc/releases)
+[![CI](https://github.com/gustavorubim/proatc/actions/workflows/ci.yml/badge.svg)](https://github.com/gustavorubim/proatc/actions/workflows/ci.yml)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 
-Pro ATC does not use X-Plane's own ATC. It reads the aircraft's state and the sim's data files, and everything a controller says is decided by its own rules engine. The language model only interprets what the pilot said (`intents.py`); replies are built from templates, so runways, routes, levels, squawks and frequencies are never invented.
+**[Download for Windows](https://github.com/gustavorubim/proatc/releases/latest)** · [Report a problem](https://github.com/gustavorubim/proatc/issues/new/choose) · [How it works](docs/how-it-works.md)
 
-With a flight plan loaded (from SimBrief, or a destination and cruise level typed in):
+![Pro ATC window: tuned frequency, flight strip, airport frequencies and the calls you can make](docs/screenshot.png)
 
-| Step | Controller | What you get |
-|---|---|---|
-| Clearance | Delivery | Destination, the SID that fits your route and runway, initial altitude from the SID, squawk |
-| Push, taxi | Ground | Push and start, a taxi route over the airport's real taxiways, a clearance for each runway crossed on the way |
-| Takeoff | Tower | Takeoff clearance with the wind, then a hand-off once airborne |
-| Climb | Departure | Identified, step climbs up to FL240 or your cruise level, hand-off to the centre whose airspace you are in |
-| Cruise | Centres | Climb to cruise, hand-offs as you cross sector boundaries, step descents starting at the right distance, with the STAR |
-| Arrival | Approach | Descent, radar vectors that depend on where you come from, speed control, clearance for the best published approach or the one you ask for |
-| Landing | Tower, Ground | Landing clearance, vacate, taxi to a stand that fits your aircraft and airline |
+## Why use it
 
-Readbacks are checked at every step: a wrong runway, squawk, frequency, pressure, level or heading gets "negative" and the instruction again. Procedures come from X-Plane's CIFP data (`procedures.py`; Navigraph data in `Custom Data` is used when present), centres and their boundaries from `atc.dat` (`centers.py`), the vectoring pattern is in `vectors.py` and the radar controllers' logic in `ifr.py`. VFR circuits are covered too. Anything the engine does not cover falls back to a free-form reply constrained to the same facts.
+- **Free.** No subscription. The one outside service is a language model that understands what you said: use your own [OpenRouter](https://openrouter.ai) key (a flight costs about a cent) or a local model (Ollama, LM Studio) for nothing.
+- **Nothing is invented.** Replies are built by a rules engine from X-Plane's own data: real frequencies, taxiways, SIDs, STARs, approaches, sectors, airspace and weather.
+- **No plugin.** It reads the sim through X-Plane 12's built-in Web API, and uses Navigraph data if you have it.
+- **Speak, click or type.** Every call you can make right now is also a button.
 
-What the controllers also do: climbs and descents come in steps of about 10,000 ft, the next one as you approach your cleared level; approach gives speed control (220, 180, then 160 knots to four miles) and your range from touchdown with the approach clearance; tower says "continue approach" to an arrival still far out and clears it to land inside four and a half miles; a go-around sends you back to approach for new vectors; a direct routing to a waypoint on your filed route is granted on request. They also watch you: a level bust, an assigned heading not being flown, the wrong squawk on first contact, and an instruction nobody read back (repeated once after 30 seconds). An airline flight number filed in SimBrief (for example BAW123) is spoken as "Speedbird one two three"; otherwise the registration is used.
+## Install
 
-Arrivals follow the STAR: its level restrictions are issued one by one ("descend flight level two six zero, level by Inpip") at the distance a three degree path needs, and you are told if you cross a waypoint high. Approach can hold you at the published hold at the end of the STAR: always on request, and on its own initiative according to `[atc] holding` in `config.toml` (`never`, the default; `sometimes` for about one arrival in four; `always`); it releases you after the stated delay, or when you say you are ready. Vectors and descents respect the minimum safe altitude around the airport and the minimum off-route altitude of the terrain below (`navfix.py`), and a radar controller calls a low altitude alert if you descend below 1,000 ft above the ground away from the approach.
+1. Download the installer from the [latest release](https://github.com/gustavorubim/proatc/releases/latest) and run it. It is not code-signed, so Windows SmartScreen warns: choose "More info", then "Run anyway".
+2. Start Pro ATC. The first launch downloads the speech software and models (several minutes, about 3 GB).
+3. Click "Add OpenRouter key" and paste a key from [openrouter.ai/keys](https://openrouter.ai/keys).
+4. In Settings, choose your microphone and push-to-talk key or joystick button (default: right Ctrl).
+5. Start X-Plane 12 and load a flight. In X-Plane, Settings > Network must allow incoming traffic.
 
-Weather: while X-Plane is on real weather, each airport's ATIS, runway in use and pressure come from its own METAR (`metar.py`, read from `Output/real weather`), so the destination is right from any distance; with preset or custom weather the sim's weather at the aircraft is used. The ATIS reports gusts, thunderstorms, snow, fog and low visibility procedures, a controller announces a new ATIS to an aircraft on frequency, and you can ask any controller for the wind and pressure, ask a centre for the destination weather, and request a deviation around weather.
+Requirements: Windows 10 or 11 (64-bit), X-Plane 12.1.1 or newer. An NVIDIA graphics card makes speech recognition fast; without one it is a few seconds slower per call. The app updates itself.
 
-Other aircraft: with X-Plane's AI aircraft enabled, controllers see them (`traffic.py`). Radar controllers call traffic ("traffic, two o'clock, five miles, opposite direction, one thousand feet above"), tower holds a departure for an aircraft on final and clears it when the runway is free, tells an arrival it is number two, and sends it around if the runway is still occupied at one mile. The app does not control those aircraft. Parallel runways are split between landing and departure. Mayday and pan-pan are acknowledged on any frequency and the landing is cleared at once. A VFR flight can ask a radar controller for flight following. A SID's "at or above" crossing flown low is called.
+## First flight
 
-Approaches: vectors are a downwind, base and intercept from behind or abeam the airport, a 45 degree dogleg onto final for an aircraft already out on the approach side, and straight in for one nearly lined up; how far out final is joined differs from arrival to arrival, and a downwind leg is extended while another aircraft is on final. You can ask for another type of approach ("request the R NAV approach"), and "field in sight" gets a visual approach when the reported weather allows it. A runway with no approach of its own is reached by an approach to another runway and circling, in weather good enough to circle. If the runway in use changes while you are being vectored, approach says so and starts again for the new runway. A go-around flies the published missed approach to its altitude (from the CIFP data) and goes back to approach, where you can try again or ask to divert: to the alternate filed in SimBrief, or to any airport by its code. A diversion gives a heading and a level and hands you on, and the flight continues to the new destination.
+1. Load your SimBrief plan under Flight plan (or enter a destination by hand).
+2. Click a frequency in the airport list to tune it. Start with the ATIS, then delivery.
+3. Click "Request IFR clearance", or hold push-to-talk and say it. "Read back" reads the clearance back for you.
+4. Continue through push-back, taxi, takeoff, climb, cruise, approach and landing. After each hand-off, "Tune" sets the next frequency.
 
-On the ground: a taxi route that crosses another runway stops there ("hold short runway two seven left"). The crossing clearance comes when you report holding short, or by itself once you have stopped at the runway, and waits for an aircraft landing on it; entering the runway without it gets a word from the controller. "Request progressive taxi" gives the next taxiway and which way to turn onto it, from where you are. After landing you are sent to a stand that takes your aircraft's size, your airline's own where the scenery says which airline uses which stand.
+For VFR, tune the tower and click "Request VFR departure". "What do I say?" tells you the next call at any time.
 
-Voices and chatter: each controller has a voice of their own and keeps it (`voices.py`), British in the United Kingdom and Ireland, American in the United States and Canada. With radio chatter on (`[atc] chatter`: `off`, `some`, `busy`) you hear other flights being worked on the frequency (`chatter.py`). That is sound only: those aircraft are not in the sim and the controller does not sequence you against them. It uses the real runway in use, wind, taxiways and frequencies, pauses while a controller is waiting for your readback, and stops the moment you transmit.
+## Features
 
-Visual flying (`vfr.py`, `airspace.py`):
+**IFR:** clearance with the right SID, taxi over real taxiways with runway crossings, step climbs, hand-offs at real sector boundaries, descent with the STAR and its restrictions, radar vectors with speed control, holds, ILS, RNAV, visual and circling approaches, go-around, missed approach and diversion.
 
-- **Airfields with no controller** (CTAF, UNICOM, "Traffic"): you announce yourself and nobody answers, as in real life. The app builds the calls from where you are ("Santa Paula traffic, Cessna ..., nine miles south, inbound for landing runway two two, Santa Paula"). A UNICOM operator gives an airport advisory when asked.
-- **Information services** (AFIS, "Information", "Radio"): the runway in use, wind, pressure and known traffic, and "take off at your discretion" / "land at your discretion". Never a clearance.
-- **Towers**: how to join the circuit depends on where you come from (straight in, base, downwind, or across the field first) and on the circuit direction the airport publishes; "number two, follow the traffic on final"; circuits ("closed traffic" in the US); a low approach; a VFR departure in a direction, with "frequency change approved" once you have left the zone.
-- **Control zones** come from the sim's own airspace file, which covers the world: clearance to enter, a zone transit ("cleared to transit the control zone, not above ...", or "transition approved" / a class Bravo clearance in the US), and release when you leave. A towered airport missing from that file gets a five mile circle.
-- **Special VFR** when the reported weather is below VFR minima: the tower says so and clears special VFR if you ask ("the field is IFR, say intentions" in the US).
-- **Radar services** are what the country calls them: flight following in the US and Canada, a Basic or Traffic Service in the United Kingdom (no traffic information on a Basic Service), a flight information service elsewhere. Under any of them you are told before you fly into a control zone, class B, C or D airspace, or a restricted, prohibited or danger area, with the tower to call for entry.
-- The app shows the airspace you are in.
+**VFR:** towers, information services (AFIS) and airfields with no controller (CTAF, UNICOM); circuit joins, touch and go, zone transits through real control zones, special VFR, flight following and the UK's Basic and Traffic Service, airspace warnings.
 
-Not covered: named VFR reporting points and published VFR routes (the sim's data does not have them), flight service stations and "Information" en-route frequencies, helicopter routes, and whether a restricted area is active (every one is treated as active).
+**Realism:** readbacks checked and corrected, level busts and wrong headings called, ATIS from real weather, a voice for each controller, radio chatter, traffic calls against X-Plane's AI aircraft, mayday and pan-pan.
 
-In the app, since 0.4: "Debrief" reviews the flight's radio work from the log (readbacks corrected or missed, level busts, runway incursions, restrictions missed, calls on a dead frequency) with a score and, with a language model, a few sentences from the instructor (`debrief.py`); it is also written into the saved log. The waypoints, procedures and airports of your flight plan are given to the speech recogniser and to the model that interprets you, so "BIBAX" is heard as a waypoint rather than as two words. The language model can run on your own machine instead of OpenRouter: Settings, Language model, "Local model" takes any OpenAI-compatible address such as Ollama or LM Studio, needs no key and costs nothing (a small local model understands less than Claude Haiku does; clicked calls need no model at all). And the app's screen can be opened on a phone or tablet on the same network: Settings, Phone or tablet shows an address and a pairing code. The microphone stays the computer's; the device shows the conversation and sends clicked and typed calls. It is off by default, asks for the code, refuses a device that keeps guessing, and cannot change the key or the model.
+**Tools:** copilot that reads back and tunes for you, instructor, post-flight debrief, flight log, cost counter, joystick push-to-talk, phone or tablet view, automatic updates.
 
-Earlier: a settings screen (microphone, speakers, push-to-talk on a keyboard key or a joystick or yoke button, voices, model, holding, traffic); a copilot that reads instructions back, or also tunes hand-off frequencies and checks in with the next controller; an instructor that explains the last instruction and tells you what to say next; "Save log", which writes the flight's radio work to a transcript and a JSON file for bug reports; and what the session has spent on OpenRouter, in the header.
+## Questions
 
-Known simplifications: the sim's other aircraft are seen but not controlled, so there is no sequencing between them; an R NAV approach is flown from vectors to final like an I L S, not from its initial fix; a circling approach is cleared but the circling itself is not watched; station names are whatever X-Plane's data calls them.
+- **What does it cost?** The app is free. With OpenRouter, a spoken call costs a fraction of a cent and clicked calls cost nothing. With a local model everything is free.
+- **Nobody answers.** The tuned frequency must belong to a station in range (tower 30 NM, approach 60 NM). The "Tuned" card shows who is listening.
+- **"X-Plane not connected".** Load a flight, and allow incoming traffic in X-Plane's network settings (the Web API uses port 8086).
+- **Does it work with Navigraph, SimBrief, ToLiss, Zibo?** Navigraph and SimBrief: yes. Any aircraft works; a few add-ons manage their own radios, so tune those in the cockpit.
+- **Mac, Linux, MSFS?** Windows and X-Plane 12 only for now.
 
-Phase 2, still in place:
+## Known limits
 
-- Airports, runways and frequencies come from X-Plane's own `apt.dat` (indexed once into `data/airports.sqlite`).
-- Tune an ATIS frequency within 60 NM and the ATIS plays in a loop, built from the sim's weather: runway in use, wind, visibility, cloud, temperature, QNH or altimeter, information letter.
-- A controller answers only when the tuned frequency belongs to a station in range (ground and delivery 10 NM, tower 30 NM, approach and departure 60 NM), and it answers as that station with the real runway in use, wind, pressure and hand-off frequencies.
-- Without a sim connection the controller talks freely so the audio chain can be tested.
+Other aircraft are seen but not controlled. There is no window inside the sim, so it is awkward in VR. English only. No datalink (CPDLC) or oceanic procedures. Named VFR reporting points are not known.
 
-Not yet: other traffic, separate landing and departure runways, custom scenery airports.
+## Help test it
 
-## Desktop app
+If a controller says something wrong, click **Save log** in the app and attach the two files to a [new issue](https://github.com/gustavorubim/proatc/issues/new/choose). They hold the conversation and the aircraft's position, never your key or audio.
 
-![Pro ATC window](docs/screenshot.png)
+## More
 
-An Electron window on top of the engine. It starts the engine itself and shows the tuned station, your flight, the airport's ATIS summary and frequencies, the conversation, and the calls you can make right now as buttons. You can speak (hold the push-to-talk key or the on-screen button), click a suggested call, or type one.
+- [How it works](docs/how-it-works.md): everything the controllers do, in detail.
+- [Development](docs/development.md): building from source, tests, releases, code layout.
 
-```bash
-npm install
-```
-
-```bash
-npm run dev
-```
-
-`npm run check` runs format, lint, type-check and tests for the app; `npm run build` builds it. The app talks to the engine over a local WebSocket protected by a per-launch token (`src/proatc/server.py`, `src/shared/protocol.ts`).
-
-## Installer and releases
-
-```bash
-npm run dist
-```
-
-builds `dist/ProATC-<version>-windows-x64-setup.exe`. The installer is small because it does not contain Python or the speech libraries. It carries the engine's source, its lock file and a copy of `uv` (downloaded by `scripts/fetch-uv.mjs` and checked against a pinned checksum). On first launch the app uses that `uv` to build the engine's Python environment from the lock file, then downloads the speech models. That first launch needs an internet connection and several gigabytes of disk; later launches start in seconds. Everything the installed app stores (environment, models, airport index, your key) is under `%APPDATA%\Pro ATC`.
-
-`npm run pack:dir` builds the unpacked app and `npm run smoke` runs its self-test: environment built from the lock file, engine started, every dependency loaded, window connected. CI runs both on Windows for every change.
-
-To release: `npm run version:set -- 0.2.0`, `uv lock`, commit, then push a tag `v0.2.0`. The release workflow runs the checks, builds the installer, self-tests the packaged app and attaches the installer to a draft GitHub release for you to review and publish. Running the workflow by hand from the Actions tab is a rehearsal: nothing is published and the installer is kept as an artifact for three days.
-
-The installer is not code-signed, so Windows SmartScreen warns the first time it runs.
-
-Updates: the installed app checks GitHub releases when it starts and every six hours, downloads a newer version in the background, and shows "Restart to update" in the header when it is ready; clicking the version number checks on demand (`src/main/updates.ts`). The release workflow uploads `latest.yml` and the installer's blockmap for this. It only works if the release assets can be downloaded without signing in, which means a public repository: while this repository is private the check fails and the app says so.
-
-Brand assets: `uvx --with pillow python scripts/make-icons.py` redraws the app icon (`build/`) and the in-app logo.
-
-## Setup
-
-```bash
-uv sync
-```
-
-Speech-to-text runs on an NVIDIA graphics card when one is present (about 0.3 s per transmission on an RTX 4070, using roughly 1 GB of video memory) and falls back to the CPU otherwise, which measured 2-6 s while the sim was running. Set `stt.device = "cpu"` in `config.toml` to keep the video memory for the sim.
-
-```bash
-uv run proatc setup-models
-```
-
-Then copy `.env.example` to `.env` and paste your OpenRouter key. Without a key the app runs in echo mode (it reads your words back), which is enough to test the audio chain.
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `uv run proatc check` | Connects to the running sim and prints aircraft state (read-only) |
-| `uv run proatc devices` | Lists microphones and speakers |
-| `uv run proatc say "text"` | Speaks a sentence through the radio effect |
-| `uv run proatc airport EGGW` | Shows an airport's runways and frequencies from the sim's data |
-| `uv run proatc atis EGGW --say` | Prints and speaks the ATIS (live sim weather, or sample weather if the sim is off) |
-| `uv run proatc keytest` | Shows key names, to choose a push-to-talk key |
-| `uv run proatc run` | Starts the push-to-talk loop (default key: right Ctrl) |
-| `uv run pytest` | Unit tests |
-
-Most settings are changed in the app's settings screen and remembered in `settings.json`. `config.toml` (copy `config.example.toml`) sets defaults and the few things the app does not offer, such as the speech-to-text model.
-
-## Layout
-
-- `src/proatc/xpbridge.py`: X-Plane Web API client (REST lookup, WebSocket stream, and the COM frequency write)
-- `src/proatc/voice_loop.py`: push-to-talk, transcription, controller reply, speech
-- `src/proatc/navdata.py`: `apt.dat` parser and airport/frequency index
-- `src/proatc/weather.py`, `atis.py`, `phraseology.py`: surface weather, ATIS text, radio pronunciation
-- `src/proatc/engine.py`, `ifr.py`, `vectors.py`: the rules engine, the instrument-flight logic and radar vectors
-- `src/proatc/procedures.py`, `centers.py`, `flightplan.py`, `taxi.py`: SIDs/STARs/approaches, en-route centres, the filed plan, taxi routes
-- `src/proatc/radio.py`: station on the tuned frequency, controller briefing, ATIS broadcast thread
-- `src/proatc/stt.py`, `tts.py`, `radio_fx.py`, `audio_io.py`, `ptt.py`: audio chain
-- `src/proatc/llm.py`: OpenRouter or local-model client and the free-form controller prompt
-- `src/proatc/vfr.py`, `airspace.py`: visual flying, and control zones and restricted areas from the sim's airspace file
-- `src/proatc/voices.py`, `chatter.py`, `debrief.py`: a voice per controller, other aircraft on the frequency, the post-flight review
-- `src/proatc/server.py`: the app's WebSocket, and the page and pairing for a phone or tablet
-
-The app reads from the sim and changes one thing only, when you ask it to: clicking a frequency in the app, or the "Tune" button that appears after a hand-off, sets that frequency on the COM radio you transmit on. Set `allow_tuning = false` under `[sim]` in `config.toml` to switch that off. Some add-on aircraft manage their own radios; if the aircraft does not take the frequency the app says so.
-
-A flight that starts on the runway (as X-Plane places them by default) gets its clearance from tower; from a stand, tower and ground send you to delivery.
+Speech recognition is [faster-whisper](https://github.com/SYSTRAN/faster-whisper); the voices are [Kokoro](https://github.com/thewh1teagle/kokoro-onnx). Pro ATC is not affiliated with Laminar Research, Navigraph, SimBrief or OpenRouter, and is for flight simulation only.
 
 ## Licence
 
