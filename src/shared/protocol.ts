@@ -57,6 +57,7 @@ export interface EngineState {
     direct_to?: string
     holding?: string
     next_frequency?: string
+    emergency?: string
   } | null
   plan: {
     origin?: string
@@ -68,13 +69,35 @@ export interface EngineState {
     source?: string
   } | null
   simbrief_user: string
+  settings: {
+    values: {
+      audio: { input_device: number | null; output_device: number | null }
+      ptt: { key: string; joystick: string | null; joystick_button: number | null }
+      tts: { voice: string; atis_voice: string; pilot_voice: string; speed: number; speak_pilot_text: boolean }
+      llm: { model: string }
+      radio: { enabled: boolean }
+      atc: { holding: string; copilot: string; traffic: boolean }
+      sim: { allow_tuning: boolean; auto_tune: boolean }
+    }
+    options: {
+      inputs: { id: number; name: string }[]
+      outputs: { id: number; name: string }[]
+      voices: string[]
+      joysticks: string[]
+    }
+    capturing: boolean
+  }
+  cost: { calls: number; prompt_tokens: number; completion_tokens: number; cost: number }
   suggestions: Suggestion[]
 }
 
 export type EngineEvent =
   | { type: 'info' | 'error' | 'status'; text: string }
   | { type: 'tx'; on: boolean }
-  | { type: 'pilot'; text: string; source: 'voice' | 'typed' | 'clicked' }
+  | { type: 'pilot'; text: string; source: 'voice' | 'typed' | 'clicked' | 'copilot' }
+  | { type: 'coach'; text: string }
+  | { type: 'capture'; active: boolean }
+  | { type: 'log_saved'; path: string }
   | { type: 'understood'; intent: string }
   | { type: 'atc'; station: string; text: string; unprompted: boolean }
   | { type: 'silent' }
@@ -92,6 +115,13 @@ export type Command =
   | { cmd: 'plan'; destination: string; cruise: string; route: string }
   | { cmd: 'clear_plan' }
   | { cmd: 'tune'; mhz: string }
+  | { cmd: 'settings'; changes: Record<string, Record<string, unknown>> }
+  | { cmd: 'capture_ptt' }
+  | { cmd: 'clear_joystick' }
+  | { cmd: 'explain' }
+  | { cmd: 'what_next' }
+  | { cmd: 'save_log' }
+  | { cmd: 'reset_cost' }
 
 export interface UpdateState {
   state: 'none' | 'checking' | 'downloading' | 'ready' | 'error'

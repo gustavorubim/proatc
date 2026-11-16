@@ -70,11 +70,22 @@ class AtisBroadcaster(threading.Thread):
     """Plays the ATIS in a loop for as long as an ATIS frequency is tuned."""
 
     def __init__(
-        self, bridge, db: AirportDB, tts, player, book: AtisBook, config, busy: threading.Event, engine=None, emit: Emit = console
+        self,
+        bridge,
+        db: AirportDB,
+        tts,
+        player,
+        book: AtisBook,
+        config,
+        busy: threading.Event,
+        engine=None,
+        emit: Emit = console,
+        after=None,
     ):
         super().__init__(name="atis", daemon=True)
         self.bridge, self.db, self.tts, self.player, self.book, self.config = bridge, db, tts, player, book, config
         self.emit = emit
+        self.after = after  # called after an unprompted transmission (the copilot may want to answer)
         self.engine = engine  # rules engine, for calls the controller makes unprompted
         self.busy = busy  # set while the pilot is transmitting or the controller is replying
         self._halt = threading.Event()
@@ -130,3 +141,5 @@ class AtisBroadcaster(threading.Thread):
             samples = radio_effect(samples, rate, self.config.radio.noise)
         ticket = self.player.play(samples, rate)
         self.player.wait(ticket, should_stop=lambda: self._halt.is_set() or self.busy.is_set())
+        if self.after:
+            self.after()

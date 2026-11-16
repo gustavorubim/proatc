@@ -64,6 +64,21 @@ describe('store', () => {
     expect(feed([{ type: 'understood', intent: 'radio_check' }]).log).toEqual([])
   })
 
+  it('shows the instructor, the copilot and a saved log', () => {
+    const store = feed([
+      { type: 'pilot', text: 'Taxi holding point two seven', source: 'copilot' },
+      { type: 'coach', text: 'Taxi to the runway and stop before it.' },
+      { type: 'log_saved', path: 'C:\\logs\\flight-1.txt' },
+      { type: 'capture', active: true }
+    ])
+    expect(store.log.map((line) => [line.kind, line.who])).toEqual([
+      ['pilot', 'Copilot'],
+      ['coach', 'Instructor'],
+      ['note', '']
+    ])
+    expect(store.savedLog).toBe('C:\\logs\\flight-1.txt')
+  })
+
   it('fills the destination into a suggested call', () => {
     expect(fillDestination('Delivery, request I F R clearance to {destination}', ' Paris ')).toBe(
       'Delivery, request I F R clearance to Paris'

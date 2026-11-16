@@ -12,6 +12,7 @@ const api = {
     ipcRenderer.on('engine-exit', (_event, message: string) => listener(message))
   },
   version: (): Promise<string> => ipcRenderer.invoke('app-version'),
+  reveal: (path: string): Promise<boolean> => ipcRenderer.invoke('reveal', path),
   updateState: (): Promise<UpdateState> => ipcRenderer.invoke('update-state'),
   checkForUpdates: (): Promise<UpdateState> => ipcRenderer.invoke('update-check'),
   installUpdate: (): Promise<void> => ipcRenderer.invoke('update-install'),

@@ -4,6 +4,7 @@ __pycache__/
 .env
 config.toml
 settings.json
+logs/
 models/
 data/
 .pytest_cache/

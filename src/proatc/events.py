@@ -11,6 +11,9 @@ Every event is a dict with a "type":
   timings    {listen, think, voice, total}      seconds
   atis       {airport, mhz, text}               a new ATIS recording started
   error      {text}
+  coach      {text}                             the instructor: an explanation, or what to say next
+  capture    {active}                           waiting for the key or button to use for push-to-talk
+  log_saved  {path}                             the flight log was written to this file
 """
 
 from __future__ import annotations
@@ -41,5 +44,9 @@ def console(event: dict) -> None:
             f"       [listen {event['listen']:.2f}s | think {event['think']:.2f}s | "
             f"voice {event['voice']:.2f}s | total {event['total']:.2f}s]"
         )
+    elif kind == "coach":
+        print(f"INSTRUCTOR: {event['text']}")
+    elif kind == "log_saved":
+        print(f"  (flight log saved to {event['path']})")
     elif kind == "atis":
         print(f"ATIS  ({event['airport']} {event['mhz']}): {event['text']}")

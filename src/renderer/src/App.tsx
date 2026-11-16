@@ -1,6 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { Command, EngineMessage, EngineState, Suggestion, UpdateState } from '../../shared/protocol'
 import logo from './assets/logo.svg'
+import { SettingsDialog } from './Settings'
 import { fillDestination, initialStore, type Line, reduce } from './store'
 import { updateView } from './updates'
 
@@ -244,6 +245,7 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
             {flight.speed_kt ? <span className="chip">{flight.speed_kt} kt</span> : null}
             {flight.direct_to && <span className="chip">DCT {flight.direct_to}</span>}
             {flight.holding && <span className="chip chip-atis">HOLD {flight.holding}</span>}
+            {flight.emergency && <span className="chip chip-alert">{flight.emergency.toUpperCase()}</span>}
           </div>
         )}
       </section>
@@ -361,11 +363,16 @@ export function App() {
   const [asking, setAsking] = useState<Suggestion | null>(null)
   const [destination, setDestination] = useState('')
   const [keyOpen, setKeyOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const logEnd = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     logEnd.current?.scrollIntoView({ block: 'end' })
   }, [store.log.length])
+
+  useEffect(() => {
+    if (store.savedLog) void window.proatc?.reveal(store.savedLog)
+  }, [store.savedLog])
 
   const ready = Boolean(engine?.ready) && store.link === 'open'
   const click = (suggestion: Suggestion): void => {
@@ -403,6 +410,27 @@ export function App() {
         </div>
         <div className="pills">
           <UpdatePill />
+          {engine && engine.cost.calls > 0 && (
+            <span
+              className="cost mono"
+              title={`OpenRouter this session: ${engine.cost.calls} requests, ${(
+                engine.cost.prompt_tokens + engine.cost.completion_tokens
+              ).toLocaleString('en-US')} tokens`}
+            >
+              ${engine.cost.cost.toFixed(engine.cost.cost < 1 ? 4 : 2)}
+            </span>
+          )}
+          <button
+            className="quiet"
+            disabled={!ready}
+            title="Save this flight's radio log"
+            onClick={() => send({ cmd: 'save_log' })}
+          >
+            Save log
+          </button>
+          <button className="quiet" disabled={!engine} onClick={() => setSettingsOpen(true)}>
+            Settings
+          </button>
           <Pill ok={ready ? true : store.fatal ? false : 'wait'} label={ready ? 'Engine ready' : 'Engine starting'} />
           <Pill
             ok={Boolean(engine?.status.sim)}
@@ -424,7 +452,12 @@ export function App() {
         <main className="main">
           {store.lastInstruction && (
             <div className="instruction">
-              <div className="eyebrow">Last instruction · {store.lastInstruction.station}</div>
+              <div className="eyebrow">
+                Last instruction · {store.lastInstruction.station}
+                <button className="link" disabled={!ready} onClick={() => send({ cmd: 'explain' })}>
+                  explain
+                </button>
+              </div>
               <div>{store.lastInstruction.text}</div>
             </div>
           )}
@@ -468,6 +501,14 @@ export function App() {
               </form>
             ) : (
               <div className="calls">
+                <button
+                  className="call hint"
+                  disabled={!ready}
+                  title="The instructor tells you what to say now"
+                  onClick={() => send({ cmd: 'what_next' })}
+                >
+                  What do I say?
+                </button>
                 {engine?.flight?.next_frequency && engine.status.can_tune && (
                   <button
                     className="call tune"
@@ -520,6 +561,14 @@ export function App() {
         </main>
       </div>
 
+      {settingsOpen && engine && (
+        <SettingsDialog
+          engine={engine}
+          send={send}
+          onClose={() => setSettingsOpen(false)}
+          onKey={() => setKeyOpen(true)}
+        />
+      )}
       {keyOpen && (
         <KeyDialog
           hasKey={Boolean(engine?.status.has_key)}

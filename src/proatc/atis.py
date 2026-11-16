@@ -32,6 +32,15 @@ def runways_in_use(airport: Airport, wind_dir_true: float, wind_kt: float) -> li
     return sorted(parallel, key=lambda ident: (ident[:2], "LCR".find(ident[-1])))
 
 
+def split_runways(active: list[str]) -> tuple[list[str], list[str]]:
+    """(landing, departing). With parallel runways in use, arrivals and departures are kept apart:
+    the first half lands, the second half departs, the middle one of three does both."""
+    count = len(active)
+    if count < 2:
+        return active, active
+    return active[: (count + 1) // 2], active[count // 2 :]
+
+
 def _join(items: list[str]) -> str:
     return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
@@ -102,17 +111,29 @@ def compose(
     faa = uses_faa_style(airport.ident)
     name, info = name or airport.spoken_name, say.letter(letter)
     active = runways_in_use(airport, weather.wind_dir_true, weather.wind_kt)
-    spoken = _join([say.runway(r) for r in active]) if active else ""
-    plural = "s" if len(active) > 1 else ""
-    if faa:
-        runway_line = f"Landing and departing runway{plural} {spoken}."
-        closing = f"Advise on initial contact you have information {info}."
+    landing, departing = split_runways(active)
+
+    def names(idents: list[str]) -> str:
+        return f"runway{'s' if len(idents) > 1 else ''} {_join([say.runway(r) for r in idents])}"
+
+    if not active:
+        runway_line = ""
+    elif landing != departing:
+        runway_line = (
+            f"Landing {names(landing)}, departing {names(departing)}."
+            if faa
+            else f"{names(landing).capitalize()} in use for landing, {names(departing)} for departure."
+        )
     else:
-        runway_line = f"Runway{plural} {spoken} in use."
-        closing = f"Acknowledge receipt of information {info} on first contact."
+        runway_line = f"Landing and departing {names(active)}." if faa else f"{names(active).capitalize()} in use."
+    closing = (
+        f"Advise on initial contact you have information {info}."
+        if faa
+        else f"Acknowledge receipt of information {info} on first contact."
+    )
     lines = [
         f"{name} information {info}, time {say.zulu_time(zulu_seconds)} Zulu.",
-        runway_line if active else "",
+        runway_line,
         _wind(weather, variation),
         _visibility(weather, faa),
         "Thunderstorm." if weather.thunderstorm else "",

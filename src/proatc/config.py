@@ -1,7 +1,11 @@
-"""Settings: defaults, overridden by config.toml, with the API key read from the environment or .env."""
+"""Settings: defaults, then config.toml, then what was changed in the app (settings.json).
+
+The API key is not a setting: it is read from the environment or the .env file.
+"""
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -12,6 +16,9 @@ from pathlib import Path
 PROJECT_DIR = Path(os.environ["PROATC_HOME"]) if os.environ.get("PROATC_HOME") else Path(__file__).resolve().parents[2]
 MODELS_DIR = PROJECT_DIR / "models"
 
+HOLDING = ("never", "sometimes", "always")
+COPILOT = ("off", "readbacks", "full")
+
 
 @dataclass
 class Sim:
@@ -19,11 +26,14 @@ class Sim:
     port: int = 8086
     xplane_path: str | None = None  # only needed if the X-Plane folder is not found automatically
     allow_tuning: bool = True  # let a click on a frequency in the app tune the COM radio in the sim
+    auto_tune: bool = False  # tune a hand-off frequency without being asked, once it has been read back
 
 
 @dataclass
 class Ptt:
-    key: str = "ctrl_r"
+    key: str = "ctrl_r"  # keyboard key, by its pynput name
+    joystick: str | None = None  # name of the joystick or yoke that carries the push-to-talk button
+    joystick_button: int | None = None
 
 
 @dataclass
@@ -53,7 +63,7 @@ class Tts:
     speed: float = 1.15
     atis_voice: str = "af_sarah"
     atis_speed: float = 1.25
-    pilot_voice: str = "am_adam"  # reads typed and clicked calls aloud
+    pilot_voice: str = "am_adam"  # reads typed, clicked and copilot calls aloud
     speak_pilot_text: bool = True
 
 
@@ -68,6 +78,10 @@ class Atc:
     # Holding before the approach: "never", "sometimes" (about one arrival in four) or "always".
     # A hold can always be requested by the pilot.
     holding: str = "never"
+    # The copilot on the radio: "off", "readbacks" (reads instructions back for you) or "full"
+    # (also tunes hand-off frequencies and checks in with the next controller).
+    copilot: str = "off"
+    traffic: bool = True  # traffic calls and runway sequencing against X-Plane's AI aircraft
 
 
 @dataclass
@@ -82,6 +96,18 @@ class Config:
     atc: Atc = field(default_factory=Atc)
 
 
+# What the app's settings screen may change, and what each value must look like.
+EDITABLE: dict[str, dict[str, object]] = {
+    "audio": {"input_device": (int, type(None)), "output_device": (int, type(None))},
+    "ptt": {"key": str, "joystick": (str, type(None)), "joystick_button": (int, type(None))},
+    "tts": {"voice": str, "atis_voice": str, "pilot_voice": str, "speed": (int, float), "speak_pilot_text": bool},
+    "llm": {"model": str},
+    "radio": {"enabled": bool},
+    "atc": {"holding": HOLDING, "copilot": COPILOT, "traffic": bool},
+    "sim": {"allow_tuning": bool, "auto_tune": bool},
+}
+
+
 def _apply(target, values: dict) -> None:
     known = {f.name for f in fields(target)}
     for key, value in values.items():
@@ -94,12 +120,80 @@ def _apply(target, values: dict) -> None:
             setattr(target, key, value)
 
 
+def validate(changes: dict) -> dict:
+    """Check changes coming from the app. Returns them cleaned; raises ValueError on anything not allowed."""
+    cleaned: dict = {}
+    for section, values in changes.items():
+        if section not in EDITABLE or not isinstance(values, dict):
+            raise ValueError(f"'{section}' cannot be changed from the app.")
+        for key, value in values.items():
+            rule = EDITABLE[section].get(key)
+            if rule is None:
+                raise ValueError(f"'{section}.{key}' cannot be changed from the app.")
+            if isinstance(rule, tuple) and all(isinstance(option, str) for option in rule):
+                ok = value in rule
+            else:
+                numeric = rule in (int, (int, float), (int, type(None)))
+                ok = isinstance(value, rule) and not (isinstance(value, bool) and numeric)
+            if ok and isinstance(value, str) and not value.strip():
+                ok = False
+            if ok and (section, key) == ("tts", "speed"):
+                ok = 0.7 <= value <= 1.6
+            if not ok:
+                raise ValueError(f"'{value}' is not a valid value for {section}.{key}.")
+            cleaned.setdefault(section, {})[key] = value
+    return cleaned
+
+
+def settings_path() -> Path:
+    return PROJECT_DIR / "settings.json"
+
+
+def load_settings() -> dict:
+    """What the app remembers between runs (not secrets): setting changes and the SimBrief username."""
+    path = settings_path()
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        settings = {}
+    # SIMBRIEF_USER in .env is the default until another account is used in the app.
+    if not settings.get("simbrief_user") and env_value("SIMBRIEF_USER"):
+        settings["simbrief_user"] = env_value("SIMBRIEF_USER")
+    return settings
+
+
+def save_settings(changes: dict) -> None:
+    path = settings_path()
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        stored = {}
+    path.write_text(json.dumps({**stored, **changes}, indent=2), encoding="utf-8")
+
+
+def save_overrides(changes: dict) -> None:
+    """Remember setting changes made in the app, on top of earlier ones."""
+    stored = load_settings().get("config", {})
+    for section, values in changes.items():
+        stored.setdefault(section, {}).update(values)
+    save_settings({"config": stored})
+
+
 def load_config(path: Path | None = None) -> Config:
     config = Config()
     path = path or PROJECT_DIR / "config.toml"
     if path.exists():
         _apply(config, tomllib.loads(path.read_text(encoding="utf-8")))
+    try:
+        _apply(config, validate(load_settings().get("config", {})))
+    except ValueError:
+        pass  # a settings file from another version: ignore what no longer fits
     return config
+
+
+def editable_values(config: Config) -> dict:
+    """The current value of everything the settings screen shows."""
+    return {section: {key: getattr(getattr(config, section), key) for key in keys} for section, keys in EDITABLE.items()}
 
 
 def env_value(name: str) -> str | None:

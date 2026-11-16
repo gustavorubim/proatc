@@ -16,9 +16,9 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
-from . import ifr
+from . import ifr, traffic
 from . import phraseology as say
-from .atis import Issue, runways_in_use, uses_faa_style
+from .atis import Issue, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
 from .navdata import Airport, AirportDB, Station, distance_nm
 from .taxi import TaxiNetwork, nearest_parking, parse_taxi, route_to_point, route_to_runway
@@ -27,6 +27,7 @@ from .vectors import locate
 READBACK_WAIT_S = 30  # how long an instruction waits for a readback before it is repeated
 CONTINUE_BEYOND_NM = 5  # further out than this, tower says "continue approach"
 CLEAR_TO_LAND_NM = 4.5
+GO_AROUND_NM = 1.0  # still no landing clearance this close in: go around
 
 
 class Phase(Enum):
@@ -78,6 +79,12 @@ class Flight:
     constraints: list | None = None  # restrictions.Constraint along the STAR; None until looked up
     deviating: bool = False  # off track around weather
     low_altitude_called: bool = False
+    emergency: str | None = None  # "mayday" or "pan pan"
+    services_told: bool = False
+    following: bool = False  # VFR flight following
+    waiting_takeoff: bool = False  # held short for traffic; the takeoff clearance follows
+    go_around_told: bool = False
+    sid_constraints: list | None = None  # restrictions.Constraint: the SID's 'at or above' crossings
     atis_seen: dict[str, str] = field(default_factory=dict)  # airport -> information letter last heard
     awaiting_landing: bool = False  # told to continue approach; landing clearance still to come
     squawk_asked: bool = False
@@ -97,9 +104,11 @@ def _squawk(rng: random.Random) -> str:
 class Engine:
     def __init__(
         self, db: AirportDB, seed: int | None = None, procedures=None, centers=None, navaids=None, clock=None,
-        navfix=None, metars=None, holding: str = "never",
+        navfix=None, metars=None, holding: str = "never", traffic: bool = True,
     ):  # fmt: skip
         self.db = db
+        self.traffic_enabled = traffic  # traffic calls and runway sequencing against the sim's other aircraft
+        self._traffic_seen: dict[int, float] = {}  # target -> when it was last called
         self.navfix = navfix  # navfix.NavFix: waypoint positions, holds, minimum safe altitudes
         self.metars = metars  # metar.MetarStore: reported weather at any airport
         self.holding = holding  # "never", "sometimes" or "always": holds before the approach
@@ -174,8 +183,9 @@ class Engine:
         return f"Q N H {say.digits(int(issue.weather.qnh_hpa))}", float(int(issue.weather.qnh_hpa))
 
     def _departure_runway(self, airport: Airport, issue: Issue | None, raw: dict) -> str | None:
-        """The runway in use whose threshold is nearest the aircraft."""
+        """The departure runway whose threshold is nearest the aircraft."""
         active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
+        active = split_runways(active)[1]
         if not active:
             return None
         if "lat" not in raw:
@@ -273,6 +283,11 @@ class Engine:
             if intent.intent == "say_again":
                 previous = self.flight.last_said.get(key)
                 return Reply(previous, self.flight.pending.expect if self.flight.pending else {}) if previous else None
+            if intent.intent in ("mayday", "pan_pan", "cancel_emergency"):
+                reply = self._emergency(intent, station, callsign)
+                if reply and reply.text:
+                    self.flight.last_said[key] = reply.text
+                return reply
 
             reply = self._check_readback(intent, callsign, station)
             if reply is None:
@@ -315,6 +330,19 @@ class Engine:
         if station.kind == "tower":
             return not kinds & {"delivery", "ground"} or self.on_runway(station.airport, raw)
         return False
+
+    def _emergency(self, intent: Intent, station: Station, callsign: str) -> Reply | None:
+        """Mayday and pan-pan: acknowledged at once, on any frequency, and the flight gets priority."""
+        flight = self.flight
+        if intent.intent == "cancel_emergency":
+            if not flight.emergency:
+                return None
+            flight.emergency = None
+            return Reply(f"{callsign}, roger, emergency cancelled")
+        flight.emergency = "mayday" if intent.intent == "mayday" else "pan pan"
+        flight.squawk, flight.services_told = "7700", False
+        hello = self._greeting(station)
+        return Reply(f"{callsign}, {hello}roger {flight.emergency}, squawk seven seven zero zero, say intentions")
 
     def _await_readback(self, reply: Reply, key: str) -> None:
         flight = self.flight
@@ -476,7 +504,17 @@ class Engine:
                 runway = flight.runway or self._departure_runway(airport, issue, raw)
                 if not runway:
                     return None
-                flight.runway, flight.phase = runway, Phase.TAKEOFF_CLEARED
+                if self.traffic_enabled:
+                    final = traffic.on_final(raw, airport, runway, traffic.FINAL_BLOCKS_NM)
+                    if final is not None or traffic.on_runway(raw, airport, runway):
+                        flight.runway, flight.waiting_takeoff = runway, True
+                        why = (
+                            f"traffic on a {traffic.miles_word(final)} mile final"
+                            if final is not None
+                            else "traffic on the runway"
+                        )
+                        return Reply(f"{callsign}, {hello}hold short runway {say.runway(runway)}, {why}", {"runway": runway})
+                flight.runway, flight.phase, flight.waiting_takeoff = runway, Phase.TAKEOFF_CLEARED, False
                 return Reply(
                     f"{callsign}, {hello}runway {say.runway(runway)}, cleared for takeoff{wind_tail}", {"runway": runway}
                 )
@@ -493,7 +531,7 @@ class Engine:
             if flight.rules == "IFR" or flight.arrival:
                 return ifr.go_around(self, station, callsign)
             return Reply(f"{callsign}, roger, rejoin the circuit runway {spoken}, report downwind", {"runway": runway})
-        if intent.intent == "inbound" and intent.position != "final":
+        if intent.intent == "inbound" and intent.position != "final" and not flight.emergency:
             flight.runway = runway
             vfr = (intent.flight_rules or flight.rules) != "IFR"
             if vfr:
@@ -506,13 +544,21 @@ class Engine:
         if intent.intent in ("position_report", "inbound", "request_touch_and_go", "established", "check_in"):
             # An instrument arrival still well out is told to continue; the landing clearance follows.
             miles = distance_nm(raw["lat"], raw["lon"], *self._threshold(airport, runway)) if "lat" in raw else 0.0
-            if miles > CONTINUE_BEYOND_NM and (flight.rules == "IFR" or flight.arrival) and not flight.touch_and_go:
+            occupied = self.traffic_enabled and traffic.on_runway(raw, airport, runway)
+            ahead = traffic.on_final(raw, airport, runway, max(miles - 0.5, 0.0)) if self.traffic_enabled else None
+            far = miles > CONTINUE_BEYOND_NM and (flight.rules == "IFR" or flight.arrival) and not flight.touch_and_go
+            if (far and not flight.emergency) or occupied or ahead is not None:
                 flight.runway, flight.awaiting_landing = runway, True
-                return Reply(f"{callsign}, {hello}continue approach runway {spoken}{wind_tail}", {"runway": runway})
+                number = "number two, " if ahead is not None else ""
+                reason = ", traffic on the runway" if occupied else wind_tail
+                return Reply(f"{callsign}, {hello}{number}continue approach runway {spoken}{reason}", {"runway": runway})
             flight.awaiting_landing = False
             flight.runway, flight.phase = runway, Phase.LANDING_CLEARED
             cleared = "cleared touch and go" if flight.touch_and_go else "cleared to land"
-            return Reply(f"{callsign}, {hello}runway {spoken}, {cleared}{wind_tail}", {"runway": runway})
+            services = ""
+            if flight.emergency and not flight.services_told:
+                flight.services_told, services = True, ", emergency services standing by"
+            return Reply(f"{callsign}, {hello}runway {spoken}, {cleared}{wind_tail}{services}", {"runway": runway})
         return None
 
     def _landing_runway(self, airport: Airport, issue: Issue | None, raw: dict, intent: Intent) -> str | None:
@@ -523,9 +569,10 @@ class Engine:
             return self.flight.runway
         if intent.runway in active:
             return intent.runway
+        landing = split_runways(active)[0]
         if "lat" not in raw:
-            return active[0]
-        return min(active, key=lambda ident: distance_nm(raw["lat"], raw["lon"], *self._threshold(airport, ident)))
+            return landing[0]
+        return min(landing, key=lambda ident: distance_nm(raw["lat"], raw["lon"], *self._threshold(airport, ident)))
 
     # ---- sim-driven state and unprompted calls ------------------------------
 
@@ -586,17 +633,37 @@ class Engine:
                 return reply
             if station.kind != "tower":
                 return None
-            if (
-                flight.awaiting_landing
-                and flight.runway
-                and not bool(raw.get("on_ground", True))
-                and "lat" in raw
-                and distance_nm(raw["lat"], raw["lon"], *self._threshold(airport, flight.runway)) <= CLEAR_TO_LAND_NM
-            ):
-                flight.awaiting_landing, flight.phase = False, Phase.LANDING_CLEARED
-                wind = self._wind(issue, magnetic_variation(raw), uses_faa_style(airport.ident))
-                tail = f", {wind}" if wind else ""
-                reply = Reply(f"{callsign}, runway {say.runway(flight.runway)}, cleared to land{tail}", {"runway": flight.runway})
+            airborne = not bool(raw.get("on_ground", True))
+            miles = (
+                distance_nm(raw["lat"], raw["lon"], *self._threshold(airport, flight.runway))
+                if flight.runway and "lat" in raw
+                else None
+            )
+            wind = self._wind(issue, magnetic_variation(raw), uses_faa_style(airport.ident))
+            wind_tail = f", {wind}" if wind else ""
+            if flight.awaiting_landing and airborne and miles is not None and miles <= CLEAR_TO_LAND_NM:
+                blocked = self.traffic_enabled and (
+                    traffic.on_runway(raw, airport, flight.runway)
+                    or traffic.on_final(raw, airport, flight.runway, max(miles - 0.5, 0.0)) is not None
+                )
+                if not blocked:
+                    flight.awaiting_landing, flight.phase = False, Phase.LANDING_CLEARED
+                    reply = Reply(
+                        f"{callsign}, runway {say.runway(flight.runway)}, cleared to land{wind_tail}", {"runway": flight.runway}
+                    )
+                elif miles <= GO_AROUND_NM and not flight.go_around_told:
+                    flight.awaiting_landing, flight.go_around_told = False, True
+                    reply = Reply(f"{callsign}, go around, I say again, go around, traffic on the runway")
+            elif flight.waiting_takeoff and not airborne and flight.runway:
+                clear = traffic.on_final(raw, airport, flight.runway, traffic.FINAL_BLOCKS_NM) is None and not traffic.on_runway(
+                    raw, airport, flight.runway
+                )
+                if clear:
+                    flight.waiting_takeoff, flight.phase = False, Phase.TAKEOFF_CLEARED
+                    reply = Reply(
+                        f"{callsign}, runway {say.runway(flight.runway)}, cleared for takeoff{wind_tail}",
+                        {"runway": flight.runway},
+                    )
             elif (
                 flight.phase == Phase.AIRBORNE
                 and flight.rules == "IFR"
@@ -690,6 +757,8 @@ class Engine:
                     add("Runway vacated", "runway vacated", "runway_vacated")
             elif station.kind == "tower":
                 runway = f" runway {say.runway(flight.runway)}" if flight.runway else ""
+                if flight.arrival and flight.arrival.stage == "tower":
+                    add("Check in", f"established {flight.arrival.approach}{runway}", "established")
                 add("Inbound for landing", f"{information}inbound for landing", "inbound")
                 add("Downwind", f"downwind{runway}", "position_report", position="downwind")
                 add("Final", f"final{runway}", "position_report", position="final")
@@ -719,6 +788,7 @@ class Engine:
             else None,
             "speed_kt": flight.arrival.speed_kt if flight.arrival else None,
             "direct_to": flight.direct_to,
+            "emergency": flight.emergency,
             "next_frequency": flight.next_frequency,
             "holding": flight.arrival.hold.fix if flight.arrival and flight.arrival.hold else None,
         }
