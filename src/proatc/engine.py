@@ -136,6 +136,11 @@ class Flight:
     airspace_called: set[str] = field(default_factory=set)  # airspaces already warned about
     last_note: str = ""  # why the last call got no answer, for the app
     last_event: str = ""  # the kind of the last controller transmission, for the flight log
+    sid_path: list = field(default_factory=list)  # the SID's track over the ground, for route watching
+    star_path: list = field(default_factory=list)
+    off_route_since: float | None = None
+    off_route_called: set[str] = field(default_factory=set)
+    qnh_told: bool = False  # the destination's pressure was given with a descent to an altitude
 
 
 def _squawk(rng: random.Random) -> str:
@@ -165,6 +170,7 @@ class Engine:
         self.centers = centers  # centers.CenterIndex or None
         self.navaids = navaids  # procedures.NavaidNames or None
         self.flight = Flight()
+        self.last_raw: dict = {}  # the latest sim snapshot the engine was shown
         self.lock = threading.RLock()
         self._networks: dict[str, TaxiNetwork] = {}
         self._rng = random.Random(seed)
@@ -819,6 +825,7 @@ class Engine:
     def _observe(self, raw: dict) -> None:
         """Follow the flight from the sim: takeoff, landing, and where it was parked."""
         flight = self.flight
+        self.last_raw = raw
         if "on_ground" not in raw:
             return
         on_ground = bool(raw["on_ground"])

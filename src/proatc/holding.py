@@ -71,7 +71,15 @@ def issue(engine, station, raw, callsign, lead: str, found, minutes: int | None,
     if level < feet - 500:
         flight.descent_given = True
     word = name.title() if len(name) > 3 else " ".join(say.PHONETIC[c] for c in name)
-    after = f"expect approach in {say.digits(minutes)} minutes" if minutes else "advise when ready for the approach"
+    after = "advise when ready for the approach"
+    if minutes and "zulu_seconds" in raw:
+        from .atis import uses_faa_style
+
+        time = say.zulu_time(raw["zulu_seconds"] + minutes * 60)
+        faa = uses_faa_style(station.airport.ident)
+        after = f"expect further clearance at {time}" if faa else f"expected approach time {time}"
+    elif minutes:
+        after = f"expect approach in {say.digits(minutes)} minutes"
     return Reply(f"{callsign}, {lead}hold at {word} as published, {verb} {level_text(level)}, {after}", {"altitude": level})
 
 
