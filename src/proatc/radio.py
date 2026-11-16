@@ -199,10 +199,14 @@ class AtisBroadcaster(threading.Thread):
             return
         callsign, said, answered = found
         voice = station_voice(self.tts, station)
-        first, rate = self.tts.speak(said, **voice)
+        first, rate = self.tts.speak(said, **voice) if answered else (None, 0)
         others = [n for n in getattr(self.tts, "voices", list)() if n != voice.get("voice") and "santa" not in n]
-        second, _ = self.tts.speak(answered, **({"voice": self._rng.choice(others)} if others else {}))
-        samples = np.concatenate([first, np.zeros(int(rate * 0.35), dtype=np.float32), second])
+        other = {"voice": self._rng.choice(others)} if others else {}
+        if answered:
+            second, _ = self.tts.speak(answered, **other)
+            samples = np.concatenate([first, np.zeros(int(rate * 0.35), dtype=np.float32), second])
+        else:
+            samples, rate = self.tts.speak(said, **other)  # a blind call: it is another pilot speaking, not the station
         if self.config.radio.enabled:
             samples = radio_effect(samples, rate, self.config.radio.noise * 1.5)
         if self.busy.is_set() or self._halt.is_set() or getattr(self.player, "playing", False):

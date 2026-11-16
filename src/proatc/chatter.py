@@ -11,12 +11,14 @@ from __future__ import annotations
 import random
 
 from . import phraseology as say
+from . import vfr
 from .atis import runways_in_use, split_runways, uses_faa_style
 
 MODES = ("off", "some", "busy")
 # Average seconds between exchanges with chatter set to "some"; "busy" halves it.
-GAP_S = {"delivery": 80, "ground": 50, "tower": 45, "approach": 40, "departure": 55, "center": 60}
+GAP_S = {"unicom": 70, "delivery": 80, "ground": 50, "tower": 45, "approach": 40, "departure": 55, "center": 60}
 FIRST_AFTER_S = (6, 18)  # after tuning a frequency
+SMALL_FIELD_M = 1900  # longest runway below this: the other traffic is light aircraft
 
 EUROPE = "BAW EZY RYR DLH AFR KLM SAS SWR IBE TAP VIR EIN WZZ AUA FIN LOT NAX VLG THY BEL EXS".split()
 AMERICAS = "AAL DAL UAL SWA JBU ASA ACA WJA FDX UPS AMX CMP AVA".split()
@@ -50,6 +52,89 @@ def flight_callsign(ident: str | None, rng: random.Random, avoid: str = "") -> s
     return "Speedbird one two three"
 
 
+REGISTRATION = {
+    "EG": "G",
+    "EI": "EI",
+    "LF": "F",
+    "ED": "D",
+    "LE": "EC",
+    "LI": "I",
+    "EH": "PH",
+    "LS": "HB",
+    "LO": "OE",
+    "ES": "SE",
+    "EN": "LN",
+    "EK": "OY",
+    "EB": "OO",
+}
+LETTERS = "ABCDEFGHJKLMNOPRSTUVWXYZ"
+
+
+def light_callsign(ident: str | None, rng: random.Random, avoid: str = "") -> str:
+    """A light aircraft's registration, as spoken, in the style of the country."""
+    ident = (ident or "").upper()
+    for _ in range(10):
+        if ident[:1] in ("K", "P"):
+            tail = "N" + "".join(str(rng.randint(1, 9)) for _ in range(3)) + "".join(rng.choice(LETTERS) for _ in range(2))
+        elif ident[:1] == "C":
+            tail = "C" + rng.choice("FG") + "".join(rng.choice(LETTERS) for _ in range(3))
+        elif ident[:1] == "Y":
+            tail = "VH" + "".join(rng.choice(LETTERS) for _ in range(3))
+        else:
+            prefix = REGISTRATION.get(ident[:2], "G")
+            tail = prefix + "".join(rng.choice(LETTERS) for _ in range(5 - len(prefix)))
+        spoken = say.spoken_callsign(tail)
+        if spoken != avoid:
+            return spoken
+    return "Golf Alfa Bravo Charlie Delta"
+
+
+def _self_announced(station, issue, engine, rng: random.Random, own_callsign: str) -> tuple[str, str, str] | None:
+    """Another aircraft's blind call at an airfield with no controller. Nobody answers it."""
+    airport, place = station.airport, station.place
+    callsign = light_callsign(airport.ident, rng, own_callsign)
+    active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
+    runway = f" runway {say.runway(active[0])}" if active else ""
+    side = vfr.pattern_side(engine, airport, active[0]) if active else "left"
+    miles = say.digits(rng.choice((5, 8, 10, 12)))
+    direction = rng.choice(vfr.COMPASS)
+    body = rng.choice(
+        (
+            f"{side} downwind{runway}",
+            f"{side} base{runway}",
+            f"final{runway}",
+            f"final{runway}, touch and go",
+            f"departing{runway}",
+            f"departing{runway}, remaining in the pattern",
+            f"clear of{runway}" if runway else "clear of the runway",
+            f"{miles} miles {direction}, inbound for landing{runway}",
+            f"taxiing to{runway}" if runway else "taxiing for departure",
+        )
+    )
+    return callsign, f"{place} traffic, {callsign}, {body}, {place}", ""
+
+
+def _informed(station, issue, engine, rng: random.Random, own_callsign: str) -> tuple[str, str, str] | None:
+    """An exchange with an information officer: information, and what the pilot intends."""
+    airport = station.airport
+    callsign = light_callsign(airport.ident, rng, own_callsign)
+    active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
+    wind = engine._wind(issue, 0.0, False) if issue else "wind calm"
+    pressure = engine._pressure(issue, False)[0] if issue else ""
+    runway = say.runway(active[0]) if active else None
+    options = [
+        (f"no reported traffic, {wind}, land at your discretion", "Landing"),
+        (f"no reported traffic, {wind}, take off at your discretion", "Taking off"),
+        ("roger, report final", "Wilco"),
+    ]
+    if runway:
+        side = vfr.pattern_side(engine, airport, active[0])
+        tail = f", {pressure}" if pressure else ""
+        options.append((f"runway {runway}, {side} hand circuit{tail}, report downwind", f"Runway {runway}{tail}, wilco"))
+    said, answered = rng.choice(options)
+    return callsign, f"{callsign}, {said}", f"{answered}, {callsign}"
+
+
 def _level_word(feet: int, faa: bool) -> str:
     return say.level(feet, 18000 if faa else 6000, faa)
 
@@ -58,9 +143,16 @@ def exchange(station, issue, engine, rng: random.Random, own_callsign: str = "")
     """(callsign, what the controller says, what the pilot answers) for this station, or None."""
     kind = station.kind
     airport = getattr(station, "airport", None)
+    informing = vfr.service(station) if airport else None
+    if informing in ("ctaf", "unicom"):
+        return _self_announced(station, issue, engine, rng, own_callsign)
+    if informing == "afis":
+        return _informed(station, issue, engine, rng, own_callsign)
     ident = airport.ident if airport else getattr(getattr(station, "center", None), "facility", None)
     faa = uses_faa_style(ident or "")
-    callsign = flight_callsign(ident, rng, own_callsign)
+    # A small airfield is used by light aircraft, not by airlines.
+    small = airport is not None and max((r.length_m for r in airport.runways), default=0) < SMALL_FIELD_M
+    callsign = light_callsign(ident, rng, own_callsign) if small else flight_callsign(ident, rng, own_callsign)
     heading = say.heading(rng.randrange(10, 361, 10))
     side = rng.choice(("left", "right"))
     options: list[tuple[str, str]] = []  # (instruction, readback); the readback gets the callsign appended

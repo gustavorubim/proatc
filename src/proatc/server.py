@@ -31,6 +31,7 @@ from websockets.http11 import Response
 from websockets.sync.server import serve
 
 from . import phraseology as say
+from .airspace import CONTROLLED
 from .atis import runways_in_use, uses_faa_style
 from .config import PROJECT_DIR, Config, editable_values, load_settings, save_settings
 from .flightplan import PlanError, fetch_simbrief, manual
@@ -117,6 +118,7 @@ def build_state(session: Session, db: AirportDB) -> dict:
         "plan": None,
         "simbrief_user": load_settings().get("simbrief_user", ""),
         "suggestions": [],
+        "airspace": [],
         "settings": {"values": editable_values(config), "options": session.options, "capturing": session.capturing},
         "cost": {**session.usage, "cost": round(session.usage["cost"], 5)},
     }
@@ -165,6 +167,11 @@ def build_state(session: Session, db: AirportDB) -> dict:
             )
         state["airport"] = info
     state["flight"] = session.engine.summary()
+    index = session.engine.airspace
+    if index and "lat" in raw:
+        feet = raw.get("elevation_m", 0.0) / 0.3048
+        inside = [space for space in index.at(raw["lat"], raw["lon"], feet) if space.kind in CONTROLLED or space.area <= 1.0]
+        state["airspace"] = [space.describe() for space in inside[:2]]
     # A hand-off frequency stops being offered once it is tuned.
     pending = session.engine.flight.next_frequency
     if pending and khz and abs(float(pending) * 1000 - khz) <= 5:

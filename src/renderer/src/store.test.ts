@@ -122,6 +122,18 @@ describe('store', () => {
     expect(reduce(asked, { type: 'pair', pairing: 'no' }).pairing).toBe('no')
   })
 
+  it('says why nobody answered a blind call', () => {
+    const store = feed([
+      { type: 'pilot', text: 'Santa Paula traffic, final runway two two', source: 'clicked' },
+      { type: 'silent', text: 'No controller at Santa Paula: your call went out to other traffic on the frequency.' },
+      { type: 'silent' }
+    ])
+    expect(store.log.map((line) => line.text).slice(1)).toEqual([
+      'No controller at Santa Paula: your call went out to other traffic on the frequency.',
+      'Readback correct. The controller stays silent.'
+    ])
+  })
+
   it('fills the destination into a suggested call', () => {
     expect(fillDestination('Delivery, request I F R clearance to {destination}', ' Paris ')).toBe(
       'Delivery, request I F R clearance to Paris'

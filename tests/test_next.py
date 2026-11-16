@@ -334,15 +334,16 @@ def test_vfr_flight_following(tmp_path):
     engine.set_plan(None)
     west = centers.on_frequency(127500, 51.0, 0.0)
     cruising = at(51.0, 0.0, feet=5500, heading=90)
-    assert "Request flight following" in [s["label"] for s in engine.suggestions(west, None, cruising)]
+    # A British centre: the service is called a Basic Service there, and the aircraft is not identified for it.
+    assert "Request basic service" in [s["label"] for s in engine.suggestions(west, None, cruising)]
     service = engine.handle(Intent("request_flight_following"), west, None, cruising)
     code = engine.flight.squawk
     assert (
         service.text
-        == f"{CALLSIGN}, Westland Control, squawk {' '.join(['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'][int(d)] for d in code)}, identified, flight following"
+        == f"{CALLSIGN}, Westland Control, squawk {' '.join(['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven'][int(d)] for d in code)}, basic service"
     )
-    assert service.expect == {"squawk": code} and engine.flight.rules == "VFR"
-    assert "Cancel flight following" in [s["label"] for s in engine.suggestions(west, None, cruising)]
+    assert service.expect == {"squawk": code} and engine.flight.rules == "VFR" and engine.summary()["service"] == "basic"
+    assert "Cancel radar service" in [s["label"] for s in engine.suggestions(west, None, cruising)]
     assert engine.handle(Intent("cancel_flight_following"), west, None, cruising).text == (
         f"{CALLSIGN}, radar service terminated, squawk seven zero zero zero, frequency change approved"
     )

@@ -15,6 +15,7 @@ import queue
 import threading
 import time
 
+from .airspace import open_airspace
 from .atis import AtisBook
 from .audio_io import MIC_RATE, Player, Recorder
 from .centers import CenterIndex
@@ -153,7 +154,7 @@ class Session:
         self.db.metars = self.metars
         self.engine = Engine(
             self.db, centers=self.centers, navaids=NavaidNames(root), navfix=self.navfix, metars=self.metars,
-            holding=config.atc.holding, traffic=config.atc.traffic,
+            holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root),
         )  # fmt: skip
         radio_db = AirportDB()  # the background thread's own connection
         radio_db.centers, radio_db.metars = self.centers, self.metars
@@ -540,7 +541,8 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
         return
     thought = time.perf_counter()
     if not answer:
-        emit({"type": "silent"})
+        note = engine.flight.last_note if engine is not None else ""
+        emit({"type": "silent", "text": note} if note else {"type": "silent"})
         return
     label = context["station"]["you_are"] if "station" in context else "ATC"
     emit({"type": "atc", "station": label, "text": answer, "unprompted": False})
@@ -564,6 +566,7 @@ def _answer(transcript, intent, context, station_key, station, issue, raw, contr
             intent = parser.parse(transcript, engine.flight.last_said.get(station_key, ""), known_names(engine))
         emit({"type": "understood", "intent": intent.intent})
         reply = engine.handle(intent, station, issue, raw, magnetic_variation(raw))
+        engine.flight.last_note = reply.note if reply is not None else ""
         if reply is not None:
             controller.remember(station_key, transcript, reply.text)
             return reply.text

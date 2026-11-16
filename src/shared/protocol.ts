@@ -61,6 +61,7 @@ export interface EngineState {
     emergency?: string
     stand?: string
     hold_short?: string
+    service?: string
   } | null
   plan: {
     origin?: string
@@ -71,6 +72,8 @@ export interface EngineState {
     star?: string
     source?: string
   } | null
+  /** Controlled or restricted airspace the aircraft is inside, smallest first. */
+  airspace?: { kind: string; name: string; floor_ft: number; ceiling_ft: number | null }[]
   simbrief_user: string
   settings: {
     values: {
@@ -127,7 +130,7 @@ export type EngineEvent =
   | { type: 'log_saved'; path: string }
   | { type: 'understood'; intent: string }
   | { type: 'atc'; station: string; text: string; unprompted: boolean }
-  | { type: 'silent' }
+  | { type: 'silent'; text?: string }
   | { type: 'timings'; listen: number; think: number; voice: number; total: number }
   | { type: 'atis'; airport: string; mhz: string; text: string }
   | { type: 'chatter'; station: string; callsign: string; said: string; answered: string }

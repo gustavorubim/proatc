@@ -28,6 +28,16 @@ function savedCode(): string {
   }
 }
 
+const AIRSPACE_LABEL: Record<string, string> = {
+  CTR: 'CTR',
+  B: 'CLASS B',
+  C: 'CLASS C',
+  D: 'CLASS D',
+  R: 'RESTRICTED',
+  P: 'PROHIBITED',
+  Q: 'DANGER'
+}
+
 function useEngine() {
   const [store, dispatch] = useReducer(reduce, initialStore)
   const socket = useRef<WebSocket | null>(null)
@@ -353,6 +363,7 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
           flight?.cleared_altitude_ft ||
           flight?.approach ||
           flight?.hold_short ||
+          flight?.service ||
           flight?.stand) && (
           <div className="chips ifr">
             {flight.cleared_altitude_ft ? (
@@ -369,9 +380,19 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
             {flight.holding && <span className="chip chip-atis">HOLD {flight.holding}</span>}
             {flight.hold_short && <span className="chip chip-alert">HOLD SHORT {flight.hold_short}</span>}
             {flight.stand && <span className="chip">STAND {flight.stand}</span>}
+            {flight.service && <span className="chip chip-atis">{flight.service.toUpperCase()}</span>}
             {flight.emergency && <span className="chip chip-alert">{flight.emergency.toUpperCase()}</span>}
           </div>
         )}
+        {(engine?.airspace ?? []).map((space) => (
+          <div className="airspace" key={space.name} title="Airspace you are in">
+            <span className={`chip ${'RPQ'.includes(space.kind) ? 'chip-alert' : 'chip-atis'}`}>
+              {AIRSPACE_LABEL[space.kind] ?? space.kind}
+            </span>
+            {space.name} · {space.floor_ft ? `${space.floor_ft.toLocaleString('en-US')} ft` : 'surface'} to{' '}
+            {space.ceiling_ft ? `${space.ceiling_ft.toLocaleString('en-US')} ft` : 'unlimited'}
+          </div>
+        ))}
       </section>
 
       <PlanCard engine={engine} send={send} />

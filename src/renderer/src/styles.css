@@ -964,3 +964,14 @@ input[type='range'] {
     user-select: none;
   }
 }
+
+/* ---- airspace the aircraft is in ---- */
+
+.airspace {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
