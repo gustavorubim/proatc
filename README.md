@@ -115,3 +115,7 @@ Copy `config.example.toml` to `config.toml` to change the key, devices, models o
 The app reads from the sim and changes one thing only, when you ask it to: clicking a frequency in the app, or the "Tune" button that appears after a hand-off, sets that frequency on the COM radio you transmit on. Set `allow_tuning = false` under `[sim]` in `config.toml` to switch that off. Some add-on aircraft manage their own radios; if the aircraft does not take the frequency the app says so.
 
 A flight that starts on the runway (as X-Plane places them by default) gets its clearance from tower; from a stand, tower and ground send you to delivery.
+
+## Licence
+
+[MIT](LICENSE).
