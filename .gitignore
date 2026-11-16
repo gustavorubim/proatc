@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+config.toml
+settings.json
+models/
+data/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+out/
+dist/
+vendor/
+docs/branding/
+docs/plan*.md
+*.bundle

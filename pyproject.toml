@@ -1,0 +1,45 @@
+[project]
+name = "proatc"
+version = "0.2.0"
+description = "Free voice ATC for X-Plane 12: bring your own OpenRouter key, local speech-to-text and text-to-speech"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx>=0.27",
+    "websockets>=13",
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "sounddevice>=0.5",
+    "pynput>=1.7",
+    "faster-whisper>=1.1",
+    "kokoro-onnx>=0.4",
+    # NVIDIA runtime libraries so speech-to-text can use the GPU; unused on machines without one
+    "nvidia-cublas-cu12; sys_platform == 'win32'",
+    "nvidia-cudnn-cu12>=9,<10; sys_platform == 'win32'",
+]
+
+[project.scripts]
+proatc = "proatc.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+required-environments = ["sys_platform == 'win32' and platform_machine == 'AMD64'"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/proatc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501", "B905"]  # long lines are left to the formatter; zip() inputs here are sim arrays of matching length

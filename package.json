@@ -1,0 +1,49 @@
+{
+  "name": "proatc",
+  "productName": "Pro ATC",
+  "version": "0.2.0",
+  "description": "Free voice ATC for X-Plane 12: bring your own OpenRouter key, local speech-to-text and text-to-speech",
+  "private": true,
+  "license": "UNLICENSED",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test",
+    "engine:test": "uv run pytest -q",
+    "uv:fetch": "node scripts/fetch-uv.mjs",
+    "dist": "npm run uv:fetch && npm run build && electron-builder --win --publish never",
+    "pack:dir": "npm run uv:fetch && npm run build && electron-builder --win --dir --publish never",
+    "smoke": "node scripts/smoke-test.mjs",
+    "version:set": "node scripts/set-version.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@fontsource-variable/nunito": "^5.3.0",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.3.3",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "eslint": "^10.15.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "prettier": "^3.10.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "~5.9.0",
+    "typescript-eslint": "^8.73.0",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  }
+}

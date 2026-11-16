@@ -1,0 +1,126 @@
+name: CI
+
+# Runs on every pull request and every push to main. The release workflow also calls it, so
+# nothing is released that has not passed these checks.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    # A push that only touches documentation has nothing to build or test.
+    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+  workflow_call:
+    inputs:
+      skip-packaged-app:
+        description: >
+          Do not build and test the packaged app here. The release workflow sets this because
+          it tests the very installer it is about to publish.
+        type: boolean
+        default: false
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  interface:
+    name: App (format, lint, types, tests, build)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Format
+        run: npm run format:check
+      - name: Lint
+        run: npm run lint
+      - name: Type-check
+        run: npm run typecheck
+      - name: Tests
+        run: npm run test
+      - name: Build
+        run: npm run build
+
+  engine-lint:
+    name: Engine (format, lint)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Format
+        run: uvx ruff@0.17.5 format --check .
+      - name: Lint
+        run: uvx ruff@0.17.5 check .
+
+  # The engine is Windows-first: X-Plane users on Windows are the target, and the audio and
+  # global-hotkey libraries need a desktop session that a Linux runner does not have.
+  engine-tests:
+    name: Engine tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+      # The NVIDIA runtime libraries are about a gigabyte and only matter with a GPU.
+      - name: Install
+        run: uv sync --frozen --no-install-package nvidia-cublas-cu12 --no-install-package nvidia-cudnn-cu12
+      - name: Tests
+        run: uv run --no-sync pytest -q
+
+  # Builds the app the way a release does, starts it, and has it check itself: the uv it
+  # carries builds the engine's Python environment from the lock file, the engine starts and
+  # loads every dependency, and the window connects to it. This catches packaging mistakes
+  # that no unit test can see. The checks are in src/main/index.ts and src/proatc/server.py.
+  smoke:
+    name: Packaged app (Windows)
+    # The input does not exist on a pull request or a push, where this must run.
+    if: ${{ !inputs.skip-packaged-app }}
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Build the unpacked app
+        run: npm run pack:dir
+      - name: Test the packaged app
+        run: npm run smoke
+
+  # One required status check for branch protection, whatever the jobs look like.
+  ci-ok:
+    name: CI passed
+    if: always()
+    needs: [interface, engine-lint, engine-tests, smoke]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check results
+        env:
+          RESULTS: ${{ needs.interface.result }} ${{ needs.engine-lint.result }} ${{ needs.engine-tests.result }}
+          PACKAGED: ${{ needs.smoke.result }}
+          SKIP_PACKAGED: ${{ inputs.skip-packaged-app && 'yes' || 'no' }}
+        run: |
+          echo "Job results: $RESULTS; packaged app: $PACKAGED (skipping allowed: $SKIP_PACKAGED)"
+          for result in $RESULTS; do
+            if [ "$result" != "success" ]; then
+              echo "A required job did not succeed."
+              exit 1
+            fi
+          done
+          # The packaged-app job may be skipped only when the release workflow asked for
+          # that, because it tests the installer itself. Skipped by accident is a failure.
+          if [ "$PACKAGED" = "success" ]; then exit 0; fi
+          if [ "$PACKAGED" = "skipped" ] && [ "$SKIP_PACKAGED" = "yes" ]; then exit 0; fi
+          echo "The packaged-app job did not run or did not succeed."
+          exit 1

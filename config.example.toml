@@ -1,0 +1,37 @@
+# Copy to config.toml to override defaults. Every key is optional.
+
+[sim]
+host = "localhost"
+port = 8086
+allow_tuning = true    # clicking a frequency in the app tunes the COM radio in the sim
+
+[ptt]
+# pynput key name: ctrl_r, alt_gr, f13, scroll_lock, or a single character
+key = "ctrl_r"
+
+[audio]
+# Leave unset to use the Windows default devices. Run `proatc devices` to list them.
+# input_device = 1
+# output_device = 4
+
+[stt]
+model = "small.en"      # faster-whisper model name
+device = "auto"         # "auto" uses the GPU if possible; "cpu" keeps about 1 GB of video memory free for the sim
+beam_size = 1
+
+[llm]
+model = "anthropic/claude-haiku-5.5"
+fallback_models = ["google/gemini-2.5-flash-lite"]   # used when the first model is rate-limited
+max_tokens = 200
+
+[tts]
+voice = "am_michael"
+speed = 1.15
+
+[radio]
+enabled = true
+noise = 0.012
+
+[atc]
+# Holding before the approach: "never", "sometimes" (about one arrival in four) or "always".
+holding = "never"

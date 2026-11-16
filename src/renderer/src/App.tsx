@@ -1,0 +1,532 @@
+import { type FormEvent, useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import type { Command, EngineMessage, EngineState, Suggestion, UpdateState } from '../../shared/protocol'
+import logo from './assets/logo.svg'
+import { fillDestination, initialStore, type Line, reduce } from './store'
+import { updateView } from './updates'
+
+const KIND_LABEL: Record<string, string> = {
+  atis: 'ATIS',
+  delivery: 'Delivery',
+  ground: 'Ground',
+  tower: 'Tower',
+  departure: 'Departure',
+  approach: 'Approach',
+  unicom: 'Unicom'
+}
+
+function useEngine() {
+  const [store, dispatch] = useReducer(reduce, initialStore)
+  const socket = useRef<WebSocket | null>(null)
+
+  useEffect(() => {
+    let closed = false
+    let retry: ReturnType<typeof setTimeout> | undefined
+
+    const open = async (): Promise<void> => {
+      const connection = await window.proatc?.connection()
+      if (closed) return
+      if (!connection) {
+        dispatch({ type: 'fatal', text: 'This window must be opened by the Pro ATC app.' })
+        return
+      }
+      const ws = new WebSocket(`ws://127.0.0.1:${connection.port}/?token=${connection.token}`)
+      socket.current = ws
+      ws.onopen = () => dispatch({ type: 'link', link: 'open' })
+      ws.onmessage = (event) => {
+        try {
+          dispatch({ type: 'message', message: JSON.parse(String(event.data)) as EngineMessage })
+        } catch {
+          // A malformed message is dropped; the next state message repairs the view.
+        }
+      }
+      ws.onclose = () => {
+        if (closed) return
+        dispatch({ type: 'link', link: 'connecting' })
+        retry = setTimeout(() => void open(), 1000) // the engine takes a moment to start listening
+      }
+    }
+    void open()
+    // Until the engine is listening, its console output is the only sign of progress
+    // (the first run installs Python and the speech libraries).
+    window.proatc?.onEngineLog((text) => dispatch({ type: 'message', message: { type: 'status', text } }))
+    window.proatc?.onEngineExit((text) => dispatch({ type: 'fatal', text }))
+    void window.proatc?.engineLog().then(({ lines, failure }) => {
+      if (closed) return
+      if (failure) dispatch({ type: 'fatal', text: failure })
+      else if (lines.length) dispatch({ type: 'message', message: { type: 'status', text: lines[lines.length - 1] } })
+    })
+    return () => {
+      closed = true
+      clearTimeout(retry)
+      socket.current?.close()
+    }
+  }, [])
+
+  const send = useCallback((command: Command) => {
+    if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(command))
+  }, [])
+
+  return { store, send }
+}
+
+function UpdatePill() {
+  const [update, setUpdate] = useState<UpdateState>({ state: 'none' })
+  const [version, setVersion] = useState('')
+  useEffect(() => {
+    void window.proatc?.version().then(setVersion)
+    void window.proatc?.updateState().then(setUpdate)
+    window.proatc?.onUpdateState(setUpdate)
+  }, [])
+  const view = updateView(update, version)
+  const click = (): void => {
+    if (view.action === 'install') void window.proatc?.installUpdate()
+    else if (view.action === 'check') void window.proatc?.checkForUpdates().then(setUpdate)
+  }
+  return (
+    <button className={`update update-${view.tone}`} title={view.hint} disabled={view.action === null} onClick={click}>
+      {view.label}
+    </button>
+  )
+}
+
+function Pill({ ok, label, detail }: { ok: boolean | 'wait'; label: string; detail?: string }) {
+  const tone = ok === 'wait' ? 'wait' : ok ? 'ok' : 'bad'
+  return (
+    <span className={`pill pill-${tone}`} title={detail}>
+      <span className="dot" />
+      {label}
+    </span>
+  )
+}
+
+function formatLevel(feet: number): string {
+  return feet >= 10000 ? `FL${Math.round(feet / 100)}` : `${feet.toLocaleString('en-US')} ft`
+}
+
+function PlanCard({ engine, send }: { engine: EngineState | null; send: (command: Command) => void }) {
+  const plan = engine?.plan
+  const [user, setUser] = useState('')
+  const [destination, setDestination] = useState('')
+  const [cruise, setCruise] = useState('')
+  const [manual, setManual] = useState(false)
+  const saved = engine?.simbrief_user ?? ''
+  const ready = Boolean(engine?.ready)
+
+  if (plan) {
+    return (
+      <section className="card">
+        <div className="eyebrow">
+          Flight plan{plan.source === 'simbrief' ? ' · SimBrief' : ''}
+          <button className="link" onClick={() => send({ cmd: 'clear_plan' })}>
+            clear
+          </button>
+        </div>
+        <div className="route-ends">
+          <span className="mono">{plan.origin ?? '····'}</span>
+          <span className="arrow">→</span>
+          <span className="mono">{plan.destination}</span>
+          {plan.cruise_ft ? <span className="chip">{formatLevel(plan.cruise_ft)}</span> : null}
+        </div>
+        {plan.route && <div className="route mono">{plan.route}</div>}
+      </section>
+    )
+  }
+  return (
+    <section className="card">
+      <div className="eyebrow">Flight plan</div>
+      {manual ? (
+        <form
+          className="plan-form"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (destination.trim()) send({ cmd: 'plan', destination, cruise, route: '' })
+          }}
+        >
+          <input
+            placeholder="Destination, e.g. LFPG"
+            value={destination}
+            onChange={(e) => setDestination(e.target.value)}
+          />
+          <input placeholder="Cruise, e.g. 360" value={cruise} onChange={(e) => setCruise(e.target.value)} />
+          <div className="row">
+            <button type="button" className="link" onClick={() => setManual(false)}>
+              use SimBrief
+            </button>
+            <button type="submit" className="primary" disabled={!ready || !destination.trim()}>
+              Set
+            </button>
+          </div>
+        </form>
+      ) : (
+        <form
+          className="plan-form"
+          onSubmit={(event) => {
+            event.preventDefault()
+            send({ cmd: 'simbrief', user: user.trim() || saved })
+          }}
+        >
+          <input
+            placeholder={saved ? `SimBrief user (${saved})` : 'SimBrief username or pilot ID'}
+            value={user}
+            onChange={(e) => setUser(e.target.value)}
+          />
+          <div className="row">
+            <button type="button" className="link" onClick={() => setManual(true)}>
+              enter by hand
+            </button>
+            <button type="submit" className="primary" disabled={!ready || !(user.trim() || saved)}>
+              Load from SimBrief
+            </button>
+          </div>
+        </form>
+      )}
+    </section>
+  )
+}
+
+function RadioPanel({ engine, send }: { engine: EngineState | null; send: (command: Command) => void }) {
+  const radio = engine?.radio
+  const airport = engine?.airport
+  const flight = engine?.flight
+  const station = radio?.station
+  const canTune = Boolean(engine?.status.can_tune && engine?.status.sim)
+  return (
+    <aside className="side">
+      <section className="card tuned">
+        <div className="eyebrow">Tuned</div>
+        <div className="freq">{radio?.mhz ?? '---.---'}</div>
+        <div className="station">
+          {station ? station.callsign : engine?.status.sim ? 'No station in range' : 'Simulator not connected'}
+        </div>
+        {station?.airport && (
+          <div className="muted">
+            {station.airport} · {station.distance_nm} NM
+          </div>
+        )}
+        {station && !station.airport && <div className="muted">En-route centre</div>}
+      </section>
+
+      <section className="card">
+        <div className="eyebrow">Flight</div>
+        <div className="strip">
+          <div>
+            <label>Callsign</label>
+            <span>{engine?.aircraft?.callsign ?? '—'}</span>
+          </div>
+          <div>
+            <label>Type</label>
+            <span>{engine?.aircraft?.aircraft_type ?? '—'}</span>
+          </div>
+          <div>
+            <label>Squawk</label>
+            <span className="mono">{flight?.assigned_squawk ?? '—'}</span>
+          </div>
+          <div>
+            <label>Runway</label>
+            <span className="mono">{flight?.assigned_runway ?? '—'}</span>
+          </div>
+        </div>
+        <div className="phase">
+          {flight?.phase ?? 'no flight'}
+          {flight?.destination ? ` · ${flight.flight_rules ?? ''} to ${flight.destination}` : ''}
+        </div>
+        {(flight?.sid || flight?.star || flight?.cleared_altitude_ft || flight?.approach) && (
+          <div className="chips ifr">
+            {flight.cleared_altitude_ft ? (
+              <span className="chip chip-atis" title="Last level you were cleared to">
+                {formatLevel(flight.cleared_altitude_ft)}
+              </span>
+            ) : null}
+            {flight.sid && <span className="chip">SID {flight.sid}</span>}
+            {flight.star && <span className="chip">STAR {flight.star}</span>}
+            {flight.approach && <span className="chip">{flight.approach.replaceAll(' ', '')}</span>}
+            {flight.heading ? <span className="chip">HDG {String(flight.heading).padStart(3, '0')}</span> : null}
+            {flight.speed_kt ? <span className="chip">{flight.speed_kt} kt</span> : null}
+            {flight.direct_to && <span className="chip">DCT {flight.direct_to}</span>}
+            {flight.holding && <span className="chip chip-atis">HOLD {flight.holding}</span>}
+          </div>
+        )}
+      </section>
+
+      <PlanCard engine={engine} send={send} />
+
+      {airport && (
+        <section className="card grow">
+          <div className="eyebrow">
+            {airport.ident} · {airport.name}
+          </div>
+          {airport.atis_letter && (
+            <div className="chips">
+              <span className="chip chip-atis" title="Current ATIS information">
+                {airport.atis_name}
+              </span>
+              {airport.runways_in_use?.map((runway) => (
+                <span className="chip" key={runway} title="Runway in use">
+                  RWY {runway}
+                </span>
+              ))}
+              <span className="chip">{airport.wind}</span>
+              <span className="chip">{airport.pressure}</span>
+              <span className="chip">{airport.temperature}</span>
+            </div>
+          )}
+          <ul className="freqs">
+            {airport.frequencies.map((frequency) => (
+              <li
+                key={`${frequency.kind}${frequency.mhz}`}
+                className={frequency.tuned ? 'on' : ''}
+                title={canTune ? 'Click to tune this frequency on your COM radio' : 'Click to copy'}
+                onClick={() =>
+                  canTune
+                    ? send({ cmd: 'tune', mhz: frequency.mhz })
+                    : void navigator.clipboard.writeText(frequency.mhz)
+                }
+              >
+                <span className="mono">{frequency.mhz}</span>
+                <span className="name">{frequency.label || KIND_LABEL[frequency.kind] || frequency.kind}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </aside>
+  )
+}
+
+function LogLine({ line }: { line: Line }) {
+  return (
+    <div className={`line line-${line.kind}`}>
+      {line.who && (
+        <div className="who">
+          {line.who}
+          {line.meta && <span className="meta">{line.meta}</span>}
+        </div>
+      )}
+      <div className="text">{line.text}</div>
+    </div>
+  )
+}
+
+function KeyDialog({
+  hasKey,
+  onSave,
+  onClose
+}: {
+  hasKey: boolean
+  onSave: (key: string) => void
+  onClose: () => void
+}) {
+  const [key, setKey] = useState('')
+  const submit = (event: FormEvent): void => {
+    event.preventDefault()
+    if (key.trim()) onSave(key.trim())
+    onClose()
+  }
+  return (
+    <div className="scrim" onClick={onClose}>
+      <form className="dialog" onClick={(event) => event.stopPropagation()} onSubmit={submit}>
+        <h2>OpenRouter key</h2>
+        <p>
+          {hasKey
+            ? 'A key is already saved. Enter a new one to replace it.'
+            : 'No key yet: the controller only echoes.'}{' '}
+          The key is stored in the <code>.env</code> file next to the engine and is sent only to OpenRouter.
+        </p>
+        <input
+          type="password"
+          autoFocus
+          placeholder="sk-or-…"
+          value={key}
+          onChange={(event) => setKey(event.target.value)}
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <div className="row">
+          <button type="button" className="ghost" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="primary" disabled={!key.trim()}>
+            Save key
+          </button>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+export function App() {
+  const { store, send } = useEngine()
+  const engine = store.engine
+  const [draft, setDraft] = useState('')
+  const [asking, setAsking] = useState<Suggestion | null>(null)
+  const [destination, setDestination] = useState('')
+  const [keyOpen, setKeyOpen] = useState(false)
+  const logEnd = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    logEnd.current?.scrollIntoView({ block: 'end' })
+  }, [store.log.length])
+
+  const ready = Boolean(engine?.ready) && store.link === 'open'
+  const click = (suggestion: Suggestion): void => {
+    if (suggestion.needs === 'destination') {
+      setAsking(suggestion)
+      return
+    }
+    send({ cmd: 'click', text: suggestion.text, intent: suggestion.intent })
+  }
+  const submitDestination = (event: FormEvent): void => {
+    event.preventDefault()
+    if (!asking || !destination.trim()) return
+    send({
+      cmd: 'click',
+      text: fillDestination(asking.text, destination),
+      intent: { ...asking.intent, destination: destination.trim() }
+    })
+    setAsking(null)
+    setDestination('')
+  }
+  const submitDraft = (event: FormEvent): void => {
+    event.preventDefault()
+    if (!draft.trim()) return
+    send({ cmd: 'say', text: draft.trim() })
+    setDraft('')
+  }
+
+  return (
+    <div className="app" data-link={store.link}>
+      <header className="top">
+        <div className="brand">
+          <img src={logo} alt="" />
+          Pro ATC
+          <small>VOICE ATC</small>
+        </div>
+        <div className="pills">
+          <UpdatePill />
+          <Pill ok={ready ? true : store.fatal ? false : 'wait'} label={ready ? 'Engine ready' : 'Engine starting'} />
+          <Pill
+            ok={Boolean(engine?.status.sim)}
+            label={engine?.status.sim ? 'X-Plane connected' : 'X-Plane not connected'}
+          />
+          <button className="pill-button" onClick={() => setKeyOpen(true)}>
+            <Pill
+              ok={Boolean(engine?.status.has_key)}
+              label={engine?.status.has_key ? 'OpenRouter key set' : 'Add OpenRouter key'}
+              detail={engine?.status.model}
+            />
+          </button>
+        </div>
+      </header>
+
+      <div className="body">
+        <RadioPanel engine={engine} send={send} />
+
+        <main className="main">
+          {store.lastInstruction && (
+            <div className="instruction">
+              <div className="eyebrow">Last instruction · {store.lastInstruction.station}</div>
+              <div>{store.lastInstruction.text}</div>
+            </div>
+          )}
+
+          <div className="log">
+            {store.fatal && <div className="line line-error">{store.fatal}</div>}
+            {!ready && !store.fatal && (
+              <div className="starting">
+                <div className="spinner" />
+                {store.startup}
+              </div>
+            )}
+            {ready && store.log.length === 0 && (
+              <div className="empty">
+                Hold <kbd>{engine?.status.ptt_key}</kbd> and speak, click a call below, or type one.
+                {!engine?.status.sim && ' Start X-Plane and load a flight for real airports and frequencies.'}
+              </div>
+            )}
+            {store.log.map((line) => (
+              <LogLine key={line.id} line={line} />
+            ))}
+            <div ref={logEnd} />
+          </div>
+
+          <div className="composer">
+            {asking ? (
+              <form className="ask" onSubmit={submitDestination}>
+                <span>Destination for the clearance request</span>
+                <input
+                  autoFocus
+                  placeholder="e.g. Paris Charles de Gaulle"
+                  value={destination}
+                  onChange={(event) => setDestination(event.target.value)}
+                />
+                <button type="button" className="ghost" onClick={() => setAsking(null)}>
+                  Cancel
+                </button>
+                <button type="submit" className="primary" disabled={!destination.trim()}>
+                  Transmit
+                </button>
+              </form>
+            ) : (
+              <div className="calls">
+                {engine?.flight?.next_frequency && engine.status.can_tune && (
+                  <button
+                    className="call tune"
+                    title="Tune the frequency you were just given on your COM radio"
+                    onClick={() => send({ cmd: 'tune', mhz: engine.flight!.next_frequency! })}
+                  >
+                    Tune {engine.flight.next_frequency}
+                  </button>
+                )}
+                {(engine?.suggestions ?? []).map((suggestion) => (
+                  <button
+                    key={suggestion.label}
+                    className={suggestion.primary ? 'call primary' : 'call'}
+                    title={suggestion.text}
+                    disabled={!ready}
+                    onClick={() => click(suggestion)}
+                  >
+                    {suggestion.label}
+                  </button>
+                ))}
+                {ready && engine?.status.sim && (engine?.suggestions.length ?? 0) === 0 && (
+                  <span className="muted">Tune a controller's frequency to see the calls you can make.</span>
+                )}
+              </div>
+            )}
+
+            <form className="entry" onSubmit={submitDraft}>
+              <button
+                type="button"
+                className={store.transmitting ? 'ptt live' : 'ptt'}
+                disabled={!ready}
+                title={`Hold to talk (or hold ${engine?.status.ptt_key ?? 'the push-to-talk key'})`}
+                onMouseDown={() => send({ cmd: 'ptt', down: true })}
+                onMouseUp={() => send({ cmd: 'ptt', down: false })}
+                onMouseLeave={() => store.transmitting && send({ cmd: 'ptt', down: false })}
+              >
+                {store.transmitting ? 'Transmitting' : 'Hold to talk'}
+              </button>
+              <input
+                placeholder="Type a transmission and press Enter"
+                value={draft}
+                disabled={!ready}
+                onChange={(event) => setDraft(event.target.value)}
+              />
+              <button type="submit" className="primary" disabled={!ready || !draft.trim()}>
+                Send
+              </button>
+            </form>
+          </div>
+        </main>
+      </div>
+
+      {keyOpen && (
+        <KeyDialog
+          hasKey={Boolean(engine?.status.has_key)}
+          onSave={(key) => send({ cmd: 'set_key', key })}
+          onClose={() => setKeyOpen(false)}
+        />
+      )}
+    </div>
+  )
+}

@@ -1,0 +1,371 @@
+"""Airports, runways and frequencies from X-Plane's own apt.dat, indexed into SQLite.
+
+Using the sim's data guarantees that ATC and scenery agree.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import re
+import sqlite3
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .config import PROJECT_DIR
+
+DB_PATH = PROJECT_DIR / "data" / "airports-v2.sqlite"  # bump the name when the schema changes
+APT_RELATIVE = Path("Global Scenery/Global Airports/Earth nav data/apt.dat")
+
+# apt.dat row codes: 1050-1056 are 8.33 kHz-capable (value in kHz), 50-56 legacy (value in 10 kHz).
+FREQ_KINDS = {
+    "1050": "atis",
+    "1051": "unicom",
+    "1052": "delivery",
+    "1053": "ground",
+    "1054": "tower",
+    "1055": "approach",
+    "1056": "departure",
+}
+FREQ_KINDS.update({code[2:]: kind for code, kind in list(FREQ_KINDS.items())})
+
+# How far from the airport each kind of station can be worked, in nautical miles.
+RANGE_NM = {"atis": 60, "unicom": 30, "delivery": 10, "ground": 10, "tower": 30, "approach": 60, "departure": 60}
+STATION_WORD = {
+    "atis": "Information",
+    "unicom": "Traffic",
+    "delivery": "Delivery",
+    "ground": "Ground",
+    "tower": "Tower",
+    "approach": "Approach",
+    "departure": "Departure",
+}
+FREQ_TOLERANCE_KHZ = 5
+SPOKEN_LABEL = re.compile(
+    r"([A-Za-z][A-Za-z' ]*?) "
+    r"(Tower|Twr|Ground|Gnd|Approach|App|Departure|Dep|Delivery|Del|Clearance|Information|ATIS|Control|Radar|Director|Arrival|Radio)"
+    # "Heathrow Tower 1", "De Gaulle Twr North 2", "De Gaulle Arrival NE/NW": the position is not spoken.
+    r"(?:[ /]+(?:\d+|North|South|East|West|[NSEW]{1,2}))*",
+    re.I,
+)
+ROLE_WORDS = {"Twr": "Tower", "Gnd": "Ground", "App": "Approach", "Dep": "Departure", "Del": "Delivery", "Atis": "Information"}
+
+
+@dataclass
+class Runway:
+    end1: str
+    lat1: float
+    lon1: float
+    end2: str
+    lat2: float
+    lon2: float
+    length_m: float
+    surface: int
+
+    def ends(self) -> list[tuple[str, float]]:
+        """(ident, true heading when using that end) for both directions."""
+        heading = bearing(self.lat1, self.lon1, self.lat2, self.lon2)
+        return [(self.end1, heading), (self.end2, (heading + 180) % 360)]
+
+
+@dataclass
+class Freq:
+    khz: int
+    kind: str
+    label: str
+
+
+@dataclass
+class Airport:
+    ident: str
+    name: str
+    lat: float
+    lon: float
+    elev_ft: float
+    runways: list[Runway] = field(default_factory=list)
+    freqs: list[Freq] = field(default_factory=list)
+    offset: int = 0  # byte range of this airport's record in apt.dat, for loading taxiways on demand
+    length: int = 0
+
+    @property
+    def spoken_name(self) -> str:
+        return clean_name(self.name)
+
+
+@dataclass
+class Station:
+    airport: Airport
+    kind: str
+    khz: int
+    label: str
+    distance_nm: float
+
+    @property
+    def callsign(self) -> str:
+        """The name in the sim's data when it is a real callsign ('Luton Tower'), else built from the airport name."""
+        match = SPOKEN_LABEL.fullmatch(self.label.strip())
+        if match:
+            role = match.group(2).title()
+            return f"{match.group(1).title()} {ROLE_WORDS.get(role, role)}"
+        return f"{self.airport.spoken_name} {STATION_WORD[self.kind]}"
+
+    @property
+    def key(self) -> str:
+        return f"{self.airport.ident}:{self.kind}"
+
+    @property
+    def place(self) -> str:
+        """Callsign without the role word: 'Luton'."""
+        return self.callsign.rsplit(" ", 1)[0]
+
+
+def clean_name(name: str) -> str:
+    name = re.sub(r"\[.*?\]|\(.*?\)|[-/]", " ", name)
+    name = re.sub(r"\b(Intl|International|Airport|Airfield|Regional|Rgnl|Municipal|Muni|Field|Fld)\b\.?", " ", name, flags=re.I)
+    return " ".join(name.split()) or name.strip()
+
+
+def distance_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2
+    return 2 * 3440.065 * math.asin(math.sqrt(a))
+
+
+def bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    p1, p2, dl = math.radians(lat1), math.radians(lat2), math.radians(lon2 - lon1)
+    y = math.sin(dl) * math.cos(p2)
+    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return math.degrees(math.atan2(y, x)) % 360
+
+
+# ---- parsing ----------------------------------------------------------------
+
+
+def parse_apt(lines: Iterable[str], position=None) -> Iterator[Airport]:
+    """Yield land airports that have at least one runway.
+
+    `position`, when given, returns the byte offset of the line being processed.
+    """
+    current: Airport | None = None
+    meta: dict[str, str] = {}
+
+    def finish() -> Airport | None:
+        if current is None or not current.runways:
+            return None
+        if position:
+            current.length = position() - current.offset
+        if "datum_lat" in meta and "datum_lon" in meta:
+            current.lat, current.lon = float(meta["datum_lat"]), float(meta["datum_lon"])
+        else:
+            points = [(r.lat1, r.lon1) for r in current.runways] + [(r.lat2, r.lon2) for r in current.runways]
+            current.lat = sum(p[0] for p in points) / len(points)
+            current.lon = sum(p[1] for p in points) / len(points)
+        if meta.get("icao_code"):
+            current.ident = meta["icao_code"]
+        # Legacy rows (10 kHz precision) often repeat an 8.33 kHz row: keep the precise one.
+        seen: dict[tuple[str, int], Freq] = {}
+        for freq in sorted(current.freqs, key=lambda f: f.khz % 10 == 0):
+            seen.setdefault((freq.kind, round(freq.khz / 25)), freq)
+        current.freqs = list(seen.values())
+        return current
+
+    for line in lines:
+        if not line or line[0] not in "15":
+            continue
+        code, _, rest = line.partition(" ")
+        if code in ("1", "16", "17"):
+            done = finish()
+            if done:
+                yield done
+            current, meta = None, {}
+            if code == "1":
+                parts = rest.split(None, 4)
+                if len(parts) >= 4:
+                    current = Airport(parts[3], parts[4].strip() if len(parts) > 4 else parts[3], 0.0, 0.0, float(parts[0]))
+                    current.offset = position() if position else 0
+        elif current is None:
+            continue
+        elif code == "100":
+            t = line.split()
+            if len(t) >= 20:
+                lat1, lon1, lat2, lon2 = float(t[9]), float(t[10]), float(t[18]), float(t[19])
+                current.runways.append(
+                    Runway(t[8], lat1, lon1, t[17], lat2, lon2, distance_nm(lat1, lon1, lat2, lon2) * 1852, int(t[2]))
+                )
+        elif code == "1302":
+            parts = rest.split(None, 1)
+            if len(parts) == 2:
+                meta[parts[0]] = parts[1].strip()
+        elif code in FREQ_KINDS:
+            parts = rest.split(None, 1)
+            if parts and parts[0].isdigit():
+                khz = int(parts[0]) * (1 if len(code) == 4 else 10)
+                current.freqs.append(Freq(khz, FREQ_KINDS[code], parts[1].strip() if len(parts) > 1 else ""))
+    done = finish()
+    if done:
+        yield done
+
+
+def find_apt_dat(xplane_path: str | None = None) -> Path:
+    candidates = []
+    if xplane_path:
+        candidates.append(Path(xplane_path))
+    install_file = Path(os.environ.get("LOCALAPPDATA", "")) / "x-plane_install_12.txt"
+    if install_file.exists():
+        candidates += [
+            Path(line.strip()) for line in install_file.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()
+        ]
+    for root in candidates:
+        if (root / APT_RELATIVE).exists():
+            return root / APT_RELATIVE
+    raise FileNotFoundError("Could not find X-Plane's apt.dat. Set sim.xplane_path in config.toml to your X-Plane 12 folder.")
+
+
+# ---- index ------------------------------------------------------------------
+
+SCHEMA = """
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE airports (ident TEXT PRIMARY KEY, name TEXT, lat REAL, lon REAL, elev_ft REAL, offset INT, length INT);
+CREATE TABLE runways (ident TEXT, end1 TEXT, lat1 REAL, lon1 REAL, end2 TEXT, lat2 REAL, lon2 REAL, length_m REAL, surface INT);
+CREATE TABLE freqs (ident TEXT, khz INT, kind TEXT, label TEXT);
+CREATE INDEX airports_lat ON airports (lat);
+CREATE INDEX runways_ident ON runways (ident);
+CREATE INDEX freqs_ident ON freqs (ident);
+CREATE INDEX freqs_khz ON freqs (khz);
+"""
+
+
+def build_index(apt_path: Path, db_path: Path = DB_PATH) -> int:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    temp = db_path.with_suffix(".building")
+    temp.unlink(missing_ok=True)
+    db = sqlite3.connect(temp)
+    db.executescript(SCHEMA)
+    count = 0
+    offset = 0  # byte offset of the line parse_apt is looking at
+
+    def decoded(handle):
+        nonlocal offset
+        position = 0
+        for raw in handle:
+            offset = position
+            position += len(raw)
+            yield raw.decode("utf-8", "ignore").rstrip()
+        offset = position
+
+    with open(apt_path, "rb") as handle:
+        for airport in parse_apt(decoded(handle), position=lambda: offset):
+            cursor = db.execute(
+                "INSERT OR IGNORE INTO airports VALUES (?,?,?,?,?,?,?)",
+                (airport.ident, airport.name, airport.lat, airport.lon, airport.elev_ft, airport.offset, airport.length),
+            )
+            if not cursor.rowcount:
+                continue  # duplicate ident: keep the first
+            db.executemany(
+                "INSERT INTO runways VALUES (?,?,?,?,?,?,?,?,?)",
+                [(airport.ident, r.end1, r.lat1, r.lon1, r.end2, r.lat2, r.lon2, r.length_m, r.surface) for r in airport.runways],
+            )
+            db.executemany("INSERT INTO freqs VALUES (?,?,?,?)", [(airport.ident, f.khz, f.kind, f.label) for f in airport.freqs])
+            count += 1
+    stat = apt_path.stat()
+    db.executemany(
+        "INSERT INTO meta VALUES (?,?)", [("source", str(apt_path)), ("stamp", f"{stat.st_size}:{int(stat.st_mtime)}")]
+    )
+    db.commit()
+    db.close()
+    temp.replace(db_path)
+    return count
+
+
+class AirportDB:
+    def __init__(self, db_path: Path = DB_PATH):
+        # One connection shared by the voice loop and the ATIS thread; every use is a short read.
+        self.db = sqlite3.connect(db_path, check_same_thread=False)
+        self.centers = None  # centers.CenterIndex, set by the session: en-route stations on the radio
+        self.metars = None  # metar.MetarStore, set by the session: reported weather for any airport
+
+    @classmethod
+    def open(cls, xplane_path: str | None = None, db_path: Path = DB_PATH) -> AirportDB:
+        """Open the index, building it on first use or when apt.dat has changed."""
+        apt_path = find_apt_dat(xplane_path)
+        stat = apt_path.stat()
+        stamp = f"{stat.st_size}:{int(stat.st_mtime)}"
+        current = None
+        if db_path.exists():
+            try:
+                probe = sqlite3.connect(db_path)
+                row = probe.execute("SELECT value FROM meta WHERE key='stamp'").fetchone()
+                probe.close()  # an open handle would block replacing the file on Windows
+                current = row[0] if row else None
+            except sqlite3.Error:
+                current = None
+        if current != stamp:
+            print("Indexing X-Plane airports (one-off, about a minute)...")
+            print(f"  {build_index(apt_path, db_path)} airports indexed.")
+        return cls(db_path)
+
+    def airport(self, ident: str) -> Airport | None:
+        row = self.db.execute(
+            "SELECT ident, name, lat, lon, elev_ft, offset, length FROM airports WHERE ident = ?", (ident.upper(),)
+        ).fetchone()
+        if not row:
+            return None
+        airport = Airport(*row[:5], offset=row[5], length=row[6])
+        airport.runways = [
+            Runway(*r)
+            for r in self.db.execute(
+                "SELECT end1, lat1, lon1, end2, lat2, lon2, length_m, surface FROM runways WHERE ident = ?", (airport.ident,)
+            )
+        ]
+        airport.freqs = [
+            Freq(*f) for f in self.db.execute("SELECT khz, kind, label FROM freqs WHERE ident = ?", (airport.ident,))
+        ]
+        return airport
+
+    def record_lines(self, airport: Airport) -> list[str]:
+        """This airport's raw apt.dat rows (taxiways, stands), read straight from the sim's file."""
+        source = self.db.execute("SELECT value FROM meta WHERE key='source'").fetchone()[0]
+        with open(source, "rb") as handle:
+            handle.seek(airport.offset)
+            return handle.read(airport.length).decode("utf-8", "ignore").splitlines()
+
+    @property
+    def xplane_root(self) -> Path:
+        """The X-Plane folder this index was built from."""
+        source = self.db.execute("SELECT value FROM meta WHERE key='source'").fetchone()[0]
+        return Path(source).parents[3]
+
+    def station_of(self, airport: Airport, kind: str) -> Station | None:
+        """The airport's own station of this kind (first listed), for hand-offs."""
+        freq = next((f for f in airport.freqs if f.kind == kind), None)
+        return Station(airport, kind, freq.khz, freq.label, 0.0) if freq else None
+
+    def nearest(self, lat: float, lon: float, radius_nm: float = 30, limit: int = 5) -> list[tuple[float, Airport]]:
+        dlat = radius_nm / 60
+        dlon = dlat / max(math.cos(math.radians(lat)), 0.05)
+        rows = self.db.execute(
+            "SELECT ident, lat, lon FROM airports WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?",
+            (lat - dlat, lat + dlat, lon - dlon, lon + dlon),
+        ).fetchall()
+        ranked = sorted((distance_nm(lat, lon, a_lat, a_lon), ident) for ident, a_lat, a_lon in rows)
+        return [(dist, self.airport(ident)) for dist, ident in ranked[:limit] if dist <= radius_nm]
+
+    def station(self, khz: int, lat: float, lon: float) -> Station | None:
+        """The nearest in-range station transmitting on this frequency, if any."""
+        dlat = 61 / 60
+        dlon = dlat / max(math.cos(math.radians(lat)), 0.05)
+        rows = self.db.execute(
+            "SELECT a.ident, a.lat, a.lon, f.khz, f.kind, f.label FROM freqs f JOIN airports a ON a.ident = f.ident "
+            "WHERE f.khz BETWEEN ? AND ? AND a.lat BETWEEN ? AND ? AND a.lon BETWEEN ? AND ?",
+            (khz - FREQ_TOLERANCE_KHZ, khz + FREQ_TOLERANCE_KHZ, lat - dlat, lat + dlat, lon - dlon, lon + dlon),
+        ).fetchall()
+        best = None
+        for ident, a_lat, a_lon, f_khz, kind, label in rows:
+            dist = distance_nm(lat, lon, a_lat, a_lon)
+            if dist <= RANGE_NM[kind] and (best is None or dist < best[0]):
+                best = (dist, ident, f_khz, kind, label)
+        if not best:
+            return None
+        dist, ident, f_khz, kind, label = best
+        return Station(self.airport(ident), kind, f_khz, label, dist)

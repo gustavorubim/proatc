@@ -1,0 +1,72 @@
+import { describe, expect, it } from 'vitest'
+import type { EngineMessage } from '../../shared/protocol'
+import { fillDestination, initialStore, MAX_LINES, reduce, type Store } from './store'
+
+function feed(messages: EngineMessage[], start: Store = initialStore): Store {
+  return messages.reduce((store, message) => reduce(store, { type: 'message', message }), start)
+}
+
+describe('store', () => {
+  it('builds the conversation with annotations on the right lines', () => {
+    const store = feed([
+      { type: 'pilot', text: 'Heathrow Ground, request taxi', source: 'clicked' },
+      { type: 'understood', intent: 'request_taxi' },
+      {
+        type: 'atc',
+        station: 'Heathrow Ground',
+        text: 'Taxi to holding point runway two seven right',
+        unprompted: false
+      },
+      { type: 'timings', listen: 0, think: 0.9, voice: 1.04, total: 1.94 },
+      { type: 'silent' },
+      { type: 'atis', airport: 'EGLL', mhz: '128.080', text: 'Heathrow information Kilo' },
+      { type: 'info', text: 'nobody answers: no station in range on 123.450' },
+      { type: 'error', text: 'OpenRouter returned 429' }
+    ])
+    expect(store.log.map((line) => [line.kind, line.who, line.meta])).toEqual([
+      ['pilot', 'You', 'request taxi'],
+      ['atc', 'Heathrow Ground', '1.9 s'],
+      ['note', '', undefined],
+      ['atis', 'EGLL ATIS 128.080', undefined],
+      ['note', '', undefined],
+      ['error', '', undefined]
+    ])
+    expect(store.lastInstruction).toEqual({
+      station: 'Heathrow Ground',
+      text: 'Taxi to holding point runway two seven right'
+    })
+    expect(new Set(store.log.map((line) => line.id)).size).toBe(6)
+  })
+
+  it('tracks transmit state, start-up text and the link', () => {
+    let store = feed([
+      { type: 'status', text: '\nReady. Hold [ctrl_r] to talk.\n' },
+      { type: 'tx', on: true }
+    ])
+    expect(store.startup).toBe('Ready. Hold [ctrl_r] to talk.')
+    expect(store.transmitting).toBe(true)
+    store = reduce(store, { type: 'link', link: 'open' })
+    store = reduce(store, { type: 'fatal', text: 'The engine stopped.' })
+    expect([store.link, store.fatal]).toEqual(['open', 'The engine stopped.'])
+  })
+
+  it('keeps only the most recent lines', () => {
+    const many: EngineMessage[] = Array.from({ length: MAX_LINES + 20 }, (_, index) => ({
+      type: 'info',
+      text: `note ${index}`
+    }))
+    const store = feed(many)
+    expect(store.log).toHaveLength(MAX_LINES)
+    expect(store.log[0].text).toBe('note 20')
+  })
+
+  it('an annotation with no matching line changes nothing', () => {
+    expect(feed([{ type: 'understood', intent: 'radio_check' }]).log).toEqual([])
+  })
+
+  it('fills the destination into a suggested call', () => {
+    expect(fillDestination('Delivery, request I F R clearance to {destination}', ' Paris ')).toBe(
+      'Delivery, request I F R clearance to Paris'
+    )
+  })
+})
