@@ -27,7 +27,7 @@ import math
 from dataclasses import dataclass, replace
 
 from . import atis as atis_text
-from . import holding, restrictions, traffic
+from . import holding, restrictions, traffic, vfr
 from . import phraseology as say
 from .atis import uses_faa_style
 from .intents import Intent
@@ -208,6 +208,8 @@ def handle(engine, intent, station, issue, raw, variation, callsign, hello):
         reply = _deviation(engine, intent, callsign, part)
     elif intent.intent in ("request_flight_following", "cancel_flight_following"):
         reply = _flight_following(engine, intent, station, issue, callsign, hello)
+    elif intent.intent == "request_transit" and station.airport and engine.flight.rules != "IFR":
+        reply = vfr.transit(engine, intent, station, issue, raw, callsign, hello, _faa(station))
     elif intent.intent == "request_diversion":
         reply = _divert(engine, intent, station, raw, variation, callsign, hello)
     elif part == "departure":
@@ -420,7 +422,6 @@ def _deviation(engine, intent, callsign, part: str):
 
 def _flight_following(engine, intent, station, issue, callsign, hello):
     """Radar service for a VFR flight: a code, identification, and traffic calls from then on."""
-    from .engine import _squawk
 
     flight = engine.flight
     faa = _faa(station)
@@ -433,12 +434,8 @@ def _flight_following(engine, intent, station, issue, callsign, hello):
         return _reply(engine, f"{callsign}, radar service terminated, squawk {say.digits(code)}, frequency change approved")
     if flight.rules == "IFR":
         return None
-    flight.rules, flight.following = "VFR", True
-    if not flight.squawk or flight.squawk in ("1200", "7000"):
-        flight.squawk = _squawk(engine._rng)
-    pressure = f", {engine._pressure(issue, faa)[0]}" if issue else ""
-    text = f"{callsign}, {hello}squawk {say.digits(flight.squawk)}, {_contact_word(faa)}, flight following{pressure}"
-    return _reply(engine, text, {"squawk": flight.squawk})
+    ident = station.airport.ident if station.airport else station.center.facility
+    return vfr.radar_service(engine, intent, station, issue, callsign, hello, faa, ident)
 
 
 # ---- arrival: vectors and the approach clearance ----------------------------
@@ -823,11 +820,12 @@ def _watch(engine, station, raw, callsign):
     ):
         arrival.heading_asked = True
         return _reply(engine, f"{callsign}, fly heading {say.heading(arrival.heading)}", {"heading": arrival.heading})
-    if engine.traffic_enabled:
+    # A Basic Service gives no traffic information; every other service, and every IFR flight, gets it.
+    if engine.traffic_enabled and not (flight.following and flight.service == "basic"):
         call = traffic.advisory(raw, engine._traffic_seen, engine.now())
         if call:
             return _reply(engine, f"{callsign}, {call}")
-    return None
+    return vfr.airspace_watch(engine, station, raw, callsign, faa)
 
 
 def tick(engine, station, issue, raw, variation, callsign):
@@ -940,6 +938,8 @@ def suggestions(engine, station, raw, add, callsign) -> None:
     passing = _level(engine, int(round(feet / 100) * 100), ident, faa)
     part = role(engine, station)
     cleared = flight.cleared_ft
+    if part == "arrival" and not plan and flight.rules != "IFR" and not flight.arrival:
+        part = "passing"  # a VFR flight with no plan is not this controller's arrival: it gets the en-route calls
     if part == "arrival":
         add("Check in", f"descending {_level(engine, cleared, ident, faa)}" if cleared else f"passing {passing}", "check_in")
         if flight.arrival and flight.arrival.hold:
@@ -970,9 +970,17 @@ def suggestions(engine, station, raw, add, callsign) -> None:
             add("Request descent", "request descent", "request_descent")
         add("Request climb", "request higher", "request_climb")
     if flight.following:
-        add("Cancel flight following", "cancel flight following", "cancel_flight_following")
+        add("Cancel radar service", "cancel radar service" if not faa else "cancel flight following", "cancel_flight_following")
     elif not plan and flight.rules != "IFR":
-        add("Request flight following", "request flight following", "request_flight_following")
+        if faa:
+            add("Request flight following", "request flight following", "request_flight_following")
+        elif (station.center.facility if station.kind == "center" else ident or "").startswith("EG"):
+            add("Request basic service", "request basic service", "request_flight_following", service="basic")
+            add("Request traffic service", "request traffic service", "request_flight_following", service="traffic")
+        else:
+            add("Request flight information", "request flight information service", "request_flight_following")
+        if station.airport:
+            add("Request zone transit", "request zone transit", "request_transit")
     if flight.deviating:
         add("Clear of weather", "clear of weather", "clear_of_weather")
     else:

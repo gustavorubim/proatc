@@ -38,6 +38,12 @@ INTENTS = {
     "request_diversion": "asks to divert to another airport or to the alternate",
     "request_crossing": "on the ground, holding short of a runway or asking to cross it",
     "request_progressive": "asks for progressive taxi instructions, or is unsure where to taxi",
+    "request_transit": "airborne, asks to cross or transit a control zone or controlled airspace without landing",
+    "report_leaving": "reports leaving or clear of the zone, or asks for a frequency change",
+    "request_special_vfr": "asks for special V F R",
+    "request_circuits": "asks for circuits, closed traffic, or to remain in the pattern",
+    "request_low_approach": "asks for a low approach or a low pass",
+    "traffic_call": "a blind call or self-announcement to other traffic at an airfield with no controller (addressed to 'traffic')",
     "request_touch_and_go": "asks for a touch and go",
     "going_around": "going around / missed approach",
     "runway_vacated": "reports the runway vacated / clear of the runway",
@@ -63,6 +69,8 @@ Keys:
 - "heading": a heading said, as a number of degrees, or null
 - "direction": "left" or "right" for a requested deviation, or null
 - "fix": the waypoint or navaid of a "direct to" request, as its identifier in capital letters (e.g. "BIBAX"), or null
+- "service": for a radar service request, "basic", "traffic" or "deconfliction" if one of those is named, else null
+- "compass": a direction of flight or of the aircraft from the airfield, as "north", "north east", "east", "south east", "south", "south west", "west" or "north west", or null
 - "approach": the type of approach asked for or read back: "ILS", "LOC", "RNAV", "VOR", "NDB" or "visual", or null
 - "touch_and_go": true if a touch and go is requested or read back, else false
 
@@ -93,6 +101,8 @@ class Intent:
     fix: str | None = None
     direction: str | None = None
     approach: str | None = None
+    service: str | None = None
+    compass: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict) -> Intent:
@@ -149,6 +159,12 @@ def _clean(data: dict) -> Intent:
         intent.approach = approach
     elif approach == "VISUAL":
         intent.approach = "visual"
+    if data.get("service") in ("basic", "traffic", "deconfliction"):
+        intent.service = data["service"]
+    points = str(data.get("compass", "")).lower().replace("-", " ").replace("northeast", "north east")
+    points = points.replace("northwest", "north west").replace("southeast", "south east").replace("southwest", "south west")
+    if points.strip() in ("north", "north east", "east", "south east", "south", "south west", "west", "north west"):
+        intent.compass = points.strip()
     intent.touch_and_go = data.get("touch_and_go") is True
     for key, low, high in (("altitude", 0, 60000), ("heading", 0, 360)):
         try:

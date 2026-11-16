@@ -49,7 +49,7 @@ class FlightLog:
             elif kind == "atis":
                 lines.append(f"{stamp} ATIS {entry['airport']} {entry['mhz']}: {entry['text']}")
             elif kind == "silent":
-                lines.append(f"{stamp}          (readback correct, controller silent)")
+                lines.append(f"{stamp}          ({entry.get('text') or 'readback correct, controller silent'})")
             elif kind == "coach":
                 lines.append(f"{stamp} INSTRUCTOR: {entry['text']}")
             elif kind in ("info", "error"):

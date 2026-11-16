@@ -40,7 +40,7 @@ def console(event: dict) -> None:
     elif kind == "atc":
         print(f"{event['station']}: {event['text']}")
     elif kind == "silent":
-        print("       (readback correct, no reply needed)")
+        print(f"       ({event.get('text') or 'readback correct, no reply needed'})")
     elif kind == "timings":
         print(
             f"       [listen {event['listen']:.2f}s | think {event['think']:.2f}s | "

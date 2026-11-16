@@ -98,7 +98,7 @@ export function reduce(store: Store, action: Action): Store {
       return { ...next, lastInstruction: { station: message.station, text: message.text } }
     }
     case 'silent':
-      return push(store, 'note', '', 'Readback correct. The controller stays silent.')
+      return push(store, 'note', '', message.text ?? 'Readback correct. The controller stays silent.')
     case 'timings':
       return annotate(store, 'atc', `${message.total.toFixed(1)} s`)
     case 'atis':

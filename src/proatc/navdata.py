@@ -105,6 +105,8 @@ class Station:
     def callsign(self) -> str:
         """The name in the sim's data when it is a real callsign ('Luton Tower'), else built from the airport name."""
         match = SPOKEN_LABEL.fullmatch(self.label.strip())
+        if not match and self.kind in ("tower", "unicom") and re.search(r"\bAFIS\b|\bFISO?\b", self.label, re.I):
+            return f"{self.airport.spoken_name} Information"
         if match:
             role = match.group(2).title()
             return f"{match.group(1).title()} {ROLE_WORDS.get(role, role)}"

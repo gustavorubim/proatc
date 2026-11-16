@@ -174,7 +174,9 @@ def test_vfr_circuit_landing_and_taxi_in(db):
     downwind = state(51.02, -1.0, on_ground=False, agl=300, speed=50)
     join = engine.handle(Intent("inbound", flight_rules="VFR"), tower, ISSUE, downwind)
     assert (
-        join.text == "Golf Alfa Bravo Charlie Delta, join the circuit runway two seven, Q N H one zero one three, report downwind"
+        # North of the runway, and the circuit for 27 is left-hand, to the south: across the field first.
+        join.text == "Golf Alfa Bravo Charlie Delta, join overhead for left hand downwind runway two seven, "
+        "Q N H one zero one three, report downwind"
     )
     assert (
         engine.handle(Intent("position_report", position="downwind"), tower, ISSUE, downwind).text

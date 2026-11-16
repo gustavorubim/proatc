@@ -34,6 +34,18 @@ On the ground: a taxi route that crosses another runway stops there ("hold short
 
 Voices and chatter: each controller has a voice of their own and keeps it (`voices.py`), British in the United Kingdom and Ireland, American in the United States and Canada. With radio chatter on (`[atc] chatter`: `off`, `some`, `busy`) you hear other flights being worked on the frequency (`chatter.py`). That is sound only: those aircraft are not in the sim and the controller does not sequence you against them. It uses the real runway in use, wind, taxiways and frequencies, pauses while a controller is waiting for your readback, and stops the moment you transmit.
 
+Visual flying (`vfr.py`, `airspace.py`):
+
+- **Airfields with no controller** (CTAF, UNICOM, "Traffic"): you announce yourself and nobody answers, as in real life. The app builds the calls from where you are ("Santa Paula traffic, Cessna ..., nine miles south, inbound for landing runway two two, Santa Paula"). A UNICOM operator gives an airport advisory when asked.
+- **Information services** (AFIS, "Information", "Radio"): the runway in use, wind, pressure and known traffic, and "take off at your discretion" / "land at your discretion". Never a clearance.
+- **Towers**: how to join the circuit depends on where you come from (straight in, base, downwind, or across the field first) and on the circuit direction the airport publishes; "number two, follow the traffic on final"; circuits ("closed traffic" in the US); a low approach; a VFR departure in a direction, with "frequency change approved" once you have left the zone.
+- **Control zones** come from the sim's own airspace file, which covers the world: clearance to enter, a zone transit ("cleared to transit the control zone, not above ...", or "transition approved" / a class Bravo clearance in the US), and release when you leave. A towered airport missing from that file gets a five mile circle.
+- **Special VFR** when the reported weather is below VFR minima: the tower says so and clears special VFR if you ask ("the field is IFR, say intentions" in the US).
+- **Radar services** are what the country calls them: flight following in the US and Canada, a Basic or Traffic Service in the United Kingdom (no traffic information on a Basic Service), a flight information service elsewhere. Under any of them you are told before you fly into a control zone, class B, C or D airspace, or a restricted, prohibited or danger area, with the tower to call for entry.
+- The app shows the airspace you are in.
+
+Not covered: named VFR reporting points and published VFR routes (the sim's data does not have them), flight service stations and "Information" en-route frequencies, helicopter routes, and whether a restricted area is active (every one is treated as active).
+
 In the app, since 0.4: "Debrief" reviews the flight's radio work from the log (readbacks corrected or missed, level busts, runway incursions, restrictions missed, calls on a dead frequency) with a score and, with a language model, a few sentences from the instructor (`debrief.py`); it is also written into the saved log. The waypoints, procedures and airports of your flight plan are given to the speech recogniser and to the model that interprets you, so "BIBAX" is heard as a waypoint rather than as two words. The language model can run on your own machine instead of OpenRouter: Settings, Language model, "Local model" takes any OpenAI-compatible address such as Ollama or LM Studio, needs no key and costs nothing (a small local model understands less than Claude Haiku does; clicked calls need no model at all). And the app's screen can be opened on a phone or tablet on the same network: Settings, Phone or tablet shows an address and a pairing code. The microphone stays the computer's; the device shows the conversation and sends clicked and typed calls. It is off by default, asks for the code, refuses a device that keeps guessing, and cannot change the key or the model.
 
 Earlier: a settings screen (microphone, speakers, push-to-talk on a keyboard key or a joystick or yoke button, voices, model, holding, traffic); a copilot that reads instructions back, or also tunes hand-off frequencies and checks in with the next controller; an instructor that explains the last instruction and tells you what to say next; "Save log", which writes the flight's radio work to a transcript and a JSON file for bug reports; and what the session has spent on OpenRouter, in the header.
@@ -123,6 +135,7 @@ Most settings are changed in the app's settings screen and remembered in `settin
 - `src/proatc/radio.py`: station on the tuned frequency, controller briefing, ATIS broadcast thread
 - `src/proatc/stt.py`, `tts.py`, `radio_fx.py`, `audio_io.py`, `ptt.py`: audio chain
 - `src/proatc/llm.py`: OpenRouter or local-model client and the free-form controller prompt
+- `src/proatc/vfr.py`, `airspace.py`: visual flying, and control zones and restricted areas from the sim's airspace file
 - `src/proatc/voices.py`, `chatter.py`, `debrief.py`: a voice per controller, other aircraft on the frequency, the post-flight review
 - `src/proatc/server.py`: the app's WebSocket, and the page and pairing for a phone or tablet
 

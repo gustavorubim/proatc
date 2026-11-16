@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
-from . import ifr, traffic
+from . import ifr, traffic, vfr
 from . import phraseology as say
 from .atis import Issue, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
@@ -57,6 +57,7 @@ class Reply:
     expect: dict = field(default_factory=dict)  # items the pilot must read back: runway, squawk, frequency, qnh
     on_correct: str = ""  # said after a correct readback (delivery's "readback correct")
     correction: bool = False  # a repeat of the pending instruction after a wrong readback
+    note: str = ""  # with no text: why nobody answered (a blind call at an airfield without a controller)
 
 
 @dataclass
@@ -109,6 +110,17 @@ class Flight:
     stand: object | None = None  # taxi.Parking assigned after landing
     go_arounds: int = 0
     diverting: bool = False  # on the way to another airport after a missed approach
+    # Visual flying (see vfr.py)
+    service: str | None = None  # the radar service a VFR flight has: flight following, basic, traffic, ...
+    circuits: bool = False  # staying in the circuit after takeoff
+    vfr_from: str | None = None  # the airport a VFR flight is departing from
+    told_leaving: bool = False  # frequency change given on leaving the zone
+    transit: str | None = None  # the airport whose zone is being crossed
+    transit_inside: bool = False
+    low_approach: bool = False
+    special_vfr: bool = False
+    airspace_called: set[str] = field(default_factory=set)  # airspaces already warned about
+    last_note: str = ""  # why the last call got no answer, for the app
 
 
 def _squawk(rng: random.Random) -> str:
@@ -121,9 +133,12 @@ def _squawk(rng: random.Random) -> str:
 class Engine:
     def __init__(
         self, db: AirportDB, seed: int | None = None, procedures=None, centers=None, navaids=None, clock=None,
-        navfix=None, metars=None, holding: str = "never", traffic: bool = True,
+        navfix=None, metars=None, holding: str = "never", traffic: bool = True, airspace=None,
     ):  # fmt: skip
         self.db = db
+        self.airspace = airspace  # airspace.AirspaceIndex: control zones, class B/C/D, restricted areas
+        self._zones: dict = {}  # airport -> its control zone
+        self._patterns: dict = {}  # airport -> {runway: "left" | "right"}
         self.traffic_enabled = traffic  # traffic calls and runway sequencing against the sim's other aircraft
         self._traffic_seen: dict[int, float] = {}  # target -> when it was last called
         self.navfix = navfix  # navfix.NavFix: waypoint positions, holds, minimum safe altitudes
@@ -378,7 +393,14 @@ class Engine:
         faa = uses_faa_style(airport.ident)
         on_ground = bool(raw.get("on_ground", True))
         kinds = {freq.kind for freq in airport.freqs}
+        informing = vfr.service(station)
+        if informing in ("ctaf", "unicom"):
+            return vfr.ctaf(self, intent, station, issue, raw, variation, callsign, informing)
         hello = self._greeting(station)
+        if informing == "afis":
+            if on_ground and not flight.has_been_airborne:
+                flight.origin_ident = airport.ident
+            return vfr.afis(self, intent, station, issue, raw, variation, callsign, hello)
         if on_ground and not flight.has_been_airborne:
             flight.origin_ident = airport.ident
         pressure, pressure_value = self._pressure(issue, faa)
@@ -393,6 +415,18 @@ class Engine:
 
         # Clearance: delivery, or the next station down when the airport has no delivery.
         gives_clearance = self._gives_clearance(station, kinds, raw)
+        if intent.intent in ("request_circuits", "request_special_vfr") and on_ground:
+            # Both are VFR departure clearances with something extra.
+            if not gives_clearance and station.kind in ("ground", "tower"):
+                target = self._handoff(airport, "delivery") or self._handoff(airport, "ground")
+                return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]} for clearance", {"frequency": target[2]})
+            if gives_clearance:
+                flight.runway = self._departure_runway(airport, issue, raw)
+                runway_part = f", departure runway {say.runway(flight.runway)}" if flight.runway else ""
+                return vfr.departure(
+                    self, intent, station, issue, raw, callsign, hello, faa, runway_part, pressure_tail,
+                    "readback correct" + (", report ready for departure" if station.kind == "tower" else ""),
+                )  # fmt: skip
         if intent.intent == "request_clearance" and on_ground:
             if station.kind in ("ground", "tower") and not gives_clearance:
                 target = self._handoff(airport, "delivery") or self._handoff(airport, "ground")
@@ -403,7 +437,7 @@ class Engine:
             runway_part = f", departure runway {say.runway(runway)}" if runway else ""
             atis_part = f", information {say.letter(issue.letter)} is current" if issue and intent.atis != issue.letter else ""
             has_plan = bool(flight.plan and flight.plan.destination)
-            vfr = intent.flight_rules == "VFR" or (intent.flight_rules is None and not intent.destination and not has_plan)
+            visual = intent.flight_rules == "VFR" or (intent.flight_rules is None and not intent.destination and not has_plan)
             flight.runway = runway
             next_station = self._handoff(airport, "ground") if station.kind == "delivery" else None
             on_correct = "readback correct" + (
@@ -413,13 +447,20 @@ class Engine:
                 if station.kind == "tower"
                 else ""
             )
-            if vfr:
-                flight.rules, flight.squawk = "VFR", "1200" if faa else "7000"
-                text = (
-                    f"{callsign}, {hello}V F R departure approved{runway_part}, squawk {say.digits(flight.squawk)}"
-                    f"{pressure_tail}{atis_part}"
+            if visual:
+                return vfr.departure(
+                    self,
+                    intent,
+                    station,
+                    issue,
+                    raw,
+                    callsign,
+                    hello,
+                    faa,
+                    runway_part,
+                    f"{pressure_tail}{atis_part}",
+                    on_correct,
                 )
-                return Reply(text, {"squawk": flight.squawk}, on_correct)
             if has_plan:
                 return ifr.clearance(self, station, issue, raw, callsign, hello, faa, atis_part, on_correct)
             if not intent.destination and not flight.destination:
@@ -643,16 +684,26 @@ class Engine:
                         )
                         return Reply(f"{callsign}, {hello}hold short runway {say.runway(runway)}, {why}", {"runway": runway})
                 flight.runway, flight.phase, flight.waiting_takeoff = runway, Phase.TAKEOFF_CLEARED, False
+                after = ", report downwind" if flight.circuits else ""
                 return Reply(
-                    f"{callsign}, {hello}runway {say.runway(runway)}, cleared for takeoff{wind_tail}", {"runway": runway}
+                    f"{callsign}, {hello}runway {say.runway(runway)}, cleared for takeoff{wind_tail}{after}", {"runway": runway}
                 )
             return None
 
         # Airborne.
+        if intent.intent == "request_transit":
+            return vfr.transit(self, intent, station, issue, raw, callsign, hello, faa)
+        if intent.intent == "report_leaving":
+            return vfr.leaving(self, station, raw, callsign, faa, asked=True)
         runway = self._landing_runway(airport, issue, raw, intent)
         if not runway:
             return None
         spoken = say.runway(runway)
+        flight.low_approach = flight.low_approach or intent.intent == "request_low_approach"
+        if intent.intent == "request_special_vfr":
+            if flight.transit == airport.ident:
+                return vfr.transit(self, intent, station, issue, raw, callsign, hello, faa)
+            return vfr.inbound(self, intent, station, issue, raw, callsign, hello, faa, runway, pressure_tail)
         flight.touch_and_go = flight.touch_and_go or intent.touch_and_go or intent.intent == "request_touch_and_go"
         if intent.intent == "going_around":
             flight.phase = Phase.AIRBORNE
@@ -661,15 +712,19 @@ class Engine:
             return Reply(f"{callsign}, roger, rejoin the circuit runway {spoken}, report downwind", {"runway": runway})
         if intent.intent == "inbound" and intent.position != "final" and not flight.emergency:
             flight.runway = runway
-            vfr = (intent.flight_rules or flight.rules) != "IFR"
-            if vfr:
-                join = "enter the pattern" if faa else "join the circuit"
-                return Reply(f"{callsign}, {hello}{join} runway {spoken}{pressure_tail}, report downwind", {"runway": runway})
+            visual = (intent.flight_rules or flight.rules) != "IFR"
+            if visual:
+                return vfr.inbound(self, intent, station, issue, raw, callsign, hello, faa, runway, pressure_tail)
             return Reply(f"{callsign}, {hello}continue approach runway {spoken}{pressure_tail}", {"runway": runway})
         if intent.intent == "position_report" and intent.position in ("downwind", "base"):
             flight.runway = runway
+            ahead = traffic.on_final(raw, airport, runway) if self.traffic_enabled else None
+            if ahead is not None:
+                follow = f"number two, follow the traffic on a {traffic.miles_word(ahead)} mile final"
+                return Reply(f"{callsign}, {hello}{follow}, report final runway {spoken}", {"runway": runway})
             return Reply(f"{callsign}, {hello}number one, report final runway {spoken}", {"runway": runway})
-        if intent.intent in ("position_report", "inbound", "request_touch_and_go", "established", "check_in"):
+        landing_calls = ("position_report", "inbound", "request_touch_and_go", "established", "check_in", "request_low_approach")
+        if intent.intent in landing_calls:
             # An instrument arrival still well out is told to continue; the landing clearance follows.
             miles = distance_nm(raw["lat"], raw["lon"], *self._threshold(airport, runway)) if "lat" in raw else 0.0
             occupied = self.traffic_enabled and traffic.on_runway(raw, airport, runway)
@@ -683,6 +738,8 @@ class Engine:
             flight.awaiting_landing = False
             flight.runway, flight.phase = runway, Phase.LANDING_CLEARED
             cleared = "cleared touch and go" if flight.touch_and_go else "cleared to land"
+            if flight.low_approach:
+                cleared, flight.low_approach, flight.phase = "cleared low approach", False, Phase.AIRBORNE
             services = ""
             if flight.emergency and not flight.services_told:
                 flight.services_told, services = True, ", emergency services standing by"
@@ -718,6 +775,7 @@ class Engine:
                 # New airborne segment: the departure runway no longer applies.
                 flight.phase, flight.runway, flight.pending = Phase.AIRBORNE, None, None
                 flight.crossings, flight.taxi_goal = [], None
+                flight.told_leaving = False
                 flight.told_vacate = False
             flight.has_been_airborne = True
         elif on_ground and flight.has_been_airborne and flight.phase in (Phase.AIRBORNE, Phase.LANDING_CLEARED):
@@ -777,6 +835,11 @@ class Engine:
             )
             wind = self._wind(issue, magnetic_variation(raw), uses_faa_style(airport.ident))
             wind_tail = f", {wind}" if wind else ""
+            if vfr.service(station) is None and key in flight.contacted:
+                gone = vfr.tick_tower(self, station, raw, callsign, uses_faa_style(airport.ident))
+                if gone:
+                    flight.last_said[key] = gone.text
+                    return gone
             if flight.awaiting_landing and airborne and miles is not None and miles <= CLEAR_TO_LAND_NM:
                 blocked = self.traffic_enabled and (
                     traffic.on_runway(raw, airport, flight.runway)
@@ -838,6 +901,9 @@ class Engine:
             kinds = {freq.kind for freq in airport.freqs} if airport else set()
             information = f"information {say.letter(issue.letter)}, " if issue else ""
             items: list[dict] = []
+            informing = vfr.service(station) if airport else None
+            if informing in ("ctaf", "unicom"):
+                return vfr.ctaf_suggestions(self, station, issue, raw, callsign, informing)
 
             def add(label: str, body: str, intent: str, **fields) -> None:
                 needs = fields.pop("needs", None)
@@ -858,6 +924,11 @@ class Engine:
                     }
                 )
 
+            if informing == "afis":
+                vfr.afis_suggestions(self, station, issue, raw, add)
+                add("Wind and pressure", "request the wind and Q N H", "request_weather")
+                add("Radio check", "radio check", "radio_check")
+                return items
             if station.kind in ifr.RADAR_KINDS:
                 ifr.suggestions(self, station, raw, add, callsign)
                 if flight.last_said.get(key):
@@ -907,6 +978,8 @@ class Engine:
                 add("Touch and go", "request touch and go", "request_touch_and_go", touch_and_go=True)
                 add("Going around", "going around", "going_around")
 
+            if station.kind == "tower":
+                vfr.tower_suggestions(self, station, issue, raw, add)
             if flight.last_said.get(key):
                 add("Say again", "say again", "say_again")
             add("Radio check", "radio check", "radio_check")
@@ -935,6 +1008,7 @@ class Engine:
             "emergency": flight.emergency,
             "next_frequency": flight.next_frequency,
             "holding": flight.arrival.hold.fix if flight.arrival and flight.arrival.hold else None,
+            "service": flight.service if flight.following else None,
             "stand": flight.stand.name if flight.stand and flight.stand.name else None,
             "hold_short": flight.crossings[0].split("/")[0] if flight.crossings else None,
         }
