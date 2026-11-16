@@ -33,7 +33,7 @@ from .navdata import AirportDB
 from .navfix import open_navfix
 from .procedures import NavaidNames, route_fixes
 from .ptt import PushToTalk
-from .radio import AtisBroadcaster, briefing, current_station, observe, station_voice
+from .radio import AtisBroadcaster, SimClock, briefing, current_station, observe, station_voice
 from .radio_fx import radio_effect
 from .stt import SpeechToText
 from .tts import TextToSpeech, download_models, models_present
@@ -155,8 +155,9 @@ class Session:
         self.db.metars = self.metars
         self.engine = Engine(
             self.db, centers=self.centers, navaids=NavaidNames(root), navfix=self.navfix, metars=self.metars,
-            holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root),
+            holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root), clock=SimClock(),
         )  # fmt: skip
+        self.engine.clock = self.engine.now
         radio_db = AirportDB()  # the background thread's own connection
         radio_db.centers, radio_db.metars = self.centers, self.metars
         self.broadcaster = AtisBroadcaster(

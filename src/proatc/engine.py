@@ -48,6 +48,8 @@ READBACK_WORDS = {
     "hold_short": "the runway to hold short of",
     "crossing": "the runway to cross",
 }
+REPOSITION_NM = 2.0  # on the ground, then on the ground this far away at the next look: the aircraft was moved
+REPOSITION_AIRBORNE_NM = 10.0  # on the ground, then airborne this far away
 ON_RUNWAY_NM = 0.022  # this close to a runway's centreline is on it
 HOLDING_SHORT_NM = 0.075  # stopped this close to a runway to be crossed: holding short of it
 CROSSING_FINAL_NM = 3.0  # an aircraft on final this close in keeps a crossing waiting
@@ -136,6 +138,7 @@ class Flight:
     airspace_called: set[str] = field(default_factory=set)  # airspaces already warned about
     last_note: str = ""  # why the last call got no answer, for the app
     last_event: str = ""  # the kind of the last controller transmission, for the flight log
+    seen_at: tuple | None = None  # (lat, lon, on the ground) at the last look at the aircraft
     sid_path: list = field(default_factory=list)  # the SID's track over the ground, for route watching
     star_path: list = field(default_factory=list)
     off_route_since: float | None = None
@@ -189,8 +192,20 @@ class Engine:
         return self._procedures[ident]
 
     def set_plan(self, plan) -> None:
+        """A new plan for a flight that has not started, or has ended, begins a new flight."""
         with self.lock:
+            flight = self.flight
+            parked = bool(self.last_raw.get("on_ground", True)) and self.last_raw.get("groundspeed_ms", 0.0) < 1
+            if parked and (flight.has_been_airborne or flight.squawk or flight.contacted):
+                self.reset()
             self.flight.plan = plan
+
+    def reset(self) -> None:
+        """Start a new flight: every clearance, contact and counter is forgotten. The plan is kept."""
+        with self.lock:
+            plan = self.flight.plan
+            self.flight = Flight(plan=plan)
+            self._traffic_seen.clear()
 
     @staticmethod
     def active_runways(airport: Airport, issue: Issue | None) -> list[str]:
@@ -476,6 +491,12 @@ class Engine:
 
         # Clearance: delivery, or the next station down when the airport has no delivery.
         gives_clearance = self._gives_clearance(station, kinds, raw)
+        if intent.intent == "request_clearance" and on_ground and flight.has_been_airborne and raw.get("groundspeed_ms", 0.0) < 1:
+            # Landed, parked, and asking for a clearance: this is the next leg.
+            self.reset()
+            flight = self.flight
+            flight.contacted.add(station.key)
+            flight.origin_ident = airport.ident
         if intent.intent in ("request_circuits", "request_special_vfr") and on_ground:
             # Both are VFR departure clearances with something extra.
             if not gives_clearance and station.kind in ("ground", "tower"):
@@ -830,6 +851,16 @@ class Engine:
             return
         on_ground = bool(raw["on_ground"])
         speed = raw.get("groundspeed_ms", 0.0)
+        if "lat" in raw:
+            # On the ground in one look and somewhere else on the ground (or far away in the air) in the next:
+            # the pilot moved the aircraft in the sim. That is a new flight.
+            before, flight.seen_at = flight.seen_at, (raw["lat"], raw["lon"], on_ground)
+            if before and before[2]:
+                moved = distance_nm(before[0], before[1], raw["lat"], raw["lon"])
+                if moved > (REPOSITION_NM if on_ground else REPOSITION_AIRBORNE_NM):
+                    self.reset()
+                    flight = self.flight
+                    flight.seen_at = (raw["lat"], raw["lon"], on_ground)
         if on_ground and flight.origin is None and speed < 1 and "lat" in raw and not flight.has_been_airborne:
             flight.origin = (raw["lat"], raw["lon"])
         if not on_ground and raw.get("agl_m", 0.0) > 15:
@@ -1069,6 +1100,20 @@ class Engine:
             add("Radio check", "radio check", "radio_check")
             return items
 
+    def _level_label(self, flight) -> str | None:
+        """The cleared level as the controller means it: a flight level above the transition altitude, else feet."""
+        if flight.cleared_ft is None:
+            return None
+        near = flight.arrival.airport if flight.arrival else flight.origin_ident
+        if flight.descent_given and flight.plan and flight.plan.destination:
+            near = flight.plan.destination
+        faa = uses_faa_style(near or "")
+        procedures = self.procedures(near) if near else None
+        transition = 18000 if faa else ((procedures.transition_altitude_ft if procedures else None) or 6000)
+        if flight.cleared_ft > transition:
+            return f"FL{flight.cleared_ft // 100:03d}"
+        return f"{flight.cleared_ft:,} ft"
+
     def summary(self) -> dict:
         """What the engine knows, for the app and for the free-form fallback's context."""
         flight = self.flight
@@ -1093,6 +1138,7 @@ class Engine:
             "next_frequency": flight.next_frequency,
             "holding": flight.arrival.hold.fix if flight.arrival and flight.arrival.hold else None,
             "service": flight.service if flight.following else None,
+            "cleared_level": self._level_label(flight),
             "stand": flight.stand.name if flight.stand and flight.stand.name else None,
             "hold_short": flight.crossings[0].split("/")[0] if flight.crossings else None,
         }

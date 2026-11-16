@@ -243,3 +243,79 @@ def test_a_go_around_ordered_by_the_tower_is_not_a_missed_readback():
     )
     assert [finding["kind"] for finding in events["findings"]] == ["incomplete", "missed", "readback"]
     assert events["score"] == 100 - 2 - 4 - 6 and events["readbacks"] == {"given": 0, "corrected": 1, "missed": 1}
+
+
+# ---- from the review's smaller items ----------------------------------------------------
+
+
+def test_custom_scenery_airports_replace_the_default_ones(tmp_path):
+    from proatc.navdata import AirportDB, build_index, scenery_sources
+
+    root = tmp_path / "X-Plane 12"
+    default = root / "Global Scenery" / "Global Airports" / "Earth nav data" / "apt.dat"
+    addon = root / "Custom Scenery" / "Payware EGXX" / "Earth nav data" / "apt.dat"
+    disabled = root / "Custom Scenery" / "Old EGXX" / "Earth nav data" / "apt.dat"
+    for path in (default, addon, disabled):
+        path.parent.mkdir(parents=True)
+    runway = "100 45.00 1 1 0.25 1 3 0  09 51.0000 -1.0200 0 0 3 2 1 0 27 51.0000 -0.9800 0 0 3 2 1 0"
+    default.write_text(f"A\n1200\n\n1 100 0 0 EGXX Westfield\n{runway}\n1054 118100 Westfield Tower\n1300 51.001 -1.0 0 gate jets 1\n\n"
+                       f"1 100 0 0 EGYY Otherfield\n{runway.replace('51.0000', '52.0000')}\n", encoding="utf-8")  # fmt: skip
+    addon.write_text(f"A\n1200\n\n1 100 0 0 EGXX Westfield Payware\n{runway}\n1054 119725 Westfield Tower\n"
+                     "1300 51.001 -1.0 0 gate jets A12\n1300 51.002 -1.0 0 gate jets A14\n", encoding="utf-8")  # fmt: skip
+    disabled.write_text(f"A\n1200\n\n1 100 0 0 EGXX Westfield Old\n{runway}\n", encoding="utf-8")
+    (root / "Custom Scenery" / "scenery_packs.ini").write_text(
+        "I\n1000 Version\nSCENERY\n\nSCENERY_PACK_DISABLED Custom Scenery/Old EGXX/\nSCENERY_PACK Custom Scenery/Payware EGXX/\n"
+        "SCENERY_PACK Custom Scenery/No Airports Here/\nSCENERY_PACK *GLOBAL_AIRPORTS*\n",
+        encoding="utf-8",
+    )
+    sources = scenery_sources(default)
+    assert sources == [addon, default]
+    assert build_index(sources, tmp_path / "a.sqlite") == 2
+    db = AirportDB(tmp_path / "a.sqlite")
+    airport = db.airport("EGXX")
+    assert airport.name == "Westfield Payware" and [f.khz for f in airport.freqs] == [119725]
+    assert [line.split()[-1] for line in db.record_lines(airport) if line.startswith("1300")] == ["A12", "A14"]
+    assert db.airport("EGYY").name == "Otherfield" and db.xplane_root == root  # the rest still come from the default file
+
+
+def test_a_new_flight_starts_clean_and_the_sim_clock_stops_when_paused(tmp_path):
+    import time
+
+    from proatc.radio import SimClock
+
+    _, engine, ground = ground_world(tmp_path)
+    parked = taxiing(50.9960, -1.0)
+    engine.handle(Intent("request_taxi"), ground, ISSUE, parked)
+    assert engine.flight.crossings and engine.flight.contacted
+    engine.reset()
+    assert not engine.flight.crossings and not engine.flight.contacted and engine.flight.pending is None
+
+    # Moving the aircraft in the sim (on the ground, then on the ground miles away) is a new flight too.
+    engine.handle(Intent("request_taxi"), ground, ISSUE, parked)
+    engine._observe(taxiing(50.9970, -1.0))  # taxiing: the same flight
+    assert engine.flight.crossings
+    engine._observe(taxiing(51.5, -1.0))
+    assert not engine.flight.crossings and not engine.flight.contacted
+
+    # Loading a plan after a flight has been flown and parked starts the next one, and keeps the new plan.
+    from proatc.flightplan import FlightPlan
+
+    engine.flight.has_been_airborne, engine.flight.go_arounds = True, 2
+    plan = FlightPlan("EGXX", "LFXX")
+    engine.set_plan(plan)
+    assert engine.flight.plan is plan and engine.flight.go_arounds == 0 and not engine.flight.has_been_airborne
+
+    clock = SimClock()
+    clock.running = False
+    first = clock()
+    time.sleep(0.05)
+    assert clock() == first  # paused: no time passes for holds and reminders
+    clock.running = True
+    time.sleep(0.05)
+    assert clock() > first
+
+    assert engine.summary().get("cleared_level") is None
+    engine.flight.cleared_ft = 24000
+    assert engine.summary()["cleared_level"] == "FL240"
+    engine.flight.cleared_ft = 5000
+    assert engine.summary()["cleared_level"] == "5,000 ft"

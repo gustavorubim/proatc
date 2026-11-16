@@ -240,7 +240,7 @@ def test_clearance_uses_the_filed_plan_and_the_sid(world):
     )
     assert reply.expect == {"squawk": squawk, "altitude": 5000}
     assert engine.summary() == {"phase": "parked", "flight_rules": "IFR", "destination": "Eastfield", "assigned_squawk": squawk,
-                                "assigned_runway": "27", "sid": "ALFA1A", "cleared_altitude_ft": 5000}  # fmt: skip
+                                "assigned_runway": "27", "sid": "ALFA1A", "cleared_altitude_ft": 5000, "cleared_level": "5,000 ft"}  # fmt: skip
     wrong = engine.handle(Intent("readback", squawk=squawk, altitude=6000), delivery, ISSUE, here)
     assert wrong.text.startswith(f"{CALLSIGN}, negative, cleared to Eastfield")
     right = engine.handle(Intent("readback", squawk=squawk, altitude=5000), delivery, ISSUE, here)

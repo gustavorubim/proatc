@@ -1,6 +1,8 @@
-"""Airports, runways and frequencies from X-Plane's own apt.dat, indexed into SQLite.
+"""Airports, runways and frequencies from X-Plane's own apt.dat files, indexed into SQLite.
 
-Using the sim's data guarantees that ATC and scenery agree.
+Using the sim's data guarantees that ATC and scenery agree. Custom scenery comes first, in the
+order of `Custom Scenery/scenery_packs.ini`, exactly as the sim itself decides which version of
+an airport to draw: an add-on airport's taxiways, stands and frequencies replace the default ones.
 """
 
 from __future__ import annotations
@@ -15,7 +17,8 @@ from pathlib import Path
 
 from .config import PROJECT_DIR
 
-DB_PATH = PROJECT_DIR / "data" / "airports-v2.sqlite"  # bump the name when the schema changes
+DB_PATH = PROJECT_DIR / "data" / "airports-v3.sqlite"  # bump the name when the schema changes
+SCENERY_LIST = Path("Custom Scenery/scenery_packs.ini")
 APT_RELATIVE = Path("Global Scenery/Global Airports/Earth nav data/apt.dat")
 
 # apt.dat row codes: 1050-1056 are 8.33 kHz-capable (value in kHz), 50-56 legacy (value in 10 kHz).
@@ -224,11 +227,39 @@ def find_apt_dat(xplane_path: str | None = None) -> Path:
     raise FileNotFoundError("Could not find X-Plane's apt.dat. Set sim.xplane_path in config.toml to your X-Plane 12 folder.")
 
 
+def scenery_sources(global_apt: Path) -> list[Path]:
+    """Every apt.dat the sim reads, highest priority first: custom scenery packs in the order of
+    scenery_packs.ini, with the default airports where that file places them."""
+    root = global_apt.parents[3]
+    listing = root / SCENERY_LIST
+    sources: list[Path] = []
+    if listing.exists():
+        for line in listing.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not line.startswith("SCENERY_PACK "):
+                continue  # SCENERY_PACK_DISABLED and headers
+            entry = line[len("SCENERY_PACK ") :].strip()
+            if entry == "*GLOBAL_AIRPORTS*":
+                sources.append(global_apt)
+                continue
+            folder = Path(entry) if Path(entry).is_absolute() else root / entry
+            apt = folder / "Earth nav data" / "apt.dat"
+            if apt.exists():
+                sources.append(apt)
+    if global_apt not in sources:
+        sources.append(global_apt)
+    return sources
+
+
+def _stamp(sources: list[Path]) -> str:
+    return "|".join(f"{path}:{path.stat().st_size}:{int(path.stat().st_mtime)}" for path in sources)
+
+
 # ---- index ------------------------------------------------------------------
 
 SCHEMA = """
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE airports (ident TEXT PRIMARY KEY, name TEXT, lat REAL, lon REAL, elev_ft REAL, offset INT, length INT);
+CREATE TABLE sources (id INTEGER PRIMARY KEY, path TEXT);
+CREATE TABLE airports (ident TEXT PRIMARY KEY, name TEXT, lat REAL, lon REAL, elev_ft REAL, offset INT, length INT, source INT);
 CREATE TABLE runways (ident TEXT, end1 TEXT, lat1 REAL, lon1 REAL, end2 TEXT, lat2 REAL, lon2 REAL, length_m REAL, surface INT);
 CREATE TABLE freqs (ident TEXT, khz INT, kind TEXT, label TEXT);
 CREATE INDEX airports_lat ON airports (lat);
@@ -238,7 +269,10 @@ CREATE INDEX freqs_khz ON freqs (khz);
 """
 
 
-def build_index(apt_path: Path, db_path: Path = DB_PATH) -> int:
+def build_index(apt_path: Path | list[Path], db_path: Path = DB_PATH) -> int:
+    """Index one apt.dat, or several in priority order (the first to define an airport wins)."""
+    sources = apt_path if isinstance(apt_path, list) else [apt_path]
+    apt_path = sources[-1]  # the default airports: the X-Plane folder is found from this path
     db_path.parent.mkdir(parents=True, exist_ok=True)
     temp = db_path.with_suffix(".building")
     temp.unlink(missing_ok=True)
@@ -256,24 +290,37 @@ def build_index(apt_path: Path, db_path: Path = DB_PATH) -> int:
             yield raw.decode("utf-8", "ignore").rstrip()
         offset = position
 
-    with open(apt_path, "rb") as handle:
-        for airport in parse_apt(decoded(handle), position=lambda: offset):
-            cursor = db.execute(
-                "INSERT OR IGNORE INTO airports VALUES (?,?,?,?,?,?,?)",
-                (airport.ident, airport.name, airport.lat, airport.lon, airport.elev_ft, airport.offset, airport.length),
-            )
-            if not cursor.rowcount:
-                continue  # duplicate ident: keep the first
-            db.executemany(
-                "INSERT INTO runways VALUES (?,?,?,?,?,?,?,?,?)",
-                [(airport.ident, r.end1, r.lat1, r.lon1, r.end2, r.lat2, r.lon2, r.length_m, r.surface) for r in airport.runways],
-            )
-            db.executemany("INSERT INTO freqs VALUES (?,?,?,?)", [(airport.ident, f.khz, f.kind, f.label) for f in airport.freqs])
-            count += 1
-    stat = apt_path.stat()
-    db.executemany(
-        "INSERT INTO meta VALUES (?,?)", [("source", str(apt_path)), ("stamp", f"{stat.st_size}:{int(stat.st_mtime)}")]
-    )
+    for number, source in enumerate(sources):
+        db.execute("INSERT INTO sources VALUES (?,?)", (number, str(source)))
+        with open(source, "rb") as handle:
+            for airport in parse_apt(decoded(handle), position=lambda: offset):
+                cursor = db.execute(
+                    "INSERT OR IGNORE INTO airports VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        airport.ident,
+                        airport.name,
+                        airport.lat,
+                        airport.lon,
+                        airport.elev_ft,
+                        airport.offset,
+                        airport.length,
+                        number,
+                    ),
+                )
+                if not cursor.rowcount:
+                    continue  # already defined by a scenery pack of higher priority
+                db.executemany(
+                    "INSERT INTO runways VALUES (?,?,?,?,?,?,?,?,?)",
+                    [
+                        (airport.ident, r.end1, r.lat1, r.lon1, r.end2, r.lat2, r.lon2, r.length_m, r.surface)
+                        for r in airport.runways
+                    ],
+                )
+                db.executemany(
+                    "INSERT INTO freqs VALUES (?,?,?,?)", [(airport.ident, f.khz, f.kind, f.label) for f in airport.freqs]
+                )
+                count += 1
+    db.executemany("INSERT INTO meta VALUES (?,?)", [("source", str(apt_path)), ("stamp", _stamp(sources))])
     db.commit()
     db.close()
     temp.replace(db_path)
@@ -291,8 +338,8 @@ class AirportDB:
     def open(cls, xplane_path: str | None = None, db_path: Path = DB_PATH) -> AirportDB:
         """Open the index, building it on first use or when apt.dat has changed."""
         apt_path = find_apt_dat(xplane_path)
-        stat = apt_path.stat()
-        stamp = f"{stat.st_size}:{int(stat.st_mtime)}"
+        sources = scenery_sources(apt_path)
+        stamp = _stamp(sources)
         current = None
         if db_path.exists():
             try:
@@ -304,7 +351,7 @@ class AirportDB:
                 current = None
         if current != stamp:
             print("Indexing X-Plane airports (one-off, about a minute)...")
-            print(f"  {build_index(apt_path, db_path)} airports indexed.")
+            print(f"  {build_index(sources, db_path)} airports indexed.")
         return cls(db_path)
 
     def airport(self, ident: str) -> Airport | None:
@@ -326,8 +373,10 @@ class AirportDB:
         return airport
 
     def record_lines(self, airport: Airport) -> list[str]:
-        """This airport's raw apt.dat rows (taxiways, stands), read straight from the sim's file."""
-        source = self.db.execute("SELECT value FROM meta WHERE key='source'").fetchone()[0]
+        """This airport's raw apt.dat rows (taxiways, stands), read straight from the file that defines it."""
+        source = self.db.execute(
+            "SELECT s.path FROM airports a JOIN sources s ON s.id = a.source WHERE a.ident = ?", (airport.ident,)
+        ).fetchone()[0]
         with open(source, "rb") as handle:
             handle.seek(airport.offset)
             return handle.read(airport.length).decode("utf-8", "ignore").splitlines()

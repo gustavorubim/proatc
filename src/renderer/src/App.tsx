@@ -335,7 +335,18 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
       </section>
 
       <section className="card">
-        <div className="eyebrow">Flight</div>
+        <div className="eyebrow">
+          Flight
+          {flight?.phase && (
+            <button
+              className="link"
+              title="Forget every clearance and start again, for a new flight or after moving the aircraft"
+              onClick={() => send({ cmd: 'new_flight' })}
+            >
+              new flight
+            </button>
+          )}
+        </div>
         <div className="strip">
           <div>
             <label>Callsign</label>
@@ -368,7 +379,7 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
           <div className="chips ifr">
             {flight.cleared_altitude_ft ? (
               <span className="chip chip-atis" title="Last level you were cleared to">
-                {formatLevel(flight.cleared_altitude_ft)}
+                {flight.cleared_level ?? formatLevel(flight.cleared_altitude_ft)}
               </span>
             ) : null}
             {flight.sid && <span className="chip">SID {flight.sid}</span>}

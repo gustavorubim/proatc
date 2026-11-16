@@ -303,6 +303,9 @@ class AppServer:
             self.emit({"type": "info", "text": f"Flight plan set: destination {plan.destination}."})
         elif name == "clear_plan":
             session.engine.set_plan(None)
+        elif name == "new_flight":
+            session.engine.reset()
+            self.emit({"type": "info", "text": "New flight: clearances and contacts cleared."})
         elif name == "tune":
             session.tune(str(command.get("mhz", "")))
         elif name == "capture_ptt":
