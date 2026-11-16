@@ -24,7 +24,7 @@ import math
 from dataclasses import dataclass
 
 from . import atis as atis_text
-from . import holding, restrictions
+from . import holding, restrictions, traffic
 from . import phraseology as say
 from .atis import uses_faa_style
 from .navdata import Airport, distance_nm
@@ -125,6 +125,7 @@ def clearance(engine, station, issue, raw, callsign, hello, faa, atis_part, on_c
         initial = min(initial, plan.cruise_ft)
     flight.rules, flight.destination, flight.runway = "IFR", where, runway
     flight.sid, flight.cleared_ft = (sid.name if sid else None), initial
+    flight.sid_constraints = restrictions.build_sid(engine, sid, airport) if sid else []
     flight.squawk = flight.squawk if flight.squawk and flight.squawk not in ("1200", "7000") else _squawk(engine._rng)
 
     level = _level(engine, initial, airport.ident, faa)
@@ -176,6 +177,8 @@ def handle(engine, intent, station, issue, raw, variation, callsign, hello):
         reply = weather_request(engine, station, issue, raw, variation, callsign, hello)
     elif intent.intent in ("request_deviation", "clear_of_weather"):
         reply = _deviation(engine, intent, callsign, part)
+    elif intent.intent in ("request_flight_following", "cancel_flight_following"):
+        reply = _flight_following(engine, intent, station, issue, callsign, hello)
     elif part == "departure":
         reply = _departure(engine, intent, station, raw, callsign, hello)
     elif part == "center":
@@ -382,6 +385,29 @@ def _deviation(engine, intent, callsign, part: str):
     flight.deviating = True
     side = f"{intent.direction} of track" if intent.direction else "left or right of track"
     return _reply(engine, f"{callsign}, deviation {side} approved, report clear of weather")
+
+
+def _flight_following(engine, intent, station, issue, callsign, hello):
+    """Radar service for a VFR flight: a code, identification, and traffic calls from then on."""
+    from .engine import _squawk
+
+    flight = engine.flight
+    faa = _faa(station)
+    if intent.intent == "cancel_flight_following":
+        if not flight.following:
+            return None
+        flight.following = False
+        code = "1200" if faa else "7000"
+        flight.squawk = code
+        return _reply(engine, f"{callsign}, radar service terminated, squawk {say.digits(code)}, frequency change approved")
+    if flight.rules == "IFR":
+        return None
+    flight.rules, flight.following = "VFR", True
+    if not flight.squawk or flight.squawk in ("1200", "7000"):
+        flight.squawk = _squawk(engine._rng)
+    pressure = f", {engine._pressure(issue, faa)[0]}" if issue else ""
+    text = f"{callsign}, {hello}squawk {say.digits(flight.squawk)}, {_contact_word(faa)}, flight following{pressure}"
+    return _reply(engine, text, {"squawk": flight.squawk})
 
 
 # ---- arrival: vectors and the approach clearance ----------------------------
@@ -607,6 +633,10 @@ def _watch(engine, station, raw, callsign):
     ):
         arrival.heading_asked = True
         return _reply(engine, f"{callsign}, fly heading {say.heading(arrival.heading)}", {"heading": arrival.heading})
+    if engine.traffic_enabled:
+        call = traffic.advisory(raw, engine._traffic_seen, engine.now())
+        if call:
+            return _reply(engine, f"{callsign}, {call}")
     return None
 
 
@@ -625,6 +655,13 @@ def tick(engine, station, issue, raw, variation, callsign):
 
     if part == "departure":
         airport = station.airport
+        for crossing in flight.sid_constraints or []:
+            if not crossing.passed and crossing.miles(raw) <= 2.5:
+                crossing.passed = True
+                if _feet(raw) < crossing.altitude_ft - 400:
+                    level = _level(engine, crossing.altitude_ft, airport.ident, faa)
+                    word = _fix_word(engine, crossing.fix, crossing.lat, crossing.lon)
+                    return _reply(engine, f"{callsign}, you were to cross {word} at or above {level}, expedite climb")
         top = _climb_goal(engine, station)
         away = distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon)
         cleared = flight.cleared_ft or 0
@@ -723,6 +760,10 @@ def suggestions(engine, station, raw, add, callsign) -> None:
         if not flight.descent_given:
             add("Request descent", "request descent", "request_descent")
         add("Request climb", "request higher", "request_climb")
+    if flight.following:
+        add("Cancel flight following", "cancel flight following", "cancel_flight_following")
+    elif not plan and flight.rules != "IFR":
+        add("Request flight following", "request flight following", "request_flight_following")
     if flight.deviating:
         add("Clear of weather", "clear of weather", "clear_of_weather")
     else:

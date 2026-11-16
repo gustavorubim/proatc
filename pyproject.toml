@@ -16,6 +16,7 @@ dependencies = [
     # NVIDIA runtime libraries so speech-to-text can use the GPU; unused on machines without one
     "nvidia-cublas-cu12; sys_platform == 'win32'",
     "nvidia-cudnn-cu12>=9,<10; sys_platform == 'win32'",
+    "pygame-ce>=2.5",
 ]
 
 [project.scripts]

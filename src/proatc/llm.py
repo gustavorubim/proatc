@@ -38,8 +38,10 @@ class LlmError(RuntimeError):
 
 
 class Controller:
-    def __init__(self, settings: Llm, api_key: str):
+    def __init__(self, settings: Llm, api_key: str, usage: dict | None = None):
         self.settings = settings
+        # Running totals for this session, as OpenRouter reports them with each answer.
+        self.usage = usage if usage is not None else {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
         self.client = httpx.Client(
             timeout=30,
             headers={"Authorization": f"Bearer {api_key}", "X-Title": "Pro ATC"},
@@ -58,6 +60,7 @@ class Controller:
             "temperature": temperature,
             # Reasoning models otherwise spend the whole token budget thinking and return nothing.
             "reasoning": {"enabled": False},
+            "usage": {"include": True},  # ask for the cost of this request
         }
         for attempt in range(3):
             try:
@@ -69,11 +72,19 @@ class Controller:
             time.sleep(0.6 * (attempt + 1))
         if response.status_code != 200:
             raise LlmError(f"OpenRouter returned {response.status_code}: {response.text[:300]}")
-        choice = response.json()["choices"][0]
+        payload = response.json()
+        self._count(payload.get("usage") or {})
+        choice = payload["choices"][0]
         text = (choice["message"]["content"] or "").strip()
         if not text:
             raise LlmError(f"The model returned no text (finish reason: {choice.get('finish_reason')}).")
         return text
+
+    def _count(self, used: dict) -> None:
+        self.usage["calls"] += 1
+        self.usage["prompt_tokens"] += int(used.get("prompt_tokens") or 0)
+        self.usage["completion_tokens"] += int(used.get("completion_tokens") or 0)
+        self.usage["cost"] += float(used.get("cost") or 0.0)
 
     def reply(self, transcript: str, state: dict, station_key: str = "free") -> str:
         """Free-form controller reply, used where the rules engine has no answer.

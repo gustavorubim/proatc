@@ -14,14 +14,13 @@ import json
 import os
 import threading
 from collections import deque
-from dataclasses import fields
 from urllib.parse import parse_qs, urlparse
 
 from websockets.sync.server import serve
 
 from . import phraseology as say
 from .atis import runways_in_use, uses_faa_style
-from .config import PROJECT_DIR, Config, env_value
+from .config import PROJECT_DIR, Config, editable_values, load_settings, save_settings
 from .flightplan import PlanError, fetch_simbrief, manual
 from .intents import Intent
 from .navdata import AirportDB
@@ -41,27 +40,8 @@ def save_key(key: str) -> None:
     env.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def load_settings() -> dict:
-    """Small things the app remembers between runs (not secrets): the SimBrief username."""
-    path = PROJECT_DIR / "settings.json"
-    try:
-        settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except (OSError, ValueError):
-        settings = {}
-    # SIMBRIEF_USER in .env is the default until another account is used in the app.
-    if not settings.get("simbrief_user") and env_value("SIMBRIEF_USER"):
-        settings["simbrief_user"] = env_value("SIMBRIEF_USER")
-    return settings
-
-
-def save_settings(changes: dict) -> None:
-    settings = {**load_settings(), **changes}
-    (PROJECT_DIR / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
-
-
 def to_intent(data: dict) -> Intent:
-    known = {f.name for f in fields(Intent)}
-    return Intent(**{k: v for k, v in data.items() if k in known})
+    return Intent.from_dict(data)
 
 
 def build_state(session: Session, db: AirportDB) -> dict:
@@ -84,7 +64,11 @@ def build_state(session: Session, db: AirportDB) -> dict:
         "plan": None,
         "simbrief_user": load_settings().get("simbrief_user", ""),
         "suggestions": [],
+        "settings": {"values": editable_values(config), "options": session.options, "capturing": session.capturing},
+        "cost": {**session.usage, "cost": round(session.usage["cost"], 5)},
     }
+    if session.joystick:
+        state["settings"]["options"] = {**session.options, "joysticks": list(session.joystick.names)}
     if session.ready and session.engine.flight.plan:
         state["plan"] = session.engine.flight.plan.summary()
     if not state["status"]["sim"]:
@@ -233,12 +217,24 @@ class AppServer:
             session.engine.set_plan(None)
         elif name == "tune":
             session.tune(str(command.get("mhz", "")))
+        elif name == "settings":
+            session.apply_settings(command.get("changes") or {})
+        elif name == "capture_ptt":
+            session.capture_ptt()
+        elif name == "clear_joystick":
+            session.apply_settings({"ptt": {"joystick": None, "joystick_button": None}})
+        elif name in ("explain", "what_next"):
+            session.ask(name)
+        elif name == "save_log":
+            session.save_log()
+        elif name == "reset_cost":
+            session.usage.update(calls=0, prompt_tokens=0, completion_tokens=0, cost=0.0)
         elif name == "ptt":
             session.ptt.press() if command.get("down") else session.ptt.release()
         elif name == "say" and str(command.get("text", "")).strip():
             session.submit(str(command["text"]).strip()[:500])
         elif name == "click" and str(command.get("text", "")).strip():
-            session.submit(str(command["text"]).strip()[:500], to_intent(command.get("intent") or {}))
+            session.submit(str(command["text"]).strip()[:500], Intent.from_dict(command.get("intent") or {}))
 
     # ---- lifecycle ----------------------------------------------------------
 

@@ -25,6 +25,9 @@ class PushToTalk:
         self.released.set()
         self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
 
+    def set_key(self, key_name: str) -> None:
+        self.key = _parse_key(key_name)
+
     def _on_press(self, key) -> None:
         if key == self.key:
             self.press()

@@ -52,6 +52,13 @@ DATAREFS = {
     "wx_oat_c": "sim/weather/aircraft/temperature_ambient_deg_c",
     "wx_sealevel_temp_c": "sim/weather/region/sealevel_temperature_c",
     "wx_rain": "sim/weather/region/rain_percent",
+    # Other aircraft, as the sim tracks them for TCAS. Slot 0 is the user's own.
+    "tcas_lat": "sim/cockpit2/tcas/targets/position/lat",
+    "tcas_lon": "sim/cockpit2/tcas/targets/position/lon",
+    "tcas_ele_m": "sim/cockpit2/tcas/targets/position/ele",
+    "tcas_heading": "sim/cockpit2/tcas/targets/position/psi",
+    "tcas_vs_fpm": "sim/cockpit2/tcas/targets/position/vertical_speed",
+    "tcas_on_ground": "sim/cockpit2/tcas/targets/position/weight_on_wheels",
     "wx_source": "sim/weather/region/weather_source",  # 0 preset, 1 real weather, 2 controlpad, 3 plugin
 }
 

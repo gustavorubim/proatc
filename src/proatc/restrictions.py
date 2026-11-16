@@ -50,6 +50,21 @@ def build(engine, star: Procedure, destination: Airport) -> list[Constraint]:
     return sorted(found.values(), key=lambda c: -distance_nm(c.lat, c.lon, destination.lat, destination.lon))
 
 
+def build_sid(engine, sid: Procedure, airport: Airport) -> list[Constraint]:
+    """The SID's 'at or above' crossings that can be placed, nearest the airport first."""
+    if not engine.navfix:
+        return []
+    found: dict[str, Constraint] = {}
+    for legs in sid.transitions.values():
+        for leg in legs:
+            if not leg.fix or not leg.altitude_ft or leg.alt_descr != "+" or leg.fix in found:
+                continue
+            position = engine.navfix.position(leg.fix, airport.lat, airport.lon, 80)
+            if position:
+                found[leg.fix] = Constraint(leg.fix, position[0], position[1], "+", leg.altitude_ft, issued=True)
+    return sorted(found.values(), key=lambda c: distance_nm(c.lat, c.lon, airport.lat, airport.lon))
+
+
 def update_passed(constraints: list[Constraint], raw: dict, destination: Airport) -> Constraint | None:
     """Mark waypoints the aircraft has crossed or gone beyond. Returns one crossed just now, if any."""
     to_go = distance_nm(raw["lat"], raw["lon"], destination.lat, destination.lon)

@@ -23,6 +23,11 @@ INTENTS = {
     "request_descent": "asks for descent",
     "established": "reports established on the localiser, I L S or final approach course",
     "request_direct": "asks to route direct to a waypoint",
+    "mayday": "declares an emergency: mayday, or declaring an emergency",
+    "pan_pan": "declares an urgency: pan-pan",
+    "cancel_emergency": "cancels a mayday or pan-pan",
+    "request_flight_following": "a V F R flight asking for flight following, traffic service or radar service",
+    "cancel_flight_following": "cancels flight following or radar service, or leaves the frequency V F R",
     "request_hold": "asks to hold, or for a delay before the approach",
     "cancel_hold": "in a hold, says ready for the approach or asks to leave the hold",
     "request_weather": "asks for the wind, the Q N H or altimeter, or the weather at an airport",
@@ -81,6 +86,12 @@ class Intent:
     heading: float | None = None
     fix: str | None = None
     direction: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Intent:
+        """An intent carried by a suggested call (a click needs no language model)."""
+        known = {f.name for f in fields(cls)}
+        return cls(**{key: value for key, value in data.items() if key in known})
 
 
 def _clean(data: dict) -> Intent:
