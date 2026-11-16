@@ -245,6 +245,7 @@ class AppServer:
         import faster_whisper
         import kokoro_onnx
         import onnxruntime
+        import pygame
         import pynput
         import scipy
         import sounddevice
@@ -252,7 +253,7 @@ class AppServer:
         versions = {
             m.__name__: getattr(m, "__version__", "ok") for m in (ctranslate2, faster_whisper, onnxruntime, scipy, sounddevice)
         }
-        del kokoro_onnx, pynput
+        del kokoro_onnx, pynput, pygame
         self.emit({"type": "status", "text": f"SELFTEST OK {json.dumps(versions)}"})
         threading.Event().wait(60)
 

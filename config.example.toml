@@ -4,10 +4,13 @@
 host = "localhost"
 port = 8086
 allow_tuning = true    # clicking a frequency in the app tunes the COM radio in the sim
+auto_tune = false      # tune a hand-off frequency by itself once you have read it back
 
 [ptt]
 # pynput key name: ctrl_r, alt_gr, f13, scroll_lock, or a single character
 key = "ctrl_r"
+# joystick = "Extreme 3D pro"   # set from the app: Settings > Push-to-talk > Change
+# joystick_button = 0
 
 [audio]
 # Leave unset to use the Windows default devices. Run `proatc devices` to list them.
@@ -35,3 +38,7 @@ noise = 0.012
 [atc]
 # Holding before the approach: "never", "sometimes" (about one arrival in four) or "always".
 holding = "never"
+# The copilot on the radio: "off", "readbacks", or "full" (also tunes hand-offs and checks in).
+copilot = "off"
+# Traffic calls and runway sequencing against X-Plane's AI aircraft.
+traffic = true

@@ -2,7 +2,7 @@
 
 import type { EngineMessage, EngineState } from '../../shared/protocol'
 
-export type LineKind = 'pilot' | 'atc' | 'atis' | 'note' | 'error'
+export type LineKind = 'pilot' | 'atc' | 'atis' | 'note' | 'error' | 'coach'
 
 export interface Line {
   id: number
@@ -20,6 +20,7 @@ export interface Store {
   startup: string
   lastInstruction: { station: string; text: string } | null
   fatal: string | null
+  savedLog: string | null
   nextId: number
 }
 
@@ -33,6 +34,7 @@ export const initialStore: Store = {
   startup: 'Starting the engine…',
   lastInstruction: null,
   fatal: null,
+  savedLog: null,
   nextId: 1
 }
 
@@ -56,7 +58,7 @@ function annotate(store: Store, kind: LineKind, meta: string): Store {
   return store
 }
 
-const SOURCE_LABEL = { voice: 'voice', typed: 'typed', clicked: 'clicked' } as const
+const SOURCE_LABEL = { voice: 'voice', typed: 'typed', clicked: 'clicked', copilot: 'copilot' } as const
 
 export function reduce(store: Store, action: Action): Store {
   if (action.type === 'link') return { ...store, link: action.link }
@@ -71,7 +73,13 @@ export function reduce(store: Store, action: Action): Store {
     case 'tx':
       return { ...store, transmitting: message.on }
     case 'pilot':
-      return push(store, 'pilot', 'You', message.text, SOURCE_LABEL[message.source])
+      return push(
+        store,
+        'pilot',
+        message.source === 'copilot' ? 'Copilot' : 'You',
+        message.text,
+        SOURCE_LABEL[message.source]
+      )
     case 'understood':
       return annotate(store, 'pilot', message.intent.replaceAll('_', ' '))
     case 'atc': {
@@ -88,6 +96,12 @@ export function reduce(store: Store, action: Action): Store {
       return push(store, 'note', '', message.text)
     case 'error':
       return push(store, 'error', '', message.text)
+    case 'coach':
+      return push(store, 'coach', 'Instructor', message.text)
+    case 'log_saved':
+      return { ...push(store, 'note', '', `Flight log saved: ${message.path}`), savedLog: message.path }
+    case 'capture':
+      return store
     default:
       return store
   }

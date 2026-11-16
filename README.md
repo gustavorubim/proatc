@@ -26,7 +26,11 @@ Arrivals follow the STAR: its level restrictions are issued one by one ("descend
 
 Weather: while X-Plane is on real weather, each airport's ATIS, runway in use and pressure come from its own METAR (`metar.py`, read from `Output/real weather`), so the destination is right from any distance; with preset or custom weather the sim's weather at the aircraft is used. The ATIS reports gusts, thunderstorms, snow, fog and low visibility procedures, a controller announces a new ATIS to an aircraft on frequency, and you can ask any controller for the wind and pressure, ask a centre for the destination weather, and request a deviation around weather.
 
-Known simplifications: no other traffic, so holds are for delay only and there is no sequencing; vectors follow one fixed pattern; SID level restrictions are not monitored; landing and departures share the runways in use; station names are whatever X-Plane's data calls them.
+Other aircraft: with X-Plane's AI aircraft enabled, controllers see them (`traffic.py`). Radar controllers call traffic ("traffic, two o'clock, five miles, opposite direction, one thousand feet above"), tower holds a departure for an aircraft on final and clears it when the runway is free, tells an arrival it is number two, and sends it around if the runway is still occupied at one mile. The app does not control those aircraft. Parallel runways are split between landing and departure. Mayday and pan-pan are acknowledged on any frequency and the landing is cleared at once. A VFR flight can ask a radar controller for flight following. A SID's "at or above" crossing flown low is called.
+
+In the app: a settings screen (microphone, speakers, push-to-talk on a keyboard key or a joystick or yoke button, voices, model, holding, traffic); a copilot that reads instructions back, or also tunes hand-off frequencies and checks in with the next controller; an instructor that explains the last instruction and tells you what to say next; "Save log", which writes the flight's radio work to a transcript and a JSON file for bug reports; and what the session has spent on OpenRouter, in the header.
+
+Known simplifications: the sim's other aircraft are seen but not controlled, so there is no sequencing between them; vectors follow one fixed pattern; station names are whatever X-Plane's data calls them.
 
 Phase 2, still in place:
 
@@ -98,7 +102,7 @@ Then copy `.env.example` to `.env` and paste your OpenRouter key. Without a key 
 | `uv run proatc run` | Starts the push-to-talk loop (default key: right Ctrl) |
 | `uv run pytest` | Unit tests |
 
-Copy `config.example.toml` to `config.toml` to change the key, devices, models or voice.
+Most settings are changed in the app's settings screen and remembered in `settings.json`. `config.toml` (copy `config.example.toml`) sets defaults and the few things the app does not offer, such as the speech-to-text model.
 
 ## Layout
 

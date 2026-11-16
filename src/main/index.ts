@@ -82,9 +82,9 @@ function scheduleScreenshot(): void {
   const delay = Number(process.env.PROATC_SHOT_DELAY_MS ?? 30000)
   const label = process.env.PROATC_SHOT_CLICK
   if (label) {
-    // Optionally press one of the suggested calls first, so the picture shows a conversation.
+    // Optionally press a button first, so the picture shows a conversation or a dialog.
     setTimeout(() => {
-      const script = `[...document.querySelectorAll('button.call')].find((b) => b.textContent === ${JSON.stringify(label)})?.click()`
+      const script = `[...document.querySelectorAll('button')].find((b) => b.textContent.trim() === ${JSON.stringify(label)})?.click()`
       void window?.webContents.executeJavaScript(script)
     }, delay * 0.6)
   }
@@ -154,6 +154,12 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('connection', () => connection)
   ipcMain.handle('engine-log', () => ({ lines: engineLog, failure: engineFailure }))
   ipcMain.handle('app-version', () => app.getVersion())
+  // Only a flight log the engine wrote may be shown in the file manager.
+  ipcMain.handle('reveal', (_event, path: string) => {
+    if (typeof path !== 'string' || !/[\\/]logs[\\/]flight-\d{8}-\d{6}\.txt$/.test(path)) return false
+    shell.showItemInFolder(path)
+    return true
+  })
   ipcMain.handle('update-state', () => getUpdateState())
   ipcMain.handle('update-check', () => checkForUpdates(true))
   ipcMain.handle('update-install', () => installUpdate(() => engine?.stop()))
