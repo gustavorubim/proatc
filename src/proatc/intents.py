@@ -77,7 +77,7 @@ Keys:
 Rules:
 - The speech-to-text may contain errors; pick the most plausible aviation meaning.
 - "niner" is 9, "tree" is 3, "fife" is 5, "decimal" or "point" separates a frequency.
-- If the transmission repeats back the controller's last instruction (given below), the intent is "readback", and you still fill runway, squawk, qnh and frequency with what the PILOT said, even if it differs from the instruction.
+- If the transmission repeats back the controller's last instruction (given below), the intent is "readback", and you still fill runway, squawk, qnh, frequency, altitude and heading with what the PILOT said, even if it differs from the instruction.
 - A pilot who reports "final" or asks for landing clearance is "position_report" with position "final"."""
 
 SYSTEM = PROMPT.format(intents="; ".join(f'"{name}" ({meaning})' for name, meaning in INTENTS.items()))

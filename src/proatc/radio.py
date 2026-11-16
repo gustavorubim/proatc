@@ -159,7 +159,10 @@ class AtisBroadcaster(threading.Thread):
         if not reply or not reply.text:
             return False
         self._chatter_until = 0.0
-        self.emit({"type": "atc", "station": station.callsign, "text": reply.text, "unprompted": True})
+        event = {"type": "atc", "station": station.callsign, "text": reply.text, "unprompted": True}
+        if reply.event:
+            event["event"] = reply.event
+        self.emit(event)
         samples, rate = self.tts.speak(reply.text, **station_voice(self.tts, station))
         if self.config.radio.enabled:
             samples = radio_effect(samples, rate, self.config.radio.noise)
