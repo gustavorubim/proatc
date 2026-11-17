@@ -18,6 +18,7 @@ import time
 from dataclasses import asdict
 
 from .airspace import open_airspace
+from .airways import open_airways
 from .atis import AtisBook
 from .audio_io import MIC_RATE, Player, Recorder
 from .centers import CenterIndex
@@ -159,6 +160,7 @@ class Session:
         self.engine = Engine(
             self.db, centers=self.centers, navaids=NavaidNames(root), navfix=self.navfix, metars=self.metars,
             holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root), clock=SimClock(),
+            airways=open_airways(root),
         )  # fmt: skip
         self.engine.clock = self.engine.now
         radio_db = AirportDB()  # the background thread's own connection
@@ -493,6 +495,7 @@ def known_names(engine) -> list[str]:
     if plan:
         names += [name for name in (plan.origin, plan.destination, plan.alternate) if name]
         names += route_fixes(plan.route)
+        names += [name for name, _, _ in engine.route()]
     for procedure in (flight.star_procedure,):
         if procedure:
             names += [fix for fix in procedure.fixes() if fix.isalpha()]

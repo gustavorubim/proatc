@@ -55,8 +55,16 @@ class Center:
     polygons: list[Polygon] = field(default_factory=list)
 
     @property
+    def oceanic(self) -> bool:
+        """An oceanic control area: no radar, position reports, clearances by level and waypoint."""
+        return "OCEANIC" in self.name.upper()
+
+    @property
     def callsign(self) -> str:
         name = self.name.title()
+        if self.oceanic:
+            # An oceanic centre is worked by voice as "Radio": Shanwick Radio, Gander Radio.
+            return f"{name.replace(' Oceanic', '').strip() or name} Radio"
         if any(word in name.split() for word in ("Control", "Center", "Centre", "Radar", "Radio", "Information")):
             return name
         # United States and Canada say "Center"; the rest of the world says "Control".

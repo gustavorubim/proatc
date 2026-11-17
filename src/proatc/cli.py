@@ -161,6 +161,7 @@ def cmd_run(config) -> int:
 def _real_engine(config, db, seed=None):
     """An engine on this machine's X-Plane data, as the app builds it."""
     from .airspace import open_airspace
+    from .airways import open_airways
     from .centers import CenterIndex
     from .engine import Engine
     from .metar import MetarStore
@@ -172,6 +173,7 @@ def _real_engine(config, db, seed=None):
     return Engine(
         db, seed=seed, centers=db.centers, navaids=NavaidNames(root), navfix=open_navfix(root), metars=db.metars,
         holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root),
+        airways=open_airways(root),
     )  # fmt: skip
 
 

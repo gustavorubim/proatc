@@ -130,6 +130,7 @@ def departure(tmp_path):
     radar = db.station(125500, 51.0, -1.0)
     engine.flight.contacted.add(radar.key)
     engine._observe(at(51.0, -1.05, feet=1500))
+    engine.flight.cleared_ft = 24000  # no climb is due: these tests are about the track and the crossings
     return engine, radar
 
 

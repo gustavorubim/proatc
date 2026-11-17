@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 
 from . import chatter, restrictions, vfr
 from .airspace import open_airspace
+from .airways import open_airways
 from .atis import Issue, compose, runways_in_use
 from .centers import CenterIndex
 from .engine import Engine
@@ -84,7 +85,7 @@ def sweep(db: AirportDB, idents: list[str], progress=None) -> Report:
     root = db.xplane_root
     shared = {
         "centers": CenterIndex.open(root), "navaids": NavaidNames(root), "navfix": open_navfix(root),
-        "airspace": open_airspace(root),
+        "airspace": open_airspace(root), "airways": open_airways(root),
     }  # fmt: skip
     started = time.perf_counter()
 

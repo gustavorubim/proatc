@@ -51,6 +51,8 @@ PROCEDURAL_KINDS = "RHP"  # R NAV, R N P and G P S approaches are flown from an 
 PROCEDURE_WITHIN_NM = 45
 OFF_TRACK_NM = 4.0
 OFF_TRACK_AFTER_S = 45
+EN_ROUTE_OFF_TRACK_NM = 10.0  # in the cruise, between waypoints that may be far apart
+EN_ROUTE_OFF_TRACK_S = 120
 CROSSING_NM = 2.5
 SPEED_MARGIN_KT = 15
 SPEEDS_KT = {"descend": 250, "downwind": 220, "base": 180, "intercept": 160}
@@ -146,6 +148,10 @@ def _contact_word(faa: bool) -> str:
 
 def _fix_word(engine, fix: str, lat: float, lon: float) -> str:
     """A waypoint as spoken: a five-letter name as a word, a navaid by its name."""
+    from .airways import spoken_coordinate
+
+    if spoken_coordinate(fix):
+        return spoken_coordinate(fix)
     if len(fix) <= 3:
         name = engine.navaids.name(fix, lat, lon) if engine.navaids else None
         return name or " ".join(say.PHONETIC[c] for c in fix if c in say.PHONETIC)
@@ -379,8 +385,32 @@ def _descent(engine, station, raw, callsign, lead: str, faa: bool):
     return _descend(engine, target, destination.ident if destination else None, faa, callsign, lead, tail)
 
 
+def _oceanic(engine, intent, station, raw, callsign, hello):
+    """Oceanic airspace has no radar: the controller takes position reports and clears levels, nothing else."""
+    from .airways import next_ahead
+
+    flight = engine.flight
+    feet = _feet(raw)
+    ahead = next_ahead(engine.route(), raw["lat"], raw["lon"]) if "lat" in raw else None
+    report = f", report {_fix_word(engine, ahead, raw['lat'], raw['lon'])}" if ahead else ""
+    if intent.intent in ("request_climb", "request_descent") and intent.altitude:
+        target = int(intent.altitude)
+        climbing = target > feet
+        if not 20000 <= target <= 45000 or abs(target - feet) < 500:
+            return _reply(engine, f"{callsign}, {hello}unable, maintain {say.level(flight.cleared_ft or feet, 0)}")
+        flight.cleared_ft = target
+        verb = "climb" if climbing else "descend"
+        return _reply(engine, f"{callsign}, {hello}{verb} {say.level(target, 0)}, report reaching", {"altitude": target})
+    if intent.intent in CHECK_IN:
+        level = say.level(flight.cleared_ft or round(feet / 1000) * 1000, 0)
+        return _reply(engine, f"{callsign}, {hello}roger, maintain {level}{report}")
+    return None
+
+
 def _center(engine, intent, station, raw, callsign, hello):
     flight, plan = engine.flight, engine.flight.plan
+    if station.center.oceanic:
+        return _oceanic(engine, intent, station, raw, callsign, hello)
     faa = _centre_faa(station)
     cruise = plan.cruise_ft if plan else None
     lead = f"{hello}{_contact_word(faa)}, " if hello else ""
@@ -412,7 +442,8 @@ def _direct(engine, intent, station, raw, callsign, part: str):
     """'Request direct BIBAX': granted for a waypoint on the filed route, outside radar vectors."""
     flight, plan = engine.flight, engine.flight.plan
     fix = (intent.fix or "").upper()
-    if not plan or not fix or fix not in route_fixes(plan.route):
+    known = set(route_fixes(plan.route)) | {name for name, _, _ in engine.route()} if plan else set()
+    if not plan or not fix or fix not in known:
         return None
     if part == "arrival" and flight.arrival and flight.arrival.stage in ("downwind", "base", "intercept"):
         return _reply(engine, f"{callsign}, unable direct, continue present heading")
@@ -938,25 +969,29 @@ def _crossing_missed(engine, crossing, raw, ident: str, faa: bool, callsign: str
     return None
 
 
-def _route_watch(engine, raw, callsign, points, name: str | None, kind: str):
-    """Tell a flight that has left the track of its SID or STAR, once, after it has been off it for a while."""
+def _route_watch(
+    engine, raw, callsign, points, name: str | None, kind: str, limit: float = OFF_TRACK_NM, after: float = OFF_TRACK_AFTER_S
+):
+    """Tell a flight that has left the track of its SID, its STAR or its route, once, after it has been off it for a while."""
     flight = engine.flight
     if not points or not name or name in flight.off_route_called or flight.direct_to or flight.deviating or flight.emergency:
         return None
     gap = restrictions.off_track_nm(points, raw["lat"], raw["lon"])
-    if gap is None or gap <= OFF_TRACK_NM:
+    if gap is None or gap <= limit:
         flight.off_route_since = None
         return None
     if flight.off_route_since is None:
         flight.off_route_since = engine.now()
         return None
-    if engine.now() - flight.off_route_since < OFF_TRACK_AFTER_S:
+    if engine.now() - flight.off_route_since < after:
         return None
     flight.off_route_called.add(name)
     flight.off_route_since = None
-    text = (
-        f"{callsign}, you appear to be {say.digits(round(gap))} miles off the {kind} track, confirm you are following the {kind}"
-    )
+    miles = say.digits(round(gap))
+    if kind == "route":
+        text = f"{callsign}, you appear to be {miles} miles off your filed route, confirm your routing"
+    else:
+        text = f"{callsign}, you appear to be {miles} miles off the {kind} track, confirm you are following the {kind}"
     return _reply(engine, text, event="off_route")
 
 
@@ -1012,6 +1047,11 @@ def tick(engine, station, issue, raw, variation, callsign):
     part = role(engine, station)
     if station.key not in flight.contacted:
         return None  # the controller speaks first only to an aircraft that has checked in
+    if station.kind == "center" and station.center.oceanic:
+        # No radar: nothing is watched. The next sector is given at the boundary.
+        if not station.center.contains(raw["lat"], raw["lon"]):
+            return _centre_handoff(engine, raw, callsign, exclude=station.center)
+        return None
     noticed = _watch(engine, station, raw, callsign)
     if noticed:
         return noticed
@@ -1062,6 +1102,12 @@ def tick(engine, station, issue, raw, variation, callsign):
         cleared = flight.cleared_ft or 0
         if not flight.descent_given and cruise and cleared < cruise and _near_cleared(engine, raw):
             return _climb(engine, _next_level(cleared, _feet(raw), cruise), None, faa, callsign, "")
+        if plan and not flight.descent_given:
+            # In the cruise the whole filed route is the track, airways included.
+            track = [(lat, lon) for _, lat, lon in engine.route()]
+            strayed = _route_watch(engine, raw, callsign, track, "route", "route", EN_ROUTE_OFF_TRACK_NM, EN_ROUTE_OFF_TRACK_S)
+            if strayed:
+                return strayed
         if destination and plan:
             _star(engine, destination)
             crossed = restrictions.update_passed(flight.constraints, raw, destination)
@@ -1137,6 +1183,15 @@ def suggestions(engine, station, raw, add, callsign) -> None:
     passing = _level(engine, int(round(feet / 100) * 100), ident, faa)
     part = role(engine, station)
     cleared = flight.cleared_ft
+    if station.kind == "center" and station.center.oceanic:
+        from .airways import next_ahead
+
+        ahead = next_ahead(engine.route(), raw["lat"], raw["lon"]) if "lat" in raw else None
+        estimate = f", estimating {_fix_word(engine, ahead, raw['lat'], raw['lon'])}" if ahead else ""
+        level = say.level(cleared or round(feet / 1000) * 1000, 0)
+        add("Position report", f"position, {level}{estimate}", "position_report")
+        add("Request climb", "request climb", "request_climb", altitude=int((cleared or feet) + 2000))
+        return
     if part == "arrival" and not plan and flight.rules != "IFR" and not flight.arrival:
         part = "passing"  # a VFR flight with no plan is not this controller's arrival: it gets the en-route calls
     if part == "arrival":
