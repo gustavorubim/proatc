@@ -13,6 +13,7 @@ CONTROLLER_END
 
 from __future__ import annotations
 
+import math
 import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,9 @@ ATC_FILES = (
     "Resources/default scenery/1200 atc data/Earth nav data/atc.dat",
 )
 CACHE = PROJECT_DIR / "data" / "centers-v1.pickle"
+
+
+BEYOND_BOUNDARY_DEG = 0.75  # about 45 NM
 
 
 @dataclass
@@ -81,6 +85,14 @@ class Center:
             if polygon.contains(lat, lon):
                 return True
         return False
+
+    def near(self, lat: float, lon: float, margin_deg: float) -> bool:
+        """Roughly within `margin_deg` of the airspace: just across its boundary."""
+        wide = margin_deg / max(math.cos(math.radians(lat)), 0.05)
+        return any(
+            p.box[0] - margin_deg <= lat <= p.box[1] + margin_deg and p.box[2] - wide <= lon <= p.box[3] + wide
+            for p in self.polygons
+        )
 
     def has_frequency(self, khz: int) -> bool:
         return any(abs(freq - khz) <= FREQ_TOLERANCE_KHZ for freq in self.freqs_khz)
@@ -181,7 +193,11 @@ class CenterIndex:
 
     def on_frequency(self, khz: int, lat: float, lon: float) -> CenterStation | None:
         """A centre that covers this position and works this frequency."""
-        inside = [c for c in self.centers if c.has_frequency(khz) and c.contains(lat, lon)]
+        working = [c for c in self.centers if c.has_frequency(khz)]
+        inside = [c for c in working if c.contains(lat, lon)]
+        # A radio does not stop at a line on the map: just across the boundary the last centre still answers,
+        # and sends the flight to the next one.
+        inside = inside or [c for c in working if c.near(lat, lon, BEYOND_BOUNDARY_DEG)]
         best = min(inside, key=lambda c: c.area, default=None)
         return CenterStation(best, khz) if best else None
 

@@ -36,7 +36,7 @@ from .atis import runways_in_use, uses_faa_style
 from .config import PROJECT_DIR, Config, editable_values, load_settings, save_settings
 from .flightplan import PlanError, fetch_simbrief, manual
 from .intents import Intent
-from .navdata import AirportDB
+from .navdata import AirportDB, distance_nm
 from .radio import current_station, observe
 from .voice_loop import Session
 from .xpbridge import SimUnavailable, describe, magnetic_variation
@@ -97,6 +97,28 @@ def to_intent(data: dict) -> Intent:
     return Intent.from_dict(data)
 
 
+LIST_WITHIN_NM = 8  # the airport the aircraft is at
+DESTINATION_WITHIN_NM = 80  # further out, the destination's frequencies are the ones wanted
+CONTROLLED_WITHIN_NM = 40  # with no plan: the nearest airport that has a controller
+
+
+def airport_to_list(session: Session, db: AirportDB, raw: dict):
+    """The airport whose frequencies the app lists while no airport's station is tuned."""
+    lat, lon = raw["lat"], raw["lon"]
+    close = [airport for _, airport in db.nearest(lat, lon, LIST_WITHIN_NM, 6) if airport.freqs]
+    if close:
+        return close[0]
+    plan = session.engine.flight.plan
+    if plan and plan.destination and not raw.get("on_ground", True):
+        destination = db.airport(plan.destination)
+        if destination and destination.freqs and distance_nm(lat, lon, destination.lat, destination.lon) <= DESTINATION_WITHIN_NM:
+            return destination
+    for _, airport in db.nearest(lat, lon, CONTROLLED_WITHIN_NM, 40):
+        if any(freq.kind in ("tower", "approach") for freq in airport.freqs):
+            return airport
+    return None
+
+
 def build_state(session: Session, db: AirportDB) -> dict:
     """Everything the app shows that is not a one-off event."""
     config = session.config
@@ -119,6 +141,7 @@ def build_state(session: Session, db: AirportDB) -> dict:
         "simbrief_user": load_settings().get("simbrief_user", ""),
         "suggestions": [],
         "airspace": [],
+        "centre": None,
         "map": None,
         "settings": {"values": editable_values(config), "options": session.options, "capturing": session.capturing},
         "cost": {**session.usage, "cost": round(session.usage["cost"], 5)},
@@ -140,8 +163,18 @@ def build_state(session: Session, db: AirportDB) -> dict:
     }  # fmt: skip
     airport = station.airport if station else None
     if airport is None and "lat" in raw:
-        near = db.nearest(raw["lat"], raw["lon"], 8, 1)
-        airport = near[0][1] if near else None
+        airport = airport_to_list(session, db, raw)
+    centre = getattr(db, "centers", None)
+    if centre and "lat" in raw and not raw.get("on_ground", True):
+        # The centre for where the aircraft is: the way back for a pilot left on a frequency nobody answers.
+        here = centre.at(raw["lat"], raw["lon"], raw.get("elevation_m", 0.0) / 0.3048)
+        if here and here.freqs_khz:
+            working = next((f for f in here.freqs_khz if khz and abs(f - khz) <= 5), here.freqs_khz[0])
+            state["centre"] = {
+                "mhz": f"{working / 1000:.3f}",
+                "callsign": here.callsign,
+                "tuned": bool(khz and abs(working - khz) <= 5),
+            }
     issue = None
     if airport:
         weather = observe(db, airport, raw)

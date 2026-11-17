@@ -101,6 +101,7 @@ class Flight:
     descent_given: bool = False
     told_approach: bool = False
     told_sector: str | None = None  # last centre the flight was sent to
+    sector_ahead: str | None = None  # the centre the flight was sent to before reaching its boundary
     direct_to: str | None = None
     next_frequency: str | None = None  # the frequency of the last hand-off, until it is tuned
     star_procedure: object | None = None  # procedures.Procedure
