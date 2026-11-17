@@ -25,6 +25,7 @@ from .taxi import (
     TaxiNetwork,
     aircraft_category,
     assign_stand,
+    end_key,
     nearest_parking,
     parse_taxi,
     route_to_point,
@@ -866,6 +867,7 @@ class Engine:
         route = None
         if "lat" in raw:
             route = route_to_runway(self.network(airport), raw["lat"], raw["lon"], runway, self._threshold(airport, runway))
+            self._airport_names(airport, route)
         via = self._route_words(route)
         flight.taxi_goal, flight.crossings = ("runway", runway), list(route.crossings) if route else []
         flight.taxi_route, flight.taxi_airport = route, airport.ident
@@ -896,6 +898,7 @@ class Engine:
                 stand = stand or nearest_parking(network, raw["lat"], raw["lon"])
             if stand:
                 route = self._route_to_stand(network, raw, (stand.lat, stand.lon))
+                self._airport_names(airport, route)
         flight.taxi_route, flight.taxi_airport = route, airport.ident
         named = stand and stand.name and len(stand.name) <= 12
         destination = f"{'gate' if faa else 'stand'} {say.stand(stand.name)}" if named else "parking"
@@ -925,8 +928,8 @@ class Engine:
 
     @staticmethod
     def _runway_named(airport: Airport, name: str):
-        ends = name.split("/")
-        return next((r for r in airport.runways if r.end1 in ends or r.end2 in ends), None)
+        ends = {end_key(end) for end in name.split("/")}  # the network's '04R/22L' is the airport's '4R'
+        return next((r for r in airport.runways if end_key(r.end1) in ends or end_key(r.end2) in ends), None)
 
     def _offset_nm(self, airport: Airport, name: str, raw: dict) -> float | None:
         """Distance from the centreline of this runway, while abeam it; None when not beside it."""
@@ -976,6 +979,19 @@ class Engine:
             return self._crossing(station, raw, callsign, "", faa, asked=False)
         return None
 
+    def _airport_names(self, airport: Airport, route):
+        """The runways a route crosses, named as the airport names them ('4R/22L', said "four right"), not as its
+        taxi network may write them ('04R/22L')."""
+        if route is None:
+            return None
+        renamed = {}
+        for name in route.crossings:
+            runway = self._runway_named(airport, name)
+            renamed[name] = f"{runway.end1}/{runway.end2}" if runway else name
+        route.crossings = [renamed[name] for name in route.crossings]
+        route.crossing_index = {renamed.get(name, name): index for name, index in route.crossing_index.items()}
+        return route
+
     @staticmethod
     def _route_to_stand(network: TaxiNetwork, raw: dict, stand: tuple[float, float]):
         route = route_to_point(network, raw["lat"], raw["lon"], stand)
@@ -988,8 +1004,10 @@ class Engine:
         goal = self.flight.taxi_goal
         network = self.network(airport)
         if goal[0] == "runway":
-            return route_to_runway(network, raw["lat"], raw["lon"], goal[1], self._threshold(airport, goal[1]))
-        return self._route_to_stand(network, raw, (goal[1], goal[2]))
+            route = route_to_runway(network, raw["lat"], raw["lon"], goal[1], self._threshold(airport, goal[1]))
+        else:
+            route = self._route_to_stand(network, raw, (goal[1], goal[2]))
+        return self._airport_names(airport, route)
 
     def _progressive(self, station: Station, raw: dict, callsign: str, hello: str, faa: bool) -> Reply | None:
         """The next part of the taxi route, from where the aircraft is now."""

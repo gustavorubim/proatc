@@ -592,9 +592,9 @@ class GateToGate:
         if "altitude" in expect:
             self._check_altitude(float(expect["altitude"]), text)
             self.cleared = float(expect["altitude"])
-        speed = re.search(rf"(?:reduce speed(?: to)?|maintain|speed) {SPOKEN_NUMBER}(?: knots)?", text)
+        speed = re.search(rf"(?:reduce speed(?: to)?|speed) {SPOKEN_NUMBER}|maintain {SPOKEN_NUMBER}knots", text)
         if speed and not plane.on_ground:
-            self.speed_kt = float(_number(speed.group(1)))
+            self.speed_kt = float(_number(speed.group(1) or speed.group(2)))
         if "heading" in expect and not plane.on_ground:
             heading = float(expect["heading"])
             ours = station.airport is not None and station.airport.ident == self.destination.ident
@@ -856,7 +856,7 @@ class GateToGate:
             plane.lat, plane.lon, plane.heading = lat, lon, heading
             budget -= piece
         plane.knots = 0.0 if self.holding_short or not points else TAXI_KT
-        departure = self.departure_runway and self._runway_name(self._ground_airport(), self.departure_runway)
+        departure = self.stage == "taxi out" and self._runway_name(self.origin, self.departure_runway)
         if self.stage == "taxi out" and (not points or self.holding_short == departure):
             self.holding_short = None
             self.set_stage("ready")
