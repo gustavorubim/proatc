@@ -4,13 +4,16 @@ import json
 import sys
 import threading
 
+import httpx
+import pytest
+
 from proatc import config as config_module
 from proatc import flightlog
 from proatc.atis import AtisBook
 from proatc.config import Config
 from proatc.engine import Engine
 from proatc.flightlog import FlightLog
-from proatc.flightplan import FlightPlan
+from proatc.flightplan import FlightPlan, PlanError, fetch_simbrief
 from proatc.intents import Intent
 from proatc.procedures import parse_cifp
 from proatc.replay import load, replay, snapshot
@@ -18,6 +21,9 @@ from proatc.voice_loop import Session
 from tests.test_ifr import ISSUE
 from tests.test_radio_loop import FakeBridge
 from tests.test_realism import APRON, ground_world, taxiing
+
+KNOWN_SECRETS = flightlog.known_secrets  # tests/conftest.py replaces it for every other test
+USER, KEY = "Placeholder-Pilot", "sk-or-v1-placeholder-0000"  # never real ones
 
 
 def lines(path):
@@ -193,3 +199,58 @@ def test_records_and_notes_from_several_threads_at_once_are_all_on_disk_each_on_
     assert len(kept) == len(infos) and set(kept) == infos  # none lost in memory
     assert {mark for mark in marks if mark in infos} == infos and len(marks) == len(set(marks))  # none twice
     assert [mark for mark in marks if mark in infos] == kept  # in the order they were kept
+
+
+# ---- nothing secret in a log that is attached to a public bug report ---------------------
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError, httpx.ReadTimeout, httpx.ProxyError],
+)
+def test_a_simbrief_fetch_that_fails_says_what_went_wrong_without_the_username_or_the_address(monkeypatch, failure):
+    def get(url, params, **options):
+        request = httpx.Request("GET", url, params=params)
+        raise failure(f"failed to reach {request.url}", request=request)
+
+    monkeypatch.setattr("proatc.flightplan.httpx.get", get)
+    with pytest.raises(PlanError) as failed:
+        fetch_simbrief(USER)
+    said = str(failed.value)
+    assert "SimBrief" in said and USER.lower() not in said.lower() and "http" not in said and "simbrief.com" not in said
+
+    monkeypatch.setattr("proatc.flightplan.httpx.get", lambda url, params, **options: httpx.Response(400, text=USER))
+    with pytest.raises(PlanError, match="SimBrief returned 400") as refused:
+        fetch_simbrief(USER)
+    assert USER.lower() not in str(refused.value).lower()
+
+
+def test_the_simbrief_username_and_the_openrouter_key_are_in_no_journal_saved_log_or_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(flightlog, "known_secrets", KNOWN_SECRETS)
+    monkeypatch.setattr(config_module, "load_settings", lambda: {"simbrief_user": USER, "config": {}})
+    monkeypatch.setattr(config_module, "openrouter_key", lambda: KEY)
+    log = FlightLog()
+    log.record({"type": "error", "text": f"https://www.simbrief.com/api/xml.fetcher.php?username={USER.lower()} failed"})
+    journal = log.keep_journal(tmp_path / "journal")
+    log.record({"type": "info", "text": f"key {KEY} in use"}, {"tuned": "121.700", "said": [f"by {USER}"], USER: 1})
+    log.note("session", model="anthropic/x", by=USER.upper(), context={"key": KEY})
+    log.note("trace", {"raw": {"lat": 51.0, "label": f"{USER}'s aircraft"}})
+    saved = log.save(tmp_path / "saved", {"debrief_text": f"notes for {USER}", "debrief": {"notes": KEY}})
+
+    for path in (journal, saved, saved.with_suffix(".json")):
+        written = path.read_text(encoding="utf-8")
+        assert USER.lower() not in written.lower() and KEY not in written and "[hidden]" in written, path.name
+    kept = json.dumps(log.entries())
+    assert USER.lower() not in kept.lower() and KEY not in kept and len(log.records) == 2
+    assert lines(journal)[1]["context"]["tuned"] == "121.700" and lines(journal)[3]["context"]["raw"]["lat"] == 51.0
+
+
+def test_an_error_the_session_emits_reaches_the_log_without_the_secrets(tmp_path, monkeypatch):
+    monkeypatch.setattr(flightlog, "known_secrets", KNOWN_SECRETS)
+    monkeypatch.setattr(config_module, "load_settings", lambda: {"simbrief_user": USER})
+    monkeypatch.setattr(config_module, "openrouter_key", lambda: KEY)
+    shown = []
+    session = Session(Config(), emit=shown.append)
+    session.emit({"type": "error", "text": f"rejected {KEY} for {USER}"})
+    assert USER not in json.dumps(list(session.log.records)) and KEY not in json.dumps(list(session.log.records))
+    assert session.log.records[-1]["text"] == "rejected [hidden] for [hidden]"

@@ -1,7 +1,9 @@
 """A record of the flight's radio work, for bug reports and debriefing.
 
 Every event the session emits is kept with the time and, for transmissions, where the
-aircraft was and who it was talking to. Nothing secret is recorded: no key, no audio.
+aircraft was and who it was talking to. Nothing secret is recorded: no key, no audio. Saved logs
+are attached to public bug reports, so the OpenRouter key and the SimBrief username are taken out
+of anything recorded, wherever they appear (`known_secrets`).
 
 It is kept twice. In memory, for "Save log" and the debrief. And on disk as it happens (the
 journal): one file for each time the app runs, a line for each event, written at once so that a
@@ -14,17 +16,35 @@ the oldest are deleted.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+from . import config
+
 KEPT = 5000
 JOURNALS_KEPT = 40  # runs of the app whose journal is kept
 JOURNAL_NAME = "session-{:%Y%m%d-%H%M%S}.jsonl"
 WITH_CONTEXT = ("pilot", "atc", "atis", "understood", "silent", "info", "error", "coach")
 SKIPPED = ("tx", "timings", "status", "settings", "log_saved", "chatter", "debrief", "capture", "phrase")
+HIDDEN = "[hidden]"
+SECRETS_RECHECK_S = 10.0  # the key or the username may be changed in the app
+
+
+def known_secrets() -> list[str]:
+    """What must never be written down: the OpenRouter key and the SimBrief username, as the app has them."""
+    found = []
+    for get in (lambda: config.openrouter_key(), lambda: config.load_settings().get("simbrief_user")):
+        try:
+            value = str(get() or "").strip()
+        except Exception:
+            continue  # a settings file that cannot be read holds nothing to hide
+        if len(value) >= 3:  # shorter would hide pieces of ordinary words
+            found.append(value)
+    return found
 
 
 class FlightLog:
@@ -36,6 +56,8 @@ class FlightLog:
         # Records come from the session's thread, the trace thread and the radio threads at once: one lock keeps
         # each line whole on disk, in the order it was kept in memory, and none lost.
         self._lock = threading.RLock()
+        self._secrets: re.Pattern | None = None
+        self._secrets_at: float | None = None
 
     def keep_journal(self, folder: Path) -> Path | None:
         """Write every record to a file in `folder` from now on, starting with what is already held."""
@@ -68,12 +90,21 @@ class FlightLog:
         with self._lock:
             return list(self.records)
 
+    def _hidden(self, value):
+        """`value` with every known secret in it replaced: in text, in keys, at any depth."""
+        now = time.monotonic()
+        if self._secrets_at is None or now - self._secrets_at >= SECRETS_RECHECK_S:
+            values = sorted(known_secrets(), key=len, reverse=True)
+            self._secrets = re.compile("|".join(map(re.escape, values)), re.IGNORECASE) if values else None
+            self._secrets_at = now
+        return _without(value, self._secrets) if self._secrets else value
+
     def note(self, kind: str, context: dict | None = None, **fields) -> None:
         """A record that is not a radio event: the session's start, the plan, the trace. Journal only."""
         entry = {"t": round(time.time(), 2), "type": kind, **fields}
         if context:
             entry["context"] = context
-        self._write(entry)
+        self._write(self._hidden(entry))
 
     def record(self, event: dict, context: dict | None = None) -> None:
         kind = event.get("type")
@@ -82,6 +113,7 @@ class FlightLog:
         entry = {"t": round(time.time(), 2), **event}
         if context and kind in WITH_CONTEXT:
             entry["context"] = context
+        entry = self._hidden(entry)
         with self._lock:  # in memory and on disk in the same order
             self.records.append(entry)
             self._write(entry)
@@ -116,7 +148,20 @@ class FlightLog:
         folder.mkdir(parents=True, exist_ok=True)
         stem = folder / f"flight-{datetime.now():%Y%m%d-%H%M%S}"
         extra = dict(extra or {})
-        stem.with_suffix(".txt").write_text(self.text() + extra.pop("debrief_text", ""), encoding="utf-8")
-        payload = {"started": self.started.isoformat(timespec="seconds"), **(extra or {}), "events": self.entries()}
+        text = self._hidden(self.text() + extra.pop("debrief_text", ""))
+        stem.with_suffix(".txt").write_text(text, encoding="utf-8")
+        payload = self._hidden({"started": self.started.isoformat(timespec="seconds"), **extra, "events": self.entries()})
         stem.with_suffix(".json").write_text(json.dumps(payload, indent=1, default=str), encoding="utf-8")
         return stem.with_suffix(".txt")
+
+
+def _without(value, secrets: re.Pattern):
+    if isinstance(value, str):
+        return secrets.sub(HIDDEN, value)
+    if isinstance(value, dict):
+        return {_without(key, secrets) if isinstance(key, str) else key: _without(item, secrets) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_without(item, secrets) for item in value]
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    return secrets.sub(HIDDEN, str(value))  # as it would be written down
