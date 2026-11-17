@@ -488,7 +488,7 @@ def test_direct_to_a_filed_waypoint(world):
     assert engine.handle(Intent("request_direct", fix="delta"), west, None, cruising).text == f"{CALLSIGN}, route direct Delta"
     assert engine.summary()["direct_to"] == "DELTA"
     assert "Request direct DELTA" not in [item["label"] for item in engine.suggestions(west, None, cruising)]
-    assert engine.handle(Intent("request_direct", fix="NOWHR"), west, None, cruising) is None  # not on the route
+    assert engine.handle(Intent("request_direct", fix="NOWHR"), west, None, cruising).text == f"{CALLSIGN}, unable direct"
 
 
 def test_airline_callsign_from_the_filed_plan(world):
@@ -523,7 +523,8 @@ def test_without_a_plan_the_centre_still_answers_and_grants_requests(world):
         == f"{CALLSIGN}, descend flight level one zero zero"
     )
     assert engine.handle(Intent("other"), west, None, cruising) is None
-    assert engine.handle(Intent("check_in"), west, None, at(51.0, 0.0, on_ground=True)) is None  # centres do not work the ground
+    # Centres do not work the ground: a call from there is acknowledged and nothing more.
+    assert engine.handle(Intent("check_in"), west, None, at(51.0, 0.0, on_ground=True)).text == f"{CALLSIGN}, roger"
 
 
 def test_simbrief_user_defaults_to_the_env_file(tmp_path, monkeypatch):

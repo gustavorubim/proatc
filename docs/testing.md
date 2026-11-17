@@ -133,6 +133,23 @@ When this was first run, 180 of 300 flights had a problem. The rules that fixed 
 
 The ones left: a route across the date line near the pole (Siberia to Alaska), and one where two entries for the same centre in the sim's data overlap. Both recover later in the flight.
 
+## Dead ends
+
+A call the rules engine has no rule for falls to the language model, which may only inform or decline: for the pilot, a dead end. `tests/deadends.py` builds the whole matrix on invented airports, without X-Plane or a model: every intent the app knows, on every kind of station (delivery, ground, tower, departure, approach, centre, oceanic, unicom, information service), in every main state of an instrument and a visual flight.
+
+```bash
+uv run python -m tests.deadends            # the matrix, state by state
+uv run python -m tests.deadends --missing  # only the unanswered calls a pilot plausibly makes
+```
+
+`tests/test_answers.py` holds the plausible gaps at zero. Only `other` (speech nobody foresaw) and a blind call to other traffic are left to the model. A new intent is measured as soon as it is in `intents.py`.
+
+| Matrix (0.14) | Cells | No rule | Plausible cells | Plausible with no rule |
+|---|---|---|---|---|
+| Before | 4,000 | 2,209 | 2,220 | 742 |
+| After, the same intents | 4,000 | 163 | 2,220 | 0 |
+| After, with the new intents | 5,800 | 163 | 4,020 | 0 |
+
 ## Fuzz tests
 
 Every random choice is seeded. A failure message names the seed and the step (`seed 137 step 22 Westfield Tower`); `one_flight(make, stations, 137)` in `tests/test_robust.py` reproduces it. Do not loosen `BAD_TEXT` in `src/proatc/verify.py` to make a failure pass: it lists what a controller's sentence must never contain.
@@ -146,7 +163,7 @@ Every random choice is seeded. A failure message names the seed and the step (`s
 Not run in CI: they need the speech models or a language model.
 
 - `proatc bench-speech` speaks 25 radio calls in four voices, clean and through the radio effect with two levels of noise, and measures word errors and whether the numbers survive. `--quick` runs a third of it.
-- `proatc bench-intents` runs 60 transcripts through the configured model and checks the intent and every value. It costs a fraction of a cent on OpenRouter.
+- `proatc bench-intents` runs 76 transcripts through the configured model and checks the intent and every value. It costs a fraction of a cent on OpenRouter.
 
 Baseline on 0.8 (Windows, NVIDIA graphics card, `small.en`, default model `anthropic/claude-haiku-5.5`):
 

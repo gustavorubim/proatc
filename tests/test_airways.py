@@ -99,7 +99,8 @@ def test_a_direct_is_given_to_any_waypoint_on_the_route(tmp_path):
     # MIDDB is on the airway, not in the filed text: it is a waypoint of the route all the same.
     assert engine.handle(Intent("request_direct", fix="MIDDB"), centre, None, here).text == (f"{CALLSIGN}, route direct Middb")
     assert engine.flight.direct_to == "MIDDB"
-    assert engine.handle(Intent("request_direct", fix="FARAW"), centre, None, here) is None  # on UL9, but not on this route
+    # On UL9, but not on this route: declined, not left to the free-form reply.
+    assert engine.handle(Intent("request_direct", fix="FARAW"), centre, None, here).text == f"{CALLSIGN}, unable direct"
     engine.set_plan(FlightPlan("EGXX", "LFXX", ["ALFAX", "BRAVO"], 36000))
     assert [name for name, _, _ in engine.route()] == ["ALFAX", "BRAVO"]  # a new plan, a new route
 

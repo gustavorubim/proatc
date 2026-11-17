@@ -56,7 +56,11 @@ DEBRIEFER = (
     "tip. Plain language, no markdown, no lists, no score."
 )
 TRACE_EVERY_S = 20
-GENERIC_CALLS = ("Say again", "Radio check", "Deviate left", "Deviate right", "Destination weather", "Clear of weather")
+# Calls on offer that are never "what to say next": questions, and ways out of an instruction.
+GENERIC_CALLS = (
+    "Say again", "Radio check", "Deviate left", "Deviate right", "Destination weather", "Clear of weather", "Unable",
+    "Confirm level", "Verify altitude", "Expected approach", "Wind check", "Return to stand", "Return to gate",
+)  # fmt: skip
 
 
 def audio_options() -> dict:

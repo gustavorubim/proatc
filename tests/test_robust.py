@@ -20,7 +20,7 @@ from proatc.config import Config
 from proatc.engine import Engine
 from proatc.flightlog import KEPT, FlightLog
 from proatc.flightplan import FlightPlan, from_simbrief
-from proatc.intents import INTENTS, Intent, parse_json
+from proatc.intents import INTENTS, ITEMS, Intent, parse_json
 from proatc.metar import parse_metar
 from proatc.navdata import AirportDB, build_index, parse_apt
 from proatc.navfix import parse_fixes, parse_holds, parse_mora, parse_msa
@@ -60,6 +60,7 @@ VALUES = {
     "approach": ("ILS", "RNAV", "NDB", "visual", None),
     "service": ("basic", "traffic", None),
     "compass": COMPASS,
+    "item": (*ITEMS, None),
 }
 
 

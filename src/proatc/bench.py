@@ -7,7 +7,7 @@
   prompt), not how well it hears you.
 - `proatc bench-intents`: a fixed set of transcripts, including the mistakes speech recognition
   makes, is run through the language model. Reports how often the intent and each value are right.
-  This calls the configured model (about sixty short requests: a fraction of a cent on OpenRouter).
+  This calls the configured model (about seventy-five short requests: a fraction of a cent on OpenRouter).
 
 Neither runs in CI: both need models or a key. Run them when changing stt.py, intents.py or the model.
 """
@@ -198,6 +198,21 @@ UNDERSTOOD = (
     ("socal approach request flight following", "", {"intent": "request_flight_following"}),
     ("cancel flight following", "", {"intent": "cancel_flight_following"}),
     ("santa paula traffic cessna one two three alpha bravo left downwind runway two two santa paula", "", {"intent": "traffic_call"}),
+    ("speedbird 123 request confirmation of assigned altitude", "", {"intent": "request_information", "item": "altitude"}),
+    ("confirm cleared level flight level one two zero", "", {"intent": "request_information", "item": "altitude", "altitude": 12000}),
+    ("say again the heading", "Speedbird one two three, turn left heading zero niner zero, descend altitude three thousand feet", {"intent": "say_again", "item": "heading"}),
+    ("verify squawk", "", {"intent": "request_information", "item": "squawk"}),
+    ("request runway assignment for arrival, verify expected runway", "", {"intent": "request_information", "item": "runway"}),
+    ("request approach information, current approach in use", "", {"intent": "request_information", "item": "approach"}),
+    ("how many track miles to touchdown", "", {"intent": "request_information", "item": "distance"}),
+    ("request wind check", "", {"intent": "request_information", "item": "wind"}),
+    ("thanks for your help, good day", "", {"intent": "acknowledge"}),
+    ("standby", "", {"intent": "acknowledge"}),
+    ("unable, speedbird 123", "Speedbird one two three, climb flight level three eight zero", {"intent": "unable"}),
+    ("we're not ready yet, need two more minutes", "", {"intent": "request_delay"}),
+    ("request return to stand", "", {"intent": "request_return"}),
+    ("request runway two seven left for departure", "", {"intent": "request_runway", "runway": "27L"}),
+    ("request frequency change to get the ATIS", "", {"intent": "report_leaving"}),
 )  # fmt: skip
 
 
