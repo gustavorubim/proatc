@@ -29,7 +29,7 @@ WORDS = {
     "request_descent": "lower", "request_direct": "direct", "request_hold": "holding", "request_deviation": "deviation",
     "request_approach": "approach", "request_visual": "visual approach", "request_diversion": "diversion",
     "request_flight_following": "radar service", "request_runway": "runway change", "report_leaving": "frequency change",
-    "request_weather": "weather information",
+    "request_weather": "weather information", "request_vectors": "vectors",
 }  # fmt: skip
 # Which controller a request belongs to: the one to send the pilot to when this one cannot help.
 BELONGS = {
@@ -39,7 +39,7 @@ BELONGS = {
     "request_low_approach": "tower", "request_circuits": "tower", "request_special_vfr": "tower",
     "request_climb": "radar", "request_descent": "radar", "request_direct": "radar", "request_hold": "radar",
     "request_deviation": "radar", "request_approach": "radar", "request_visual": "radar", "request_diversion": "radar",
-    "request_flight_following": "radar",
+    "request_flight_following": "radar", "request_vectors": "radar",
 }  # fmt: skip
 RUNWAY_TAILWIND_KT = 5  # a runway asked for is given with no more tailwind than this
 RUNWAY_CROSSWIND_KT = 25
@@ -107,7 +107,7 @@ def information(engine, intent, station, issue, raw, variation, callsign, hello)
     answer = {
         "altitude": _altitude, "heading": _heading, "speed": _speed, "squawk": _squawk, "runway": _runway,
         "frequency": _frequency, "qnh": _pressure, "clearance": _clearance, "route": _route, "approach": _approach,
-        "atis": _atis, "distance": _distance, "wind": _wind,
+        "atis": _atis, "distance": _distance, "wind": _wind, "transition": _transition,
     }.get(item)  # fmt: skip
     if answer is None:
         # "Confirm?" with nothing named is about the last instruction.
@@ -272,6 +272,59 @@ def _approach(engine, intent, station, issue, raw, variation) -> str:
     return f"{who} will advise the approach" if who else "no approach information"
 
 
+def _transition(engine, intent, station, issue, raw, variation) -> str:
+    """'How will I join the approach?': by vectors, or direct to an initial approach fix, from the arrival as planned."""
+    arrival = engine.flight.arrival
+    airport = station.airport if station.kind in ("approach", "tower") else destination(engine)
+    if airport is None:
+        return "no approach assigned, say destination"
+    if arrival and arrival.airport == airport.ident:
+        return _joining(engine, arrival, airport, raw)
+    here = station.airport is not None and station.airport.ident == airport.ident
+    expected = expected_approach(engine, airport, issue if here else None, raw)
+    star = _star_words(engine, airport)
+    if expected:
+        where = "" if here else f"{airport.spoken_name}, "
+        return f"{where}{star}expect vectors for the {expected}"
+    who = _who(engine, "approach", airport)
+    return f"{star}{who} will advise the approach" if who else "no approach information"
+
+
+def _joining(engine, arrival, airport, raw) -> str:
+    """How this arrival joins its approach, at the stage it is at."""
+    words = arrival.words()
+    if arrival.via:
+        fix = ifr._fix_word(engine, arrival.via, raw.get("lat", 0.0), raw.get("lon", 0.0))
+        return f"cleared {words} via {fix}"
+    if arrival.stage in ("intercept", "tower"):
+        return f"cleared {words}"
+    if arrival.hold:
+        return f"hold as published, then expect vectors for the {words}"
+    if arrival.stage in ("downwind", "base"):
+        return f"radar vectors for the {words}"
+    found = None
+    if "lat" in raw:
+        from .vectors import locate
+
+        found = ifr._initial_fix(
+            engine, airport, arrival, raw, locate(raw["lat"], raw["lon"], arrival.threshold, arrival.course_true)
+        )
+    if found:
+        return f"expect direct {ifr._fix_word(engine, found[0], *found[2])} for the {words}"
+    return f"expect vectors for the {words}"
+
+
+def _star_words(engine, airport) -> str:
+    """'the Inpip one Echo arrival, then ' while that arrival is still to be flown."""
+    from .procedures import spoken_name
+
+    flight = engine.flight
+    procedure = flight.star_procedure
+    if not procedure or not flight.star or flight.arrival:
+        return ""
+    return f"the {spoken_name(procedure, engine.navaids, airport.lat, airport.lon)} arrival, then "
+
+
 def _atis(engine, intent, station, issue, raw, variation) -> str:
     if station.airport and issue:
         return f"information {say.letter(issue.letter)} is current"
@@ -350,10 +403,14 @@ def unable(engine, station, raw, callsign, hello, faa: bool):
         feet = int(round(ifr._feet(raw) / 100) * 100)
         flight.cleared_ft = feet
         level = ifr._level(engine, feet, _level_ident(engine, station), faa)
-        return _reply(engine, f"{callsign}, {hello}roger, maintain {level}, advise when able", {"altitude": feet})
+        reply = _reply(engine, f"{callsign}, {hello}roger, maintain {level}, advise when able", {"altitude": feet})
+        reply.asks = {"altitude": expect["altitude"]}  # what "able now" will be given
+        return reply
     if "heading" in expect and flight.arrival:
         flight.arrival.heading = None  # no longer watched
-        return _reply(engine, f"{callsign}, {hello}roger, continue present heading, advise when able to turn")
+        reply = _reply(engine, f"{callsign}, {hello}roger, continue present heading, advise when able to turn")
+        reply.asks = {"heading": expect["heading"]}
+        return reply
     taxiing = not _airborne(raw) and flight.phase in (Phase.TAXI_OUT, Phase.TAXI_IN)
     if station.kind in ("ground", "tower") and (expect.keys() & {"hold_short", "crossing"} or taxiing):
         return _reply(engine, f"{callsign}, {hello}roger, hold position")
@@ -459,7 +516,11 @@ def runway_request(engine, intent, station, issue, raw, callsign, hello, faa: bo
         return None
     wanted = intent.runway
     if not wanted:
-        return _reply(engine, f"{callsign}, {hello}say the runway you request")
+        # "Request runway assignment" names none: the runway this flight has is said, and which one it wants is asked.
+        own = _own_runway(engine, airport)
+        landing = _airborne(raw) or flight.has_been_airborne
+        given = f"{'landing' if landing else 'departure'} runway {say.runway(own)}, " if own else ""
+        return _reply(engine, f"{callsign}, {hello}{given}say the runway you request")
     here = station.airport is not None
     weather = issue.weather if issue and here else weather_at(engine, airport, raw)
     why = acceptable_runway(airport, wanted, weather)

@@ -362,8 +362,10 @@ def test_vectors_to_the_ils_and_handoff_to_tower(world):
     )
     assert final.expect == {"heading": 240, "runway": "27"}
     assert engine.summary()["approach"] == "I L S runway 27"
-    assert [item["label"] for item in engine.suggestions(approach, ISSUE, at(51.03, 5.72, feet=2500, heading=240))][:3] == [
-        "Read back", "Check in", "Established"]  # fmt: skip
+    # "Report established" is asked: its answer comes next to the readback, which stays the call to make first.
+    offered = engine.suggestions(approach, ISSUE, at(51.03, 5.72, feet=2500, heading=240))
+    assert [item["label"] for item in offered][:3] == ["Read back", "Established", "Request vectors"]
+    assert [item["label"] for item in offered if item.get("primary")] == ["Read back"]
     engine.flight.pending = None  # read back: the next instruction waits for it
 
     assert engine.tick(approach, ISSUE, at(51.03, 5.72, feet=2500, heading=240)) is None  # not on the localiser yet

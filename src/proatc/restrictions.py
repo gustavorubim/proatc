@@ -60,6 +60,11 @@ def _legs(procedure: Procedure, kind: str, runway: str | None, route: list[str] 
 
 def path(engine, procedure: Procedure, kind: str, airport: Airport, runway: str | None, route: list[str] | None):
     """The procedure's track over the ground: the positions of its fixes in the order flown."""
+    return [(lat, lon) for _, lat, lon in named_path(engine, procedure, kind, airport, runway, route)]
+
+
+def named_path(engine, procedure: Procedure, kind: str, airport: Airport, runway: str | None, route: list[str] | None):
+    """The same track as (fix, lat, lon): the waypoints a flight that has left it can be sent back to."""
     if not engine.navfix:
         return []
     flown, ordered = _legs(procedure, kind, runway, route)
@@ -68,8 +73,8 @@ def path(engine, procedure: Procedure, kind: str, airport: Airport, runway: str 
     points = []
     for leg in flown:
         position = engine.navfix.position(leg.fix, airport.lat, airport.lon, 300) if leg.fix else None
-        if position and (not points or position != points[-1]):
-            points.append(position)
+        if position and (not points or position != points[-1][1:]):
+            points.append((leg.fix, *position))
     return points
 
 

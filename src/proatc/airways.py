@@ -143,6 +143,12 @@ def expand(route: list[str], airways: Airways | None, navfix, start: tuple[float
 
 def next_ahead(points: list[tuple[str, float, float]], lat: float, lon: float) -> str | None:
     """The route's next waypoint in front of the aircraft."""
+    found = next_point(points, lat, lon)
+    return found[0] if found else None
+
+
+def next_point(points: list[tuple], lat: float, lon: float) -> tuple | None:
+    """The route's next waypoint in front of the aircraft, as (name, lat, lon)."""
     if not points:
         return None
     nearest = min(range(len(points)), key=lambda i: distance_nm(lat, lon, points[i][1], points[i][2]))
@@ -150,8 +156,8 @@ def next_ahead(points: list[tuple[str, float, float]], lat: float, lon: float) -
         leg = distance_nm(points[nearest][1], points[nearest][2], points[nearest + 1][1], points[nearest + 1][2])
         # Closer to the next waypoint than the nearest one is: the nearest is behind.
         if distance_nm(lat, lon, points[nearest + 1][1], points[nearest + 1][2]) < leg:
-            return points[nearest + 1][0]
-    return points[nearest][0]
+            return tuple(points[nearest + 1])
+    return tuple(points[nearest])
 
 
 def open_airways(xplane_root: Path | None, cache: Path = CACHE) -> Airways:

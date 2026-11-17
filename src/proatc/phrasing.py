@@ -3,6 +3,10 @@
 The calls that fit the flight right now come from the rules engine (`Engine.suggestions`): each is already
 worded properly and carries its intent. The language model only picks the one that says what the pilot wants.
 When none does, it words the request itself; that call is then heard by the controller like any typed one.
+
+The controller's last transmission is given too: when it asked something, what the pilot types is most likely
+the answer, and the answers the engine offers are listed first and marked. The facts in an answer (the procedure,
+the waypoint, the level) come from those calls, never from the model.
 """
 
 from __future__ import annotations
@@ -11,8 +15,15 @@ import json
 import re
 
 PHRASER = """You help a pilot in a flight simulator say what they want to air traffic control in standard radio phraseology.
-You get what the pilot wants in their own words (in any language), the station they are tuned to, and a numbered
-list of standard calls that fit the flight right now. Answer with one JSON object and nothing else.
+You get what the pilot wants in their own words (in any language), the station they are tuned to, what that
+controller last said to the pilot, and a numbered list of standard calls that fit the flight right now. Answer with
+one JSON object and nothing else.
+
+0. If the controller's last transmission asks the pilot something (to confirm, verify, report, advise, check, or
+   "say intentions") and the pilot's words answer it or respond to it, even loosely ("yes", "no", "I am on it",
+   "I lost the route", "what should I say"), the call is that answer: choose the listed call marked
+   "(answers the controller)" that says what the pilot means. Never answer a question with facts that are not in
+   the pilot's words or in the listed calls.
 
 1. If one of the listed calls does what the pilot wants, even loosely, choose it: {"choice": <its number>}.
    A pilot who is lost on the ground wants progressive taxi; one who did not catch the last message wants
@@ -37,8 +48,20 @@ def _words(text: str) -> set[str]:
     return {word for word in re.findall(r"[a-z]+", text.lower()) if len(word) > 2 and word not in SMALL_WORDS}
 
 
+YES = {"yes", "affirm", "affirmative", "correct", "yeah", "able", "following"}
+NO = {"no", "negative", "not", "unable", "lost"}
+
+
 def closest(wanted: str, calls: list[dict]) -> dict | None:
-    """Without a language model: the listed call whose label shares the most words with what was typed."""
+    """Without a language model: the listed call whose label shares the most words with what was typed.
+    A plain yes or no is the matching answer to the controller's question, when one is offered."""
+    typed = set(re.findall(r"[a-z]+", wanted.lower()))
+    answers = [call for call in calls if call.get("answers")]
+    if answers and typed & (YES | NO):
+        yes = bool(typed & YES) and not typed & NO
+        found = next((call for call in answers if (call["intent"]["intent"] == "affirm") == yes), None)
+        if found:
+            return found
     asked = _words(wanted)
     best, score = None, 0
     for call in calls:
@@ -75,11 +98,12 @@ def _without_opening(call: str, opening: str) -> str:
     return call
 
 
-def phrase(wanted: str, station: str, opening: str, calls: list[dict], complete=None) -> dict:
+def phrase(wanted: str, station: str, opening: str, calls: list[dict], complete=None, last_said: str = "") -> dict:
     """{"text": the call, "intent": its intent or None} or {"note": why there is none}.
 
-    `calls` are the engine's suggestions; `opening` is how a call to this station begins ("Luton Ground,
-    Golf Alfa Bravo, "); `complete(system, user)` asks the language model, None when there is none."""
+    `calls` are the engine's suggestions, the answers to the controller's question first; `opening` is how a
+    call to this station begins ("Luton Ground, Golf Alfa Bravo, "); `complete(system, user)` asks the language
+    model, None when there is none; `last_said` is what this controller last said to the pilot."""
     wanted = wanted.strip()[:500]
     if not wanted:
         return {"note": "Type what you want first."}
@@ -88,8 +112,15 @@ def phrase(wanted: str, station: str, opening: str, calls: list[dict], complete=
         if found is None or found.get("needs"):
             return {"note": NO_MODEL}
         return {"text": found["text"], "intent": found["intent"]}
-    listed = "\n".join(f"{number}. {call['label']}: {call['text']}" for number, call in enumerate(calls, start=1))
-    asked = f"Station: {station}\nStandard calls that fit now:\n{listed or '(none)'}\n\nThe pilot wants: {wanted}"
+    listed = "\n".join(
+        f"{number}. {call['label']}{' (answers the controller)' if call.get('answers') else ''}: {call['text']}"
+        for number, call in enumerate(calls, start=1)
+    )
+    heard = last_said.strip()[:400] or "(nothing yet)"
+    asked = (
+        f"Station: {station}\nThe controller last said: {heard}\nStandard calls that fit now:\n{listed or '(none)'}\n\n"
+        f"The pilot wants: {wanted}"
+    )
     answer = _answer(complete(PHRASER, asked))
     choice = answer.get("choice")
     if isinstance(choice, int) and not isinstance(choice, bool) and 1 <= choice <= len(calls):

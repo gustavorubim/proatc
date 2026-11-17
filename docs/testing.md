@@ -246,7 +246,7 @@ def test_what_happens_as_a_sentence(rigs):
 
 ## Dead ends
 
-A call the rules engine has no rule for falls to the language model, which may only inform or decline: for the pilot, a dead end. `tests/deadends.py` builds the whole matrix on invented airports, without X-Plane or a model: every intent the app knows, on every kind of station (delivery, ground, tower, departure, approach, centre, oceanic, unicom, information service), in every main state of an instrument and a visual flight.
+A call the rules engine has no rule for falls to the language model, which may only inform or decline: for the pilot, a dead end. `tests/deadends.py` builds the whole matrix on invented airports, without X-Plane or a model: every intent the app knows, on every kind of station (delivery, ground, tower, departure, approach, centre, oceanic, unicom, information service), in every main state of an instrument and a visual flight, one of them just after the controller has asked a question ("confirm you are following the departure").
 
 ```bash
 uv run python -m tests.deadends            # the matrix, state by state
@@ -260,6 +260,9 @@ uv run python -m tests.deadends --missing  # only the unanswered calls a pilot p
 | Before | 4,000 | 2,209 | 2,220 | 742 |
 | After, the same intents | 4,000 | 163 | 2,220 | 0 |
 | After, with the new intents | 5,800 | 163 | 4,020 | 0 |
+| With a question asked, and yes, no and vectors | 6,324 | 167 | 4,318 | 0 |
+
+A yes or a no counts as plausible only where a question was asked. The four new cells with no rule are `other` and a blind call, in the new state.
 
 ## Fuzz tests
 
@@ -274,7 +277,7 @@ Every random choice is seeded. A failure message names the seed and the step (`s
 Not run in CI: they need the speech models or a language model.
 
 - `proatc bench-speech` speaks 25 radio calls in four voices, clean and through the radio effect with two levels of noise, and measures word errors and whether the numbers survive. `--quick` runs a third of it.
-- `proatc bench-intents` runs 76 transcripts through the configured model and checks the intent and every value. It costs a fraction of a cent on OpenRouter.
+- `proatc bench-intents` runs 89 transcripts through the configured model and checks the intent and every value. It costs a fraction of a cent on OpenRouter.
 
 Baseline on 0.8 (Windows, NVIDIA graphics card, `small.en`, default model `anthropic/claude-haiku-5.5`):
 

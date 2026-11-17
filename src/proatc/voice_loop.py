@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import asdict
 
-from . import phrasing, soundcheck, system_check
+from . import phrasing, questions, soundcheck, system_check
 from . import report as problem_report
 from .airspace import open_airspace
 from .airways import open_airways
@@ -66,6 +66,12 @@ GENERIC_CALLS = (
     "Say again", "Radio check", "Deviate left", "Deviate right", "Destination weather", "Clear of weather", "Unable",
     "Confirm level", "Verify altitude", "Expected approach", "Wind check", "Return to stand", "Return to gate",
 )  # fmt: skip
+
+
+def what_to_say(suggestions: list[dict]) -> list[dict]:
+    """The calls worth suggesting next: the answers to the controller's question first, never a generic one."""
+    answers = [call for call in suggestions if call.get("answers")]
+    return answers + [call for call in suggestions if call["label"] not in GENERIC_CALLS and not call.get("answers")]
 
 
 def audio_options() -> dict:
@@ -411,7 +417,9 @@ class Session:
                     ask = None
                     if self.controller:
                         ask = lambda system, user: self.controller.complete(system, user, max_tokens=160, temperature=0.0)  # noqa: E731
-                    result = phrasing.phrase(wanted, station.callsign, self.engine.opening(station, raw), calls, ask)
+                    said = self.engine.flight.last_said.get(station.key, "")
+                    opening = self.engine.opening(station, raw)
+                    result = phrasing.phrase(wanted, station.callsign, opening, calls, ask, said)
         except LlmError as error:
             result = {"note": str(error)}
         except Exception as error:
@@ -685,14 +693,19 @@ class Session:
     def _instructor(self, kind: str) -> None:
         """'What does that mean?' and 'what do I say now?', answered in the log, not on the radio."""
         if kind == "what_next":
-            calls = []
+            calls, asked = [], None
             if self.bridge.connected:
                 raw, station, issue = self._station_and_issue()
                 if station is not None and station.kind != "atis":
-                    calls = [s for s in self.engine.suggestions(station, issue, raw) if s["label"] not in GENERIC_CALLS]
+                    calls = what_to_say(self.engine.suggestions(station, issue, raw))
+                    asked = questions.open_question(self.engine, station)
             if calls:
                 text = calls[0]["text"].replace("{destination}", "your destination")
-                self.emit({"type": "coach", "text": f"You could say: “{text}”"})
+                if asked and calls[0].get("answers"):
+                    said = f"The controller asked: “{asked.text}”. You could answer: “{text}”"
+                    self.emit({"type": "coach", "text": said})
+                else:
+                    self.emit({"type": "coach", "text": f"You could say: “{text}”"})
             else:
                 self.emit({"type": "coach", "text": "Tune a controller's frequency first; then I can tell you what to say."})
             return
@@ -914,7 +927,7 @@ def _answer(transcript, intent, context, station_key, station, issue, raw, contr
         text = controller.reply(transcript, context, station_key, inform_only=True)
         context["fallback"] = True  # set after the model has read the context: it is for the journal
         # A controller without an instruction to give is a dead end for the pilot: say what would work here.
-        calls = [call for call in engine.suggestions(station, issue, raw) if call["label"] not in GENERIC_CALLS]
+        calls = what_to_say(engine.suggestions(station, issue, raw))
         if calls:
             context["way_out"] = calls[0]["text"].replace("{destination}", "your destination")
         return text if informational(text) else f"{engine._callsign(raw)}, unable, say again your request"

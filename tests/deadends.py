@@ -21,9 +21,10 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from proatc import questions
 from proatc.atis import Issue
 from proatc.centers import CenterIndex, parse_atc
-from proatc.engine import Engine
+from proatc.engine import Engine, Reply
 from proatc.flightplan import FlightPlan
 from proatc.intents import INTENTS, Intent
 from proatc.navdata import AirportDB, build_index
@@ -78,7 +79,7 @@ ISSUE = Issue("C", Weather(wind_dir_true=270, wind_kt=10, qnh_hpa=1013.2), 12 * 
 PLAN = FlightPlan("EGXX", "LFXX", "ALFAX UL9 BRAVO UM605 DELTA".split(), 36000, source="simbrief")
 KINDS = ("delivery", "ground", "tower", "departure", "approach", "centre", "oceanic", "unicom", "afis")
 STATES = (
-    "parked", "cleared", "taxiing", "holding short", "departing", "climbing", "cruising", "descending",
+    "parked", "cleared", "taxiing", "holding short", "departing", "climbing", "climbing, asked", "cruising", "descending",
     "approach, before vectors", "approach, vectors", "final", "landed", "taxiing in",
 )  # fmt: skip
 ON_GROUND = {"parked", "cleared", "taxiing", "holding short", "departing", "landed", "taxiing in"}
@@ -103,6 +104,10 @@ AIR_ONLY = {
 }  # fmt: skip
 # Said only in particular circumstances: an emergency to cancel, a hold to leave, a blind call to other traffic.
 SITUATIONAL = {"cancel_emergency", "cancel_hold", "clear_of_weather", "cancel_flight_following", "traffic_call", "other"}
+# A yes or a no answers a question: plausible where the controller has just asked one.
+ANSWERS = {"affirm", "negative"}
+# What departure asked in the state "climbing, asked": the call from a real flight that had no answer.
+OFF_TRACK = "{callsign}, you appear to be six miles off the departure track, confirm you are following the departure"
 
 
 def at(lat, lon, feet=0.0, heading=270.0, on_ground=False, speed=120.0):
@@ -143,6 +148,12 @@ def say(engine: Engine, intent: Intent, station, raw: dict, issue=ISSUE) -> None
     read_back(engine, station, raw)
 
 
+def ask(engine: Engine, station, text: str) -> None:
+    """The controller asks the pilot something, as `Engine.tick` records it."""
+    engine.flight.last_said[station.key] = text
+    questions.record(engine, station.key, Reply(text))
+
+
 def controlled(world: World, rules: str) -> dict:
     """An instrument or visual flight from Westfield to Eastfield, every station talked to on the way."""
     engine, snaps = world.engine(), {}
@@ -179,6 +190,9 @@ def controlled(world: World, rules: str) -> dict:
     read_back(engine, tower, climbing)
     say(engine, Intent("check_in"), departure, climbing)
     snap("climbing", {"tower": (tower, climbing), "departure": (departure, climbing), "centre": (west, climbing)})
+    ask(engine, departure, OFF_TRACK.format(callsign=engine._callsign(climbing)))
+    snap("climbing, asked", {"departure": (departure, climbing)})
+    engine.flight.question = None
     cruising = at(51.0, 0.5, cruise_ft, heading=90)
     say(engine, Intent("check_in"), west, cruising)
     engine.flight.cleared_ft = cruise_ft
@@ -268,6 +282,8 @@ def calls() -> list[tuple[str, Intent]]:
 def plausible(name: str, state: str) -> bool:
     """Whether a pilot would make this call in this state: the cells a dead end matters in."""
     intent = name.split(":")[0]
+    if intent in ANSWERS:
+        return state.endswith("asked")
     if intent in SITUATIONAL:
         return False
     if intent in GROUND_ONLY and state not in ON_GROUND:
