@@ -29,6 +29,7 @@ from .taxi import (
     parse_taxi,
     route_to_point,
     route_to_runway,
+    use_airport_runway_names,
 )
 from .vectors import locate
 
@@ -273,7 +274,8 @@ class Engine:
 
     def network(self, airport: Airport) -> TaxiNetwork:
         if airport.ident not in self._networks:
-            self._networks[airport.ident] = parse_taxi(self.db.record_lines(airport))
+            ends = [end for runway in airport.runways for end in (runway.end1, runway.end2)]
+            self._networks[airport.ident] = use_airport_runway_names(parse_taxi(self.db.record_lines(airport)), ends)
         return self._networks[airport.ident]
 
     def _callsign(self, raw: dict, intent: Intent | None = None) -> str:
