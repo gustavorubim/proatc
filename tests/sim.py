@@ -208,18 +208,19 @@ class SimQueue(queue.Queue):
 class SimBridge:
     """X-Plane: an aircraft flying east along a parallel, descending to whatever it was last cleared to.
 
-    A written COM frequency is reported `tune_delay` seconds later. `refuse` makes writes fail:
-    "error" (the sim refuses them) or "ignored" (accepted and never taken, as some add-on aircraft do)."""
+    A written COM frequency is reported `tune_delay` seconds later, `snap` kHz off (the name of the 8.33 kHz
+    channel it was snapped to). `refuse` makes writes fail: "error" (the sim refuses them) or "ignored"
+    (accepted and never taken, as some add-on aircraft do)."""
 
     def __init__(self, clock: SimTime, lat: float, lon: float, feet: float, khz: int, speed_ms: float = 230.0,
-                 cleared=None, tune_delay: float = 0.3, refuse: str | None = None):  # fmt: skip
+                 cleared=None, tune_delay: float = 0.3, refuse: str | None = None, snap: int = 0):  # fmt: skip
         self.clock, self.connected = clock, True
         self.lat, self.lon0, self.speed_ms = lat, lon, speed_ms
         self.feet, self._feet_at = feet, clock.monotonic()
         self.start = clock.monotonic()
         self.cleared = cleared or (lambda: None)  # the autopilot's target level
         self.radios = {"com1_khz": khz, "com2_khz": 0}
-        self.tune_delay, self.refuse = tune_delay, refuse
+        self.tune_delay, self.refuse, self.snap = tune_delay, refuse, snap
         self._landing: list[tuple[float, str, int]] = []  # (when the sim reports it, key, value)
         self.written: list[tuple[float, str, int]] = []
 
@@ -229,7 +230,7 @@ class SimBridge:
         if self.refuse == "error":
             raise SimUnavailable("X-Plane refused the change (403).")
         if self.refuse != "ignored":
-            self._landing.append((now + self.tune_delay, key, int(value)))
+            self._landing.append((now + self.tune_delay, key, int(value) + self.snap))
 
     def tune_by_hand(self, khz: int, key: str = "com1_khz") -> None:
         """The pilot turns the knob: at once, and ahead of any write still on its way."""
@@ -439,7 +440,7 @@ class Rig:
     """A session with its threads, on the world of tests/test_ifr.py, flying east toward Eastfield (LFXX)."""
 
     def __init__(self, tmp_path, *, miles_out: float = 57, feet: float = 13000, khz: int = WEST, copilot: str = "full",
-                 auto_tune: bool = False, allow_tuning: bool = True, tune_delay: float = 0.3, refuse: str | None = None,
+                 auto_tune: bool = False, allow_tuning: bool = True, tune_delay: float = 0.3, refuse: str | None = None, snap: int = 0,
                  chatter: str = "off", seed: int = 1, speak_pilot_text: bool = True):  # fmt: skip
         self.clock = SimTime()
         self.db = _world_db(tmp_path)
@@ -455,7 +456,7 @@ class Rig:
         destination = self.db.airport("LFXX")
         lon = destination.lon - miles_out / (60 * math.cos(math.radians(51.0)))
         self.bridge = SimBridge(self.clock, 51.0, lon, feet, khz, cleared=lambda: engine.flight.cleared_ft,
-                                tune_delay=tune_delay, refuse=refuse)  # fmt: skip
+                                tune_delay=tune_delay, refuse=refuse, snap=snap)  # fmt: skip
 
         config = Config()
         config.atc.copilot, config.atc.chatter, config.atc.second_radio = copilot, chatter, True

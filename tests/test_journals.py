@@ -35,7 +35,7 @@ class Recorder:
     def __init__(self, tmp_path, monkeypatch, ticks=True, seed=5):
         self.db, _, _ = ground_world(tmp_path)
         self.clock = 1_800_000_000.0
-        monkeypatch.setattr(flightlog, "time", SimpleNamespace(time=lambda: self.clock))
+        monkeypatch.setattr(flightlog, "time", SimpleNamespace(time=lambda: self.clock, monotonic=lambda: self.clock))
         self.engine = Engine(self.db, seed=seed, procedures=lambda ident: parse_cifp([]), clock=lambda: self.clock)
         self.ticks = ticks  # False: a controller that never spoke unprompted, as an older version might
         self.log = FlightLog()

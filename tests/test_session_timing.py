@@ -14,6 +14,8 @@ import random
 import pytest
 
 from proatc.intents import Intent
+from proatc.voice_loop import TUNE_WAIT_S
+from proatc.xpbridge import SimUnavailable
 from tests.sim import APPROACH, EAST, EAST_2, WEST, Rig, descend_to, handoff_to_approach, handoff_to_next_centre
 
 CALLSIGN = "Golf Alfa Bravo Charlie Delta"
@@ -250,12 +252,61 @@ def test_a_tune_the_sim_will_not_take_is_reported_once_and_the_pilot_tuning_it_b
     ok(rig, rig.settled_on(EAST, "Eastland Control", errors=1))
 
 
-def test_a_tune_the_sim_takes_late_is_checked_in_when_it_arrives(rigs):
-    rig = rigs(tune_delay=3.5)  # longer than the copilot waits
+def test_a_tune_the_sim_takes_after_the_copilot_stopped_waiting_is_checked_in_when_it_arrives(rigs):
+    rig = rigs(tune_delay=TUNE_WAIT_S + 3)  # longer than the copilot waits
     rig.controller_says(5, handoff_to_next_centre)
     rig.run_until(60)
     ok(rig, rig.settled_on(EAST, "Eastland Control", errors=1))
     assert len(rig.bridge.written) == 1
+
+
+def test_a_tune_the_sim_reports_after_three_and_a_half_seconds_is_no_error_and_is_checked_in(rigs):
+    rig = rigs(tune_delay=3.5)  # as a real sim has taken
+    rig.controller_says(5, handoff_to_next_centre)
+    rig.run_until(60)
+    ok(rig, rig.settled_on(EAST, "Eastland Control"))
+    assert len(rig.bridge.written) == 1
+
+
+def test_a_hand_off_the_sim_snaps_to_the_next_channel_name_is_no_error_and_is_checked_in(rigs):
+    rig = rigs(snap=5)  # 132.100 is reported as 132.105: the same frequency
+    rig.controller_says(5, handoff_to_next_centre)
+    rig.run_until(60)
+    station, flight = rig.station(), rig.engine.flight
+    assert rig.tuned_mhz() == "132.105" and not rig.errors(), rig.transcript()
+    assert station.callsign == "Eastland Control" and station.key in flight.contacted, rig.transcript()
+    assert flight.next_frequency is None and flight.pending is None and len(rig.bridge.written) == 1
+
+
+# A frequency tuned at the pilot's request in the app (the pilot's own click: no copilot involved).
+
+
+@pytest.mark.parametrize(
+    "asked, snap, reported",
+    [("118.420", 5, "118.425"), ("118.420", 10, "118.430"), ("118.420", -5, "118.415"), ("118.000", 5, "118.005"),
+     ("118.005", -5, "118.000")],
+)  # fmt: skip
+def test_a_frequency_the_sim_snaps_to_an_8_33_channel_name_next_to_it_is_tuned_without_an_error(rigs, asked, snap, reported):
+    rig = rigs(snap=snap)
+    rig.session.tune(asked)
+    assert rig.tuned_mhz() == reported and not rig.errors()
+    assert [item.text for item in rig.said("info")] == [f"COM1 tuned to {reported}"]
+
+
+@pytest.mark.parametrize("delay", [3.5, TUNE_WAIT_S], ids=["late", "as the wait ends"])
+def test_a_frequency_the_sim_reports_late_is_tuned_without_an_error(rigs, delay):
+    rig = rigs(tune_delay=delay)
+    rig.session.tune("118.420")
+    assert rig.tuned_mhz() == "118.420" and not rig.errors() and len(rig.said("info")) == 1
+
+
+@pytest.mark.parametrize("refuse, snap", [("ignored", 0), (None, 5)], ids=["stays where it was", "another channel"])
+def test_a_frequency_the_radio_does_not_take_is_reported_once(rigs, refuse, snap):
+    rig = rigs(refuse=refuse, snap=snap)
+    with pytest.raises(SimUnavailable, match="did not take 118.005 on COM1") as failed:
+        rig.session.tune("118.005")  # with `snap` the radio lands on 118.010, the next 8.33 kHz channel
+    assert rig.clock.monotonic() >= TUNE_WAIT_S and len(rig.bridge.written) == 1 and not rig.said("info")
+    assert rig.tuned_mhz() == ("127.500" if refuse else "118.010") and str(failed.value).count("118.005") == 1
 
 
 # ---- the same flight, many times ----------------------------------------------------------
