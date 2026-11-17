@@ -43,6 +43,7 @@ Windows is the system Pro ATC is developed and flown on. The Mac and Linux versi
 - Something wrong? Click **Save log** in the app and [open an issue](https://github.com/gustavorubim/proatc/issues/new/choose) with the two files.
 - [Installing on each system](docs/install.md): the first-run warnings, and what macOS and Linux need.
 - [How it works](docs/how-it-works.md): everything the controllers do.
-- [Development](docs/development.md): build from source, tests, releases.
+- [Development](docs/development.md): build from source, releases.
+- [Verifying a change](docs/testing.md): tests, golden flights, log replay, benchmarks.
 
 Licence: [MIT](LICENSE). Not affiliated with Laminar Research, Navigraph, SimBrief or OpenRouter. For flight simulation only.

@@ -373,3 +373,17 @@ def test_the_app_server_survives_malformed_commands(tmp_path, monkeypatch):
                 raise AssertionError(f"{command!r} raised {type(error).__name__}: {error}") from error
     assert not (tmp_path / ".env").exists()
     assert app.session.config.remote.enabled is False and app.session.config.llm.provider == "openrouter"
+
+
+def test_the_real_data_sweep_runs_clean_on_the_test_airports(world):
+    """The sweep tool is how real installations are checked; here it runs on the invented airports, so that it
+    cannot rot unnoticed and so that these airports are held to the same standard."""
+    from proatc.verify import pick_airports, sweep
+
+    db, _, _ = world
+    idents = pick_airports(db, 7)
+    assert sorted(idents) == ["EGTT", "EGXX", "EGZZ", "ESXX", "KXAA", "KXBB", "LFXX"]
+    report = sweep(db, idents)
+    assert report.airports == 7 and sum(report.checks.values()) > 600
+    assert report.failures == [], report.summary()
+    assert "7 airports" in report.summary() and "0 failures" in report.summary()

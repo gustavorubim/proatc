@@ -163,3 +163,15 @@ def test_oceanic_airspace_is_position_reports_not_radar(tmp_path):
     assert engine.suggestions(ocean, None, here)[0]["text"].endswith(
         "position, flight level three eight zero, estimating five one north zero one zero west"
     )
+
+
+def test_a_pressure_below_one_thousand_is_said_with_its_unit():
+    from proatc import phraseology as say
+    from proatc.atis import Issue
+    from proatc.weather import Weather
+
+    assert say.qnh(1013.2) == "Q N H one zero one three" and say.qnh(1000) == "Q N H one zero zero zero"
+    assert say.qnh(998.7) == "Q N H niner niner eight hectopascals"
+    low = Issue("A", Weather(qnh_hpa=985.0), 0.0)
+    assert Engine._pressure(low, False) == ("Q N H niner eight five hectopascals", 985.0)
+    assert Engine._pressure(low, True)[0] == "altimeter two niner zero niner"  # inches are never confused: no unit

@@ -266,7 +266,7 @@ class Engine:
         if faa:
             inches = round(issue.weather.qnh_hpa * 0.02953, 2)
             return f"altimeter {say.digits(f'{round(inches * 100):04d}')}", inches
-        return f"Q N H {say.digits(int(issue.weather.qnh_hpa))}", float(int(issue.weather.qnh_hpa))
+        return say.qnh(issue.weather.qnh_hpa), float(int(issue.weather.qnh_hpa))
 
     def _departure_runway(self, airport: Airport, issue: Issue | None, raw: dict) -> str | None:
         """The departure runway whose threshold is nearest the aircraft."""

@@ -62,4 +62,10 @@ Safety checks that hold for every instruction: a level you ask for is never give
 
 Airports come from your custom scenery first, in the order of `scenery_packs.ini`, as the sim itself chooses them: an add-on airport's taxiways, stands and frequencies replace the default ones. While the sim is paused, controllers and chatter are silent and the clocks for holds and reminders stop. A new flight starts clean when you load a plan after a flight, ask for a clearance after landing and parking, move the aircraft in the sim, or click "new flight".
 
-Still simplified: other aircraft are seen but not controlled; approach minima are the pilot's to judge (the controller does not refuse an approach for weather); a circling approach is cleared but the circling is not watched; airways between route waypoints are not followed, so the route is watched on the SID and the STAR only.
+The whole route: airways are read from the sim's `earth_awy.dat` (`airways.py`), so "ALFAX UL9 BRAVO" is known waypoint by waypoint. A direct is given to any waypoint ahead on the route, the waypoint names are passed to speech recognition, and in the cruise a flight more than ten miles off its filed route for two minutes is asked to confirm its routing. Latitude and longitude waypoints (`53N020W`) are understood.
+
+Oceanic airspace: in a sector the sim's data names as oceanic (Shanwick, Gander, New York Oceanic and others) there is no radar. The station is "Radio", nothing is "identified", no level bust or traffic is called, and the controller takes position reports ("roger, maintain flight level three six zero, report five three north zero two zero west") and clears level changes with "report reaching". Oceanic clearances with tracks and Mach numbers are not issued.
+
+A pressure below 1000 is said with its unit ("Q N H niner niner eight hectopascals"), as the rules require, so that it is not taken for inches.
+
+Still simplified: other aircraft are seen but not controlled; oceanic tracks, Mach number technique and SELCAL are not modelled; approach minima are the pilot's to judge (the controller does not refuse an approach for weather); a circling approach is cleared but the circling is not watched; airways between route waypoints are not followed, so the route is watched on the SID and the STAR only.

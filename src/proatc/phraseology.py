@@ -73,6 +73,12 @@ def altitude(feet: float) -> str:
     return " ".join(parts) or "zero"
 
 
+def qnh(hectopascals: float) -> str:
+    """'Q N H one zero one three'; below 1000 the unit is said, so that 998 is not taken for inches: 'Q N H niner niner eight hectopascals'."""
+    value = int(hectopascals)
+    return f"Q N H {digits(value)}" + (" hectopascals" if value < 1000 else "")
+
+
 def signed(value: float) -> str:
     """-2 -> 'minus two'; 15 -> 'one five'."""
     value = int(round(value))

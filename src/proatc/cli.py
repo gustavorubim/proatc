@@ -221,6 +221,9 @@ def main() -> int:
     sub.add_parser("run", help="start the push-to-talk voice loop")
     replay = sub.add_parser("replay", help="run a saved flight log (.json) through the engine again and show what differs")
     replay.add_argument("log")
+    speech = sub.add_parser("bench-speech", help="measure speech recognition on spoken radio calls (needs the speech models)")
+    speech.add_argument("--quick", action="store_true")
+    sub.add_parser("bench-intents", help="measure how well the language model understands a fixed set of calls (uses the model)")
     verify = sub.add_parser("verify-data", help="run the engine over many real airports of this X-Plane and report problems")
     verify.add_argument("--airports", type=int, default=300)
     server = sub.add_parser("serve", help="run the engine for the desktop app (started by the app itself)")
@@ -238,6 +241,24 @@ def main() -> int:
             return 0
         if args.command == "replay":
             return cmd_replay(config, args.log)
+        if args.command == "bench-speech":
+            from .bench import bench_speech
+            from .stt import SpeechToText
+            from .tts import TextToSpeech
+
+            bench_speech(TextToSpeech(config.tts), SpeechToText(config.stt), args.quick)
+            return 0
+        if args.command == "bench-intents":
+            from .bench import bench_intents
+            from .config import openrouter_key
+            from .llm import Controller
+
+            key = openrouter_key()
+            if not key and config.llm.provider != "local":
+                print("No OpenRouter key and no local model: nothing to measure.")
+                return 1
+            right, total, _ = bench_intents(Controller(config.llm, key))
+            return 0 if right >= total * 0.9 else 1
         if args.command == "verify-data":
             return cmd_verify_data(config, args.airports)
         if args.command == "airport":
