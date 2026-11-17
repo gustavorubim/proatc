@@ -13,7 +13,7 @@ from . import phraseology as say
 from .atis import AtisBook, runways_in_use, uses_faa_style
 from .events import Emit, console
 from .navdata import AirportDB, Station
-from .radio_fx import radio_effect
+from .radio_fx import radio_effect, radio_stream
 from .weather import Weather, from_snapshot
 from .xpbridge import magnetic_variation, tuned_khz
 
@@ -54,6 +54,42 @@ def observe(db: AirportDB, airport, state: dict) -> Weather | None:
         if reported:
             return reported
     return from_snapshot(state, airport.elev_ft)
+
+
+def prime(pieces):
+    """Wait for the first piece of sound, then give all of them: what follows starts playing at once."""
+    first = next(pieces, None)
+
+    def all_of_them():
+        try:
+            if first is not None:
+                yield first
+            yield from pieces
+        finally:
+            close = getattr(pieces, "close", None)
+            if close:
+                close()
+
+    return all_of_them()
+
+
+def transmit(tts, player, text: str, voice: dict, radio, on_sound=None) -> int:
+    """Say `text` on the frequency. With a voice engine that gives sound in pieces, it is played as it is made:
+    the controller starts speaking before the sentence is finished. Returns the player's ticket."""
+    if getattr(tts, "streams", False) and hasattr(player, "play_stream"):
+        pieces, rate = tts.stream(text, **voice)
+        if radio.enabled:
+            pieces = radio_stream(pieces, rate, radio.noise)
+        pieces = prime(pieces)
+        if on_sound:
+            on_sound()
+        return player.play_stream(pieces, rate)
+    samples, rate = tts.speak(text, **voice)
+    if radio.enabled:
+        samples = radio_effect(samples, rate, radio.noise)
+    if on_sound:
+        on_sound()
+    return player.play(samples, rate)
 
 
 def station_voice(tts, station) -> dict:
@@ -184,10 +220,7 @@ class AtisBroadcaster(threading.Thread):
         if reply.event:
             event["event"] = reply.event
         self.emit(event)
-        samples, rate = self.tts.speak(reply.text, **station_voice(self.tts, station))
-        if self.config.radio.enabled:
-            samples = radio_effect(samples, rate, self.config.radio.noise)
-        ticket = self.player.play(samples, rate)
+        ticket = transmit(self.tts, self.player, reply.text, station_voice(self.tts, station), self.config.radio)
         self.player.wait(ticket, should_stop=lambda: self._halt.is_set() or self.busy.is_set())
         if self.after:
             self.after()
@@ -209,7 +242,12 @@ class AtisBroadcaster(threading.Thread):
             self._chatter_key = station.key
             self._chatter_at = now + self._rng.uniform(*chatter.FIRST_AFTER_S)
             return
-        if mode not in ("some", "busy") or now < self._chatter_at or now < self._chatter_until:
+        if mode not in ("some", "busy"):
+            if now < self._chatter_until:  # switched off in the settings: an exchange that is playing stops too
+                self.player.stop()
+                self._chatter_until = 0.0
+            return
+        if now < self._chatter_at or now < self._chatter_until:
             return
         flight = self.engine.flight
         if flight.pending is not None or getattr(self.player, "playing", False):

@@ -35,8 +35,7 @@ from .navdata import AirportDB
 from .navfix import open_navfix
 from .procedures import NavaidNames, route_fixes
 from .ptt import PushToTalk
-from .radio import AtisBroadcaster, SimClock, briefing, current_station, observe, station_voice
-from .radio_fx import radio_effect
+from .radio import AtisBroadcaster, SimClock, briefing, current_station, observe, station_voice, transmit
 from .replay import snapshot
 from .stt import SpeechToText
 from .tts import TextToSpeech, download_models, models_present
@@ -133,7 +132,15 @@ class Session:
         self.stt = SpeechToText(config.stt)
         if self.download_models and not models_present():
             download_models(lambda text: emit({"type": "status", "text": text}))
-        self.tts = TextToSpeech(config.tts)
+        try:
+            self.tts = TextToSpeech(config.tts)
+        except Exception as error:
+            if config.tts.engine == "kokoro":
+                raise
+            # The trial engine could not be loaded (its model is fetched the first time): the usual one is used.
+            emit({"type": "error", "text": f"The Phonon voice engine could not be loaded ({error}). Using Kokoro."})
+            config.tts.engine = "kokoro"
+            self.tts = TextToSpeech(config.tts)
         self.tts.speak("Radio check.")  # the first synthesis is several seconds slower than the rest
         emit({"type": "status", "text": f"Speech-to-text on {self.stt.device.upper()}."})
 
@@ -206,6 +213,8 @@ class Session:
         if not self.ready:
             return
         audio, ptt, atc = cleaned.get("audio", {}), cleaned.get("ptt", {}), cleaned.get("atc", {})
+        if "engine" in cleaned.get("tts", {}):
+            self._use_voice_engine(cleaned["tts"]["engine"])
         if "input_device" in audio:
             self.recorder.device = audio["input_device"]
         if "output_device" in audio:
@@ -218,6 +227,24 @@ class Session:
             self.engine.holding = atc["holding"]
         if "traffic" in atc:
             self.engine.traffic_enabled = atc["traffic"]
+
+    def _use_voice_engine(self, name: str) -> None:
+        """Change the voice engine now. If the new one cannot be loaded, the one in use stays."""
+        previous = self.tts.engine_name
+        if name == previous:
+            return
+        self.emit({"type": "info", "text": f"Loading the {name.title()} voices (the first time, they are downloaded)..."})
+        try:
+            self.tts.use(name)
+            self.tts.speak("Radio check.")
+        except Exception as error:
+            self.tts.use(previous)
+            self.config.tts.engine = previous
+            save_overrides({"tts": {"engine": previous}})
+            self.emit({"type": "error", "text": f"The {name.title()} voices could not be loaded: {error}"})
+            return
+        self.options["voices"] = self.tts.voices()
+        self.emit({"type": "info", "text": f"Voices: {name.title()}."})
 
     def capture_ptt(self, seconds: float = 15.0) -> None:
         """Bind push-to-talk to the next keyboard key or joystick button pressed."""
@@ -579,13 +606,12 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
         engine.flight.last_event = ""
     emit(event)
 
-    samples, rate = tts.speak(answer, **station_voice(tts, station))
-    if config.radio.enabled:
-        samples = radio_effect(samples, rate, config.radio.noise)
-    voiced = time.perf_counter()
-    emit({"type": "timings", "listen": heard - started, "think": thought - heard, "voice": voiced - thought,
-          "total": voiced - started})  # fmt: skip
-    ticket = player.play(samples, rate)
+    def timings() -> None:  # when the first sound is ready to play
+        voiced = time.perf_counter()
+        emit({"type": "timings", "listen": heard - started, "think": thought - heard, "voice": voiced - thought,
+              "total": voiced - started})  # fmt: skip
+
+    ticket = transmit(tts, player, answer, station_voice(tts, station), config.radio, timings)
     player.wait(ticket, should_stop=ptt.pressed.is_set)  # pressing the key again cuts the controller off
 
 

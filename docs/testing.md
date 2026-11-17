@@ -94,6 +94,16 @@ Baseline on 0.8 (Windows, NVIDIA graphics card, `small.en`, default model `anthr
 | `bench-speech`, by condition | clean 8.0%, radio effect 7.5%, noisy radio 9.3% word errors |
 | `bench-intents`, 61 transcripts | 60 understood exactly (98%); the miss was a blind call taken for a position report, which the engine treats the same way |
 
+The two voice engines, compared on 0.9 (same machine; `proatc bench-speech --engine kokoro` and `--engine phonon`):
+
+| | Kokoro | Phonon (trial) |
+|---|---|---|
+| Wait from the reply being known to the first sound, 16 calls | median 1.5 s, longest 6.0 s | median 0.25 s, longest 1.9 s |
+| Word errors when heard back, 300 calls | 8.0% | 9.0% |
+| Calls with every number right | 282 of 300 (94%) | 276 of 300 (92%) |
+
+Phonon made 1 of 16 calls more slowly than it is spoken, on a 24-thread processor: on a slower one its speech may break up. Nobody has listened to either result: the clarity figures are speech recognition hearing the voices back.
+
 Run the relevant one before and after changing `stt.py`, the recognition prompt, `intents.py` or the default model, and put both results in the pull request.
 
 ## Releasing

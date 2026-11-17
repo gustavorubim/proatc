@@ -102,7 +102,9 @@ def bench_speech(tts, stt, quick: bool = False, report=print) -> list[SpeechRow]
     from .radio_fx import radio_effect
 
     phrases = SPOKEN[::3] if quick else SPOKEN
-    voices = [voice for voice in VOICES if voice in tts.voices()] or tts.voices()[:2]
+    # Two men and two women, American and British, whichever engine is in use.
+    voices = [voice for voice in VOICES if voice in tts.voices()]
+    voices = voices or [next(v for v in tts.voices() if v.startswith(group)) for group in ("am", "af", "bm", "bf")]
     rows = []
     for voice in voices[:2] if quick else voices:
         spoken = [tts.speak(phrase, voice=voice, speed=1.0) for phrase in phrases]  # once per voice: the slow part

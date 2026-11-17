@@ -223,6 +223,7 @@ def main() -> int:
     replay.add_argument("log")
     speech = sub.add_parser("bench-speech", help="measure speech recognition on spoken radio calls (needs the speech models)")
     speech.add_argument("--quick", action="store_true")
+    speech.add_argument("--engine", choices=("kokoro", "phonon"), help="the voice engine to measure (default: the one in use)")
     sub.add_parser("bench-intents", help="measure how well the language model understands a fixed set of calls (uses the model)")
     verify = sub.add_parser("verify-data", help="run the engine over many real airports of this X-Plane and report problems")
     verify.add_argument("--airports", type=int, default=300)
@@ -246,6 +247,8 @@ def main() -> int:
             from .stt import SpeechToText
             from .tts import TextToSpeech
 
+            if args.engine:
+                config.tts.engine = args.engine
             bench_speech(TextToSpeech(config.tts), SpeechToText(config.stt), args.quick)
             return 0
         if args.command == "bench-intents":

@@ -4,6 +4,7 @@ chatter, the debrief, name hints, the local model and the view for other devices
 import json
 import random
 import threading
+import time
 
 import httpx
 import pytest
@@ -405,6 +406,14 @@ def test_chatter_plays_on_an_idle_frequency_and_keeps_out_of_the_way(tmp_path):
     caster.config.atc.chatter = "off"
     caster._chatter(tower, state)
     assert player.played == 1
+    # Switched off in the settings while an exchange is playing: it stops at once.
+    stopped = []
+    player.stop = lambda: stopped.append(True)
+    caster._chatter_until = time.monotonic() + 30
+    caster._chatter(tower, state)
+    assert stopped == [True] and caster._chatter_until == 0.0
+    caster._chatter(tower, state)
+    assert stopped == [True]
 
 
 # ---- debrief ------------------------------------------------------------------
