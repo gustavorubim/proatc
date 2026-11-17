@@ -17,6 +17,10 @@ Every event is a dict with a "type":
   log_saved  {path}                             the flight log was written to this file
   chatter    {station, callsign, said, answered} another aircraft heard on the frequency (sound only)
   debrief    {score, verdict, findings, ...}    the review of the flight's radio work (see debrief.py)
+  sound_check {state, step, total, title, text, question, verdict, steps}
+                                                the sound check (soundcheck.py): state is "running", "question"
+                                                (answer with yes or no), "done" (with the verdict) or "refused"
+  report_saved {path, issue}                    the problem report was written to this zip
 """
 
 from __future__ import annotations
@@ -57,6 +61,10 @@ def console(event: dict) -> None:
         from .debrief import as_text
 
         print(as_text(event))
+    elif kind == "sound_check" and event.get("state") in ("refused", "done"):
+        print(f"  ({event.get('verdict') or event.get('text')})")
+    elif kind == "report_saved":
+        print(f"  (problem report saved to {event['path']}: attach it to an issue at {event['issue']})")
     elif kind == "log_saved":
         print(f"  (flight log saved to {event['path']})")
     elif kind == "atis":

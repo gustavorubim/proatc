@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 
 import numpy as np
 import sounddevice as sd
@@ -52,6 +53,32 @@ def play(samples: np.ndarray, sample_rate: int, device: int | None = None) -> No
 STREAM_STEP_S = 0.1
 
 
+@dataclass
+class Meter:
+    """What a player can tell about its own sound without anyone listening: for the sound check."""
+
+    opened: int = 0  # output streams (or plays) that started
+    frames: int = 0  # samples handed to the sound card
+    underruns: int = 0  # times the sound card ran out of sound to play
+    failed: str = ""  # why a stream could not be opened or written, if one could not
+
+
+def play_underruns() -> int:
+    """Whether the last `sd.play` ran out of sound, as PortAudio reports it (1 or 0)."""
+    try:
+        return int(bool(sd.get_status().output_underflow))
+    except Exception:
+        return 0  # nothing was played yet, or a stand-in sound card that does not report it
+
+
+def device_name(device: int | None, kind: str) -> str:
+    """The name of a sound device ("input" or "output"); the system's default when `device` is None."""
+    try:
+        return str(sd.query_devices(device, kind)["name"])
+    except Exception:
+        return "unknown"
+
+
 class Player:
     """One voice at a time on the speakers; a new transmission cuts off the previous one."""
 
@@ -62,6 +89,7 @@ class Player:
         self._lock = threading.Lock()
         self._generation = 0
         self._ends_at = 0.0
+        self.meter: Meter | None = None  # set by the sound check to count what is played
 
     def play(self, samples: np.ndarray, sample_rate: int) -> int:
         """Start playing and return a ticket for `wait`."""
@@ -71,6 +99,9 @@ class Player:
             self._generation += 1
             sd.stop()
             sd.play(samples, sample_rate, device=self.device)
+            if self.meter is not None:
+                self.meter.opened += 1
+                self.meter.frames += len(samples)
             self._ends_at = time.monotonic() + len(samples) / sample_rate
             return self._generation
 
@@ -89,16 +120,24 @@ class Player:
         import time
 
         step = max(int(sample_rate * STREAM_STEP_S), 1)  # written in short steps, so a cut-off is heard at once
+        meter = self.meter
         try:
             with sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32", device=self.device) as out:
+                if meter is not None:
+                    meter.opened += 1
                 for piece in pieces:
                     piece = np.ascontiguousarray(piece, dtype=np.float32).reshape(-1, 1)
                     for start in range(0, len(piece), step):
                         if self._generation != ticket:
                             out.abort()
                             return
-                        out.write(piece[start : start + step])
+                        underflowed = out.write(piece[start : start + step])
+                        if meter is not None:
+                            meter.frames += len(piece[start : start + step])
+                            meter.underruns += bool(underflowed)  # PortAudio filled a gap with silence
         except Exception as error:
+            if meter is not None:
+                meter.failed = f"{type(error).__name__}: {error}"
             print(f"Audio output failed: {type(error).__name__}: {error}", flush=True)
         finally:
             close = getattr(pieces, "close", None)

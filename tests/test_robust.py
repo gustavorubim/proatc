@@ -350,20 +350,21 @@ def test_a_long_flight_stays_fast_and_bounded(world):
 def test_the_app_server_survives_malformed_commands(tmp_path, monkeypatch):
     monkeypatch.setattr(config_module, "PROJECT_DIR", tmp_path)
     monkeypatch.setattr("proatc.server.PROJECT_DIR", tmp_path)
+    monkeypatch.setattr("proatc.voice_loop.PROJECT_DIR", tmp_path)
     app = AppServer(Config(), 0, "token")
     seen: list[dict] = []
     app.emit = seen.append
     rng = random.Random(3)
     names = ["set_key", "simbrief", "plan", "clear_plan", "tune", "settings", "capture_ptt", "explain", "what_next", "save_log",
-             "reset_cost", "ptt", "say", "click", "debrief", "new_flight", "chart", "nope", None, 5]  # fmt: skip
+             "reset_cost", "ptt", "say", "click", "debrief", "new_flight", "chart", "sound_check", "sound_check_answer", "report",
+             "nope", None, 5]  # fmt: skip
     values = [None, "", "x" * 5000, 0, -1, 1e308, [], {}, {"a": {"b": []}}, True, "118.100", {"remote": {"enabled": "yes"}}]
     handled = (ValueError, KeyError, TypeError, AttributeError)  # what the connection handler reports to the user
+    fields = ["key", "user", "destination", "cruise", "route", "mhz", "changes", "down", "text", "intent", "ident", "heard",
+              "hide"]  # fmt: skip
     for _ in range(600):
         command = {"cmd": rng.choice(names)}
-        for key in rng.sample(
-            ["key", "user", "destination", "cruise", "route", "mhz", "changes", "down", "text", "intent", "ident"],
-            rng.randint(0, 4),
-        ):
+        for key in rng.sample(fields, rng.randint(0, 4)):
             command[key] = rng.choice(values)
         if command["cmd"] == "set_key":
             command["key"] = ""  # never write a key file from a test

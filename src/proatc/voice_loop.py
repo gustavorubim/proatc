@@ -17,7 +17,8 @@ import threading
 import time
 from dataclasses import asdict
 
-from . import phrasing
+from . import phrasing, soundcheck, system_check
+from . import report as problem_report
 from .airspace import open_airspace
 from .airways import open_airways
 from .atis import AtisBook
@@ -97,6 +98,11 @@ class Session:
         self._last_atc: tuple[str, str] | None = None
         self._read_back: object | None = None  # the instruction the copilot has already read back
         self._tune_failed: str | None = None
+        self.computer: list[dict] = []  # what could be checked about this computer (system_check.py)
+        self._checking = False  # a sound check is queued or running
+        self._answers: queue.Queue = queue.Queue()  # the person's answers to the sound check's questions
+        checked = soundcheck.last(PROJECT_DIR / "logs")
+        self.last_sound_check: str = checked.get("verdict", "") if isinstance(checked, dict) else ""
 
     # ---- events -------------------------------------------------------------
 
@@ -228,6 +234,9 @@ class Session:
         self.second_radio.start()
         self.ptt = PushToTalk(config.ptt.key, on_down=lambda: self.jobs.put(("voice", None, None)))
         self.ptt.start()
+        self.computer = system_check.this_computer(self.ptt.listening())
+        for note in system_check.startup_notes(self.computer):
+            emit({"type": "info", "text": note})
         self.joystick = JoystickButtons(self._joystick_button, config.ptt.joystick, config.ptt.joystick_button)
         self.joystick.start()
         self.recorder = Recorder(config.audio.input_device)
@@ -414,6 +423,81 @@ class Session:
         path = self.log.save(PROJECT_DIR / "logs", extra)
         self.emit({"type": "log_saved", "path": str(path)})
 
+    # ---- the sound check and the problem report -----------------------------
+
+    def _sound_check_refused(self, busy: bool, running: bool) -> str | None:
+        connected = self.ready and self.bridge.connected
+        state = self.bridge.snapshot() if connected else {}
+        if busy and not self.busy.is_set() and connected:
+            # The ATIS repeating on the tuned frequency is not someone talking: the check may cut it off.
+            _, station = current_station(self.db, state)
+            busy = station is not None and station.kind != "atis"
+        return soundcheck.refusal(connected, state, busy, running)
+
+    def start_sound_check(self) -> None:
+        """Queue the sound check, unless it would talk over a flight. Only ever started by the person."""
+        reason = self._sound_check_refused(self.busy.is_set() or getattr(self.player, "playing", False), self._checking)
+        if reason:
+            self.emit({"type": "sound_check", "state": "refused", "text": reason})
+            return
+        self._checking = True
+        while not self._answers.empty():
+            self._answers.get_nowait()  # an answer left from a check that was stopped
+        self.jobs.put(("sound_check", None, None))
+
+    def answer_sound_check(self, heard: bool | None) -> None:
+        """The person's yes or no; None stops the check."""
+        if self._checking:
+            self._answers.put(heard)
+
+    def _ask(self, step: int, total: int, title: str, shown: str, question: str) -> bool | None:
+        moving = self._sound_check_refused(busy=False, running=False)
+        if moving:  # the aircraft began to move during the check: stop before the next sound
+            self.emit({"type": "info", "text": f"Sound check stopped. {moving}"})
+            return None
+        self.emit({"type": "sound_check", "state": "question", "step": step, "total": total, "title": title,
+                   "text": shown, "question": question})  # fmt: skip
+        try:
+            return self._answers.get(timeout=soundcheck.ANSWER_WAIT_S)
+        except queue.Empty:
+            return None
+
+    def _tell(self, step: int, total: int, title: str, text: str) -> None:
+        self.emit({"type": "sound_check", "state": "running", "step": step, "total": total, "title": title, "text": text})
+
+    def _sound_check(self) -> None:
+        """Run the check (from the job queue, so nothing else talks meanwhile) and record what it found."""
+        try:
+            reason = self._sound_check_refused(busy=False, running=False)  # the aircraft may have moved since
+            if reason:
+                self.emit({"type": "sound_check", "state": "refused", "text": reason})
+                return
+            self.second_radio.hold.set()
+            self.second_radio.player.stop()
+            kit = soundcheck.Kit(self.tts, self.player, self.second_radio, self.recorder, self.config,
+                                 lambda: soundcheck.load_engines(self.tts, self.config.tts))  # fmt: skip
+            outcome = soundcheck.run(kit, self._ask, self._tell)
+        except Exception as error:
+            self.emit(
+                {"type": "sound_check", "state": "done", "verdict": f"The sound check failed: {type(error).__name__}: {error}"}
+            )
+            return
+        finally:
+            self.second_radio.hold.clear()
+            self._checking = False
+        self.log.note("sound_check", result=outcome)
+        soundcheck.keep(outcome, PROJECT_DIR / "logs")
+        self.last_sound_check = outcome["verdict"]
+        self.emit({"type": "sound_check", "state": "done", "verdict": outcome["verdict"],
+                   "steps": [{"title": step["title"], "text": step["shown"], "answer": step["answer"],
+                              "problems": step["problems"]} for step in outcome["steps"]]})  # fmt: skip
+
+    def write_report(self, hide: bool) -> None:
+        """Write the problem report and tell the window where it is."""
+        computer = self.computer or system_check.this_computer(None)
+        path = problem_report.write(PROJECT_DIR, self.config, hide, computer)
+        self.emit({"type": "report_saved", "path": str(path), "issue": problem_report.ISSUE_URL})
+
     def run_forever(self) -> None:
         try:
             while True:
@@ -429,6 +513,8 @@ class Session:
                             self._instructor(kind)
                         elif kind == "debrief":
                             self.debrief()
+                        elif kind == "sound_check":
+                            self._sound_check()
                         else:
                             self._spoken_for_you(text)
                             _respond(text, kind, intent, time.perf_counter(), self.config, self.bridge, self.db, self.book,
