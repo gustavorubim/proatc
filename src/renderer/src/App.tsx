@@ -193,6 +193,21 @@ function DebriefDialog({ debrief, onClose }: { debrief: Debrief; onClose: () => 
             ))}
           </ul>
         )}
+        <h3 className="health-head">Flight health</h3>
+        {debrief.health.length === 0 ? (
+          <p className="muted">Nothing to report: every frequency answered and every hand-off was followed.</p>
+        ) : (
+          <ul className="findings">
+            {debrief.health.map((finding, index) => (
+              <li key={index} className="finding finding-health" title={finding.detail}>
+                <span className="mono">{finding.time}</span>
+                <span>
+                  <strong>{finding.title}.</strong> {finding.text}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
     </div>
   )

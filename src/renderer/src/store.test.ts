@@ -109,10 +109,20 @@ describe('store', () => {
       say_again: 0,
       findings: [{ time: '10:02:11', kind: 'readback', text: 'Readback corrected by the controller', said: '' }],
       score: 94,
-      verdict: 'Good radio work, with a few things to tidy up.'
+      verdict: 'Good radio work, with a few things to tidy up.',
+      health: [
+        {
+          time: '10:31:02',
+          kind: 'handoff_missed',
+          title: 'Hand-off not followed',
+          text: 'Handed to Westfield Approach on 128.525, which was not tuned within two minutes.',
+          detail: 'station: Eastland Center; frequency: 128.525'
+        }
+      ]
     }
     const open = feed([debrief])
     expect(open.debrief?.score).toBe(94)
+    expect(open.debrief?.health[0].title).toBe('Hand-off not followed')
     expect(open.log).toHaveLength(0)
     expect(reduce(open, { type: 'close_debrief' }).debrief).toBeNull()
 
