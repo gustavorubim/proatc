@@ -5,7 +5,7 @@
 // accepts the app's connection. Nothing is read from or written to the real user data folder.
 // Speech models are not downloaded and no microphone is needed.
 //
-// Usage: node scripts/smoke-test.mjs [path to "Pro ATC.exe"]   (default: dist/win-unpacked)
+// Usage: node scripts/smoke-test.mjs [path to the app's executable]   (default: the unpacked build in dist/)
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
@@ -14,7 +14,12 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const exe = process.argv[2] ?? join(root, 'dist', 'win-unpacked', 'Pro ATC.exe')
+const UNPACKED = {
+  win32: join('win-unpacked', 'Pro ATC.exe'),
+  darwin: join(`mac-${process.arch}`, 'Pro ATC.app', 'Contents', 'MacOS', 'Pro ATC'),
+  linux: join('linux-unpacked', 'proatc')
+}
+const exe = process.argv[2] ?? join(root, 'dist', UNPACKED[process.platform] ?? UNPACKED.win32)
 if (!existsSync(exe)) {
   console.error(`Packaged app not found at ${exe}. Run "npm run pack:dir" first.`)
   process.exit(1)
@@ -23,7 +28,9 @@ if (!existsSync(exe)) {
 const work = mkdtempSync(join(tmpdir(), 'proatc-smoke-'))
 const result = join(work, 'result.txt')
 console.log(`Self-testing ${exe}\nData folder: ${work}`)
-const run = spawnSync(exe, [], {
+// A Linux test machine has no user namespaces for Chromium's sandbox, and no display unless one is provided.
+const args = process.platform === 'linux' ? ['--no-sandbox'] : []
+const run = spawnSync(exe, args, {
   env: {
     ...process.env,
     PROATC_SELFTEST: result,

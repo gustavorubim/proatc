@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import type { Connection } from '../shared/protocol'
 import { type Engine, engineEnv, enginePaths, engineSteps, freePort, startEngine } from './engine'
-import { checkForUpdates, getUpdateState, installUpdate, startUpdates } from './updates'
+import { checkForUpdates, getUpdateState, installUpdate, openReleases, startUpdates } from './updates'
 
 // Tests point the app at a throwaway data folder so they never touch the real one.
 if (process.env.PROATC_USER_DATA) app.setPath('userData', process.env.PROATC_USER_DATA)
@@ -163,6 +163,7 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('update-state', () => getUpdateState())
   ipcMain.handle('update-check', () => checkForUpdates(true))
   ipcMain.handle('update-install', () => installUpdate(() => engine?.stop()))
+  ipcMain.handle('update-open', () => openReleases())
 
   void app.whenReady().then(async () => {
     createWindow()

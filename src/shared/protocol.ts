@@ -159,7 +159,7 @@ export type Command =
   | { cmd: 'new_flight' }
 
 export interface UpdateState {
-  state: 'none' | 'checking' | 'downloading' | 'ready' | 'error'
+  state: 'none' | 'checking' | 'downloading' | 'ready' | 'error' | 'available'
   version?: string
   percent?: number
   message?: string

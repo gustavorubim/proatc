@@ -216,11 +216,18 @@ def find_apt_dat(xplane_path: str | None = None) -> Path:
     candidates = []
     if xplane_path:
         candidates.append(Path(xplane_path))
-    install_file = Path(os.environ.get("LOCALAPPDATA", "")) / "x-plane_install_12.txt"
-    if install_file.exists():
-        candidates += [
-            Path(line.strip()) for line in install_file.read_text(encoding="utf-8", errors="ignore").splitlines() if line.strip()
-        ]
+    # X-Plane's installer records where it put the sim: in a different place on each system.
+    for install_file in (
+        Path(os.environ.get("LOCALAPPDATA", "")) / "x-plane_install_12.txt",  # Windows
+        Path.home() / "Library" / "Preferences" / "x-plane_install_12.txt",  # macOS
+        Path.home() / ".x-plane" / "x-plane_install_12.txt",  # Linux
+    ):
+        if install_file.is_file():
+            candidates += [
+                Path(line.strip())
+                for line in install_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                if line.strip()
+            ]
     for root in candidates:
         if (root / APT_RELATIVE).exists():
             return root / APT_RELATIVE

@@ -1,7 +1,8 @@
 name: Release
 
-# Push a tag like v0.2.0 to build the Windows installer and attach it to a draft GitHub
-# release. Review the draft, then publish it.
+# Push a tag like v0.2.0 to build the installers (Windows, macOS on Apple Silicon, Linux) and
+# attach them to a draft GitHub release. Review the draft, then publish it: only once every
+# build job has finished, or the release goes out without its files.
 #
 # A tag with a suffix, like v0.5.0-beta.1, makes a pre-release: it never becomes "latest".
 #
@@ -72,11 +73,29 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --draft --verify-tag --generate-notes --title "$GITHUB_REF_NAME" $prerelease
 
   build:
-    name: Build and test (Windows x64)
+    name: Build and test (${{ matrix.name }})
     needs: [checks, draft]
     # The draft job is skipped in a rehearsal; that must not skip the build.
     if: ${{ !cancelled() && needs.checks.result == 'success' && (needs.draft.result == 'success' || needs.draft.result == 'skipped') }}
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `files` is what gets published: the installer, and what an installed copy needs to
+          # find and download an update (the .yml names the newest version and its checksum).
+          - name: Windows x64
+            os: windows-latest
+            artifact: installer-windows-x64
+            files: dist/*.exe dist/*.exe.blockmap dist/latest.yml
+          - name: macOS arm64
+            os: macos-latest
+            artifact: installer-mac-arm64
+            files: dist/*.dmg dist/*.zip dist/latest-mac.yml
+          - name: Linux x64
+            os: ubuntu-24.04
+            artifact: installer-linux-x64
+            files: dist/*.AppImage dist/latest-linux.yml
     permissions:
       contents: write
     steps:
@@ -86,36 +105,40 @@ jobs:
         with:
           node-version: 22
 
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 xvfb
+
       # No build cache: what is released is always built from scratch.
       - name: Install
         run: npm ci
 
       # Fetches the uv binary that ships in the app and checks it against the checksum pinned
-      # in scripts/fetch-uv.mjs, then builds the interface and the installer. Unsigned: there
-      # is no code-signing certificate yet, so Windows SmartScreen will warn on first run.
+      # in scripts/fetch-uv.mjs, then builds the interface and the installer. There is no
+      # code-signing certificate: Windows SmartScreen and macOS Gatekeeper warn on first run.
       - name: Package the installer
         run: npm run dist
 
       # The app that was just packaged, not a separate test build.
       - name: Test the packaged app
-        run: npm run smoke
-
-      # The installer, plus what the installed app needs to update itself: latest.yml names
-      # the newest version and its checksum, the blockmap lets it download only what changed.
-      - name: List what will be published
         shell: bash
         run: |
-          ls -la dist/*.exe dist/*.exe.blockmap dist/latest.yml
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a npm run smoke
+          else
+            npm run smoke
+          fi
+
+      - name: List what will be published
+        shell: bash
+        run: ls -la ${{ matrix.files }}
 
       - name: Keep the installer (rehearsal)
         if: github.event_name != 'push'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: installer-windows-x64
-          path: |
-            dist/*.exe
-            dist/*.exe.blockmap
-            dist/latest.yml
+          name: ${{ matrix.artifact }}
+          path: dist/ProATC-*
           retention-days: 3
           if-no-files-found: error
 
@@ -124,4 +147,4 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" dist/*.exe dist/*.exe.blockmap dist/latest.yml --clobber
+        run: gh release upload "$GITHUB_REF_NAME" ${{ matrix.files }} --clobber

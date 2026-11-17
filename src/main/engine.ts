@@ -100,7 +100,13 @@ function kill(child: ChildProcess | null): void {
     // `uv run` is a parent of the real Python process; kill the whole tree.
     spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true })
   } else {
-    child.kill('SIGTERM')
+    // The engine was started as the leader of its own process group: signal the group, so the
+    // Python process under `uv run` goes too.
+    try {
+      process.kill(-child.pid, 'SIGTERM')
+    } catch {
+      child.kill('SIGTERM')
+    }
   }
 }
 
@@ -121,7 +127,12 @@ export function startEngine(
   const run = (index: number): void => {
     const step = steps[index]
     if (step.note) onLine(step.note)
-    const child = spawn(step.command, step.args, { cwd, env, windowsHide: true })
+    const child = spawn(step.command, step.args, {
+      cwd,
+      env,
+      windowsHide: true,
+      detached: process.platform !== 'win32'
+    })
     current = child
     // Output arrives in arbitrary chunks; hand on whole lines only.
     let pending = ''

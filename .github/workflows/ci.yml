@@ -60,43 +60,75 @@ jobs:
       - name: Lint
         run: uvx ruff@0.17.5 check .
 
-  # The engine is Windows-first: X-Plane users on Windows are the target, and the audio and
-  # global-hotkey libraries need a desktop session that a Linux runner does not have.
+  # The engine's tests on every system an installer is built for. The audio and global-hotkey
+  # libraries are imported by the tests: on Linux they need PortAudio and a display.
   engine-tests:
-    name: Engine tests (Windows)
-    runs-on: windows-latest
+    name: Engine tests (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows, os: windows-latest }
+          - { name: macOS, os: macos-latest }
+          - { name: Linux, os: ubuntu-24.04 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 xvfb
       # The NVIDIA runtime libraries are about a gigabyte and only matter with a GPU.
       - name: Install
         run: uv sync --frozen --no-install-package nvidia-cublas-cu12 --no-install-package nvidia-cudnn-cu12
       - name: Tests
-        run: uv run --no-sync pytest -q
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a uv run --no-sync pytest -q
+          else
+            uv run --no-sync pytest -q
+          fi
 
   # Builds the app the way a release does, starts it, and has it check itself: the uv it
   # carries builds the engine's Python environment from the lock file, the engine starts and
   # loads every dependency, and the window connects to it. This catches packaging mistakes
   # that no unit test can see. The checks are in src/main/index.ts and src/proatc/server.py.
   smoke:
-    name: Packaged app (Windows)
+    name: Packaged app (${{ matrix.name }})
     # The input does not exist on a pull request or a push, where this must run.
     if: ${{ !inputs.skip-packaged-app }}
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Windows, os: windows-latest }
+          - { name: macOS, os: macos-latest }
+          - { name: Linux, os: ubuntu-24.04 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2 xvfb
       - name: Install
         run: npm ci
       - name: Build the unpacked app
         run: npm run pack:dir
       - name: Test the packaged app
-        run: npm run smoke
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a npm run smoke
+          else
+            npm run smoke
+          fi
 
   # One required status check for branch protection, whatever the jobs look like.
   ci-ok:

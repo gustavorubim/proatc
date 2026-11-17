@@ -32,16 +32,54 @@ extraResources:
     to: engine/pyproject.toml
   - from: uv.lock
     to: engine/uv.lock
-  - from: vendor/uv
-    to: bin
-    filter:
-      - uv.exe
 
+# Each platform carries its own uv binary (scripts/fetch-uv.mjs fetches the one for the machine
+# the build runs on).
 win:
   target:
     - target: nsis
       arch: x64
   artifactName: ProATC-${version}-windows-${arch}-setup.${ext}
+  extraResources:
+    - from: vendor/uv
+      to: bin
+      filter:
+        - uv.exe
+
+# macOS, Apple Silicon. There is no Apple developer certificate, so the app is signed ad hoc
+# ("-"): enough for it to run on Apple Silicon, not enough for Gatekeeper, which asks the user
+# to allow it the first time. The zip is what an update would be read from.
+mac:
+  target:
+    - target: dmg
+      arch: arm64
+    - target: zip
+      arch: arm64
+  category: public.app-category.simulation-games
+  artifactName: ProATC-${version}-mac-${arch}.${ext}
+  identity: '-'
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  extendInfo:
+    NSMicrophoneUsageDescription: Pro ATC records your voice while you hold push-to-talk, to understand your radio calls. The audio stays on this computer.
+  extraResources:
+    - from: vendor/uv
+      to: bin
+      filter:
+        - uv
+
+linux:
+  target:
+    - target: AppImage
+      arch: x64
+  category: Game
+  executableName: proatc
+  artifactName: ProATC-${version}-linux-${arch}.${ext}
+  extraResources:
+    - from: vendor/uv
+      to: bin
+      filter:
+        - uv
 
 nsis:
   oneClick: false

@@ -24,7 +24,7 @@ npm run dist
 
 builds `dist/ProATC-<version>-windows-x64-setup.exe`. The installer is small because it does not contain Python or the speech libraries. It carries the engine's source, its lock file and a copy of `uv` (downloaded by `scripts/fetch-uv.mjs` and checked against a pinned checksum). On first launch the app uses that `uv` to build the engine's Python environment from the lock file, then downloads the speech models. That first launch needs an internet connection and several gigabytes of disk; later launches start in seconds. Everything the installed app stores (environment, models, airport index, your key) is under `%APPDATA%\Pro ATC`.
 
-`npm run pack:dir` builds the unpacked app and `npm run smoke` runs its self-test: environment built from the lock file, engine started, every dependency loaded, window connected. CI runs both on Windows for every change.
+`npm run dist` and `npm run pack:dir` build for the system they run on (Windows, macOS on Apple Silicon, Linux x64); CI and the release workflow run them on all three. `npm run pack:dir` builds the unpacked app and `npm run smoke` runs its self-test: environment built from the lock file, engine started, every dependency loaded, window connected. CI runs both on all three systems for every change.
 
 To release: `npm run version:set -- 0.6.0`, `uv lock`, commit, then push a tag `v0.6.0`. The release workflow runs the checks, builds the installer, self-tests the packaged app and attaches the installer to a draft GitHub release for you to review and publish. Running the workflow by hand from the Actions tab is a rehearsal: nothing is published and the installer is kept as an artifact for three days.
 
