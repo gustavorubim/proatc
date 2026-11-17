@@ -30,6 +30,10 @@ If you changed anything a controller says or decides, and X-Plane is installed o
 uv run proatc verify-data --airports 300
 ```
 
+```bash
+uv run proatc verify-flights --flights 300
+```
+
 CI runs the first three on Windows, macOS and Linux, and the packaged-app self-test on all three.
 
 ## What each layer is for
@@ -40,6 +44,8 @@ CI runs the first three on Windows, macOS and Linux, and the packaged-app self-t
 | Golden flights | `tests/test_golden.py`, `tests/golden/*.txt` | Whole flights go the same way, word for word, as the saved transcript | That the transcript was right when it was saved: read it |
 | Regressions from review | `tests/test_review.py` | Defects an outside review found stay fixed | |
 | Fuzz and stress | `tests/test_robust.py` | Random calls in random states never raise, never produce a sentence with a hole in it; garbage in data files is skipped; six threads do not deadlock; a tick stays under 5 ms | That any answer is correct |
+| Flights across a made-up world | `tests/test_world.py` | Whole flights are handed all the way to their destination, through zigzag boundaries, shared frequencies, cities with several airports, airports without approach, a coverage hole and an ocean | That the sim's real data has no surprise of another kind |
+| Real flights worldwide | `proatc verify-flights` | The same, between hundreds of real airport pairs on this machine's X-Plane data | Needs X-Plane; not in CI |
 | Real-data sweep | `proatc verify-data` | The engine's main paths at hundreds of real airports raise nothing and read right | Needs X-Plane; not in CI |
 | Log replay | `proatc replay flight-….json` | A saved flight gives the same answers again, or shows exactly which changed | Timing between calls |
 | Benchmarks | `proatc bench-speech`, `proatc bench-intents` | Numbers for hearing and understanding, to compare before and after a change | How well it hears a real person |
@@ -89,6 +95,35 @@ To look into a report: open the newest journal, find the time, and read the `tra
 ```bash
 uv run proatc replay "path/to/session-20261117-201500.jsonl"
 ```
+
+## Stress tests: whole flights
+
+Unit tests hand the engine the station they mean. A real flight does not: the station is whatever answers on the tuned frequency where the aircraft is. Every serious fault found in flight so far lived in that gap: a centre that fell silent at its boundary, a neighbouring airport's approach controller answering and giving vectors to the wrong runway, two hand-offs seconds apart, runways whose approach was never found. `flights.fly` flies a flight the way the radio loop and a copilot do, and a flight has a problem when it is:
+
+- left on a frequency nobody answers on, in airspace that has a centre;
+- sent to a frequency nobody answers on;
+- vectored to an airport that is not its destination;
+- bounced between the same controllers;
+- sent to another centre a few miles from the airport;
+- never handed to its destination's controller, or not given an instruction by it.
+
+Two things use it.
+
+**In CI, on every change:** `tests/test_world.py` builds a world from nothing with the things that broke real flights, and flies 90 flights across it (17 seconds). `PROATC_STRESS=1 uv run pytest tests/test_world.py` flies every pair, over 400 flights. Both must have no problems. When a new kind of fault is found in flight, add what caused it to that world.
+
+**Before every release, on a machine with X-Plane:**
+
+```bash
+uv run proatc verify-flights --flights 1000
+```
+
+It prints the problems grouped by kind with example flights. To see one flight's radio work:
+
+```bash
+uv run proatc verify-flights --show KBOS-KIAD
+```
+
+When this was first run, 180 of 300 flights had a problem. The rules that fixed them are general, not per airport: a station has a ceiling as well as a range; the station being talked to keeps answering; a flight that is handed to a station is answered by that station; the next centre is given before the boundary and not for a clipped corner, nor straight back, nor twice in twenty miles; an airport without approach is handed over inside its tower's range; a sector across the date line does not cover the world. What is left after them is in the baseline below. A release that makes the number worse is not ready.
 
 ## Fuzz tests
 

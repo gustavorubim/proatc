@@ -247,3 +247,71 @@ def test_when_the_controller_has_no_instruction_the_pilot_is_told_what_to_say(tm
         "radio check", Intent("radio_check"), context, ground.key, ground, None, parked, Model("x"), engine, None, events.append
     )
     assert "way_out" not in context and Config() is not None
+
+
+# ---- rules the worldwide flight sweep led to ---------------------------------------
+
+
+def test_a_sector_across_the_date_line_does_not_cover_the_rest_of_the_world():
+    pacific = """CONTROLLER
+NAME PACIFIC OCEANIC
+FACILITY_ID KZAK
+ROLE ctr
+FREQ 12790
+AIRSPACE_POLYGON_BEGIN 0 60000
+POINT 50.0 160.0
+POINT 50.0 -150.0
+POINT 20.0 -150.0
+POINT 20.0 160.0
+AIRSPACE_POLYGON_END
+CONTROLLER_END
+""".splitlines()
+    index = CenterIndex(parse_atc(pacific))
+    centre = index.centers[0]
+    assert centre.polygons[0].wraps
+    assert centre.contains(35.0, 175.0) and centre.contains(35.0, -175.0) and centre.contains(35.0, -155.0)
+    assert not centre.contains(35.0, 10.0) and not centre.contains(35.0, -100.0) and not centre.contains(35.0, 150.0)
+    assert index.at(50.0, 14.0) is None  # central Europe: on a real flight "Anchorage Radio" answered there
+    assert centre.near(35.0, -149.5, 0.75) and not centre.near(35.0, 10.0, 0.75)
+
+
+def test_an_airliner_in_the_cruise_is_not_talking_to_a_tower_far_below(city):
+    overhead = {"lat": 38.93, "lon": -77.46, "com1_khz": 120100, "on_ground": 0}
+    assert current_station(city, {**overhead, "elevation_m": 3000 * 0.3048})[1].kind == "tower"
+    assert current_station(city, {**overhead, "elevation_m": 36000 * 0.3048})[1] is None
+    approach = {**overhead, "com1_khz": 126100}
+    assert current_station(city, {**approach, "elevation_m": 13000 * 0.3048})[1].kind == "approach"
+    assert current_station(city, {**approach, "elevation_m": 30000 * 0.3048})[1] is None
+    assert current_station(city, {**overhead, "on_ground": 1, "elevation_m": 95.0})[1].kind == "tower"  # on the ground: no limit
+
+
+def test_an_airport_with_a_tower_and_no_approach_is_handed_over_inside_the_towers_range(arriving):
+    db, engine, out = arriving
+    destination = db.airport("LFXX")
+    engine._handoff = lambda airport, kind, raw=None: (
+        None if kind == "approach" else ("Eastfield Tower", "one one niner decimal one", "119.100") if kind == "tower" else None
+    )
+    east = tuned(db, EAST, out(44))
+    engine.handle(Intent("check_in"), east, None, out(44))
+    engine.flight.pending = None
+    far = engine.tick(east, None, out(40))
+    assert far is None or "contact" not in far.text  # too far out for a tower
+    engine.flight.pending = None
+    said = engine.tick(east, None, out(24))
+    assert said.text == f"{CALLSIGN}, contact Eastfield Tower one one niner decimal one" and destination is not None
+    # Nobody to hand the flight to at all: the pilot is released.
+    engine.flight.told_approach, engine.flight.approach_told_by, engine.flight.pending = False, None, None
+    engine._handoff = lambda airport, kind, raw=None: None
+    assert engine.tick(east, None, out(20)).text == f"{CALLSIGN}, radar service terminated, frequency change approved"
+
+
+def test_a_radar_controller_on_the_way_does_not_vector_the_flight_to_its_own_airport(city):
+    engine = Engine(city, seed=1, procedures=lambda ident: parse_cifp([]))
+    engine.set_plan(FlightPlan("KBOS", "KFAR", [], 24000))  # going somewhere else entirely
+    engine.flight.has_been_airborne, engine.flight.origin_ident = True, "KBOS"
+    passing = {"tail_number": "N123AB", "lat": 39.05, "lon": -77.55, "on_ground": 0, "elevation_m": 4000.0, "agl_m": 3900.0,
+               "groundspeed_ms": 200.0, "heading_true": 90.0, "heading_mag": 90.0, "com1_khz": 125050}  # fmt: skip
+    station = current_station(city, passing)[1]
+    said = engine.handle(Intent("check_in"), station, None, passing, 0.0)
+    assert said.text.endswith("radar contact") and engine.flight.arrival is None  # on a real flight: an ILS to this airport
+    assert engine.tick(station, None, passing) is None
