@@ -196,7 +196,8 @@ def clearance(engine, station, issue, raw, callsign, hello, faa, atis_part, on_c
     flight.sid, flight.cleared_ft = (sid.name if sid else None), initial
     fixes = route_fixes(plan.route)
     flight.sid_constraints = restrictions.build_sid(engine, sid, airport, runway, fixes) if sid else []
-    track = restrictions.path(engine, sid, "SID", airport, runway, fixes) if sid else []
+    flight.sid_fixes = restrictions.named_path(engine, sid, "SID", airport, runway, fixes) if sid else []
+    track = [(lat, lon) for _, lat, lon in flight.sid_fixes]
     flight.sid_path = [(airport.lat, airport.lon), *track] if track else []
     flight.squawk = flight.squawk if flight.squawk and flight.squawk not in ("1200", "7000") else _squawk(engine._rng)
 
@@ -263,6 +264,9 @@ def handle(engine, intent, station, issue, raw, variation, callsign, hello):
         reply = vfr.transit(engine, intent, station, issue, raw, callsign, hello, _faa(station))
     elif intent.intent == "request_diversion":
         reply = _divert(engine, intent, station, raw, variation, callsign, hello)
+    elif intent.intent == "request_vectors" and part != "arrival":
+        reply = _center(engine, intent, station, raw, callsign, hello) if part == "center" else None
+        reply = reply or _vectors_to_track(engine, station, raw, variation, callsign, hello, part)
     elif part == "departure":
         reply = _departure(engine, intent, station, raw, callsign, hello)
     elif part == "center":
@@ -420,7 +424,8 @@ def _star(engine, destination: Airport):
         fixes = route_fixes(plan.route) if plan else []
         runway = plan.arrival_runway if plan else None
         flight.constraints = restrictions.build(engine, star, destination, runway, fixes) if star else []
-        flight.star_path = restrictions.path(engine, star, "STAR", destination, runway, fixes) if star else []
+        flight.star_fixes = restrictions.named_path(engine, star, "STAR", destination, runway, fixes) if star else []
+        flight.star_path = [(lat, lon) for _, lat, lon in flight.star_fixes]
     return flight.star_procedure
 
 
@@ -837,7 +842,8 @@ def _arrival(engine, intent, station, issue, raw, variation, callsign, hello):
             return _leave_hold(engine, station, issue, raw, variation, callsign)
         return None
     # Going around: back from the tower. "Request lower" on first contact is a check-in: the descent comes with it.
-    wanted = (*CHECK_IN, "going_around", "request_hold", "request_visual", "request_approach", "request_climb", "request_descent")
+    wanted = (*CHECK_IN, "going_around", "request_hold", "request_visual", "request_approach", "request_climb", "request_descent",
+              "request_vectors")  # fmt: skip
     if intent.intent not in wanted:
         return None
     if not flight.arrival or flight.arrival.airport != station.airport.ident:
@@ -853,6 +859,8 @@ def _arrival(engine, intent, station, issue, raw, variation, callsign, hello):
         return _other_approach(engine, intent, station, callsign, lead)
     if intent.intent == "request_climb" or (intent.intent == "request_descent" and not hello):
         return _arrival_level(engine, intent, station, raw, callsign, hello, faa)
+    if intent.intent == "request_vectors" and not hello:
+        return vectors_again(engine, station, issue, raw, variation, callsign, "")
     asked = intent.intent == "request_hold"
     if not arrival.hold and arrival.stage in (None, "descend") and (asked or holding.wanted(engine, arrival)):
         found = holding.candidate(engine, station.airport, raw)
@@ -999,6 +1007,64 @@ def _divert(engine, intent, station, raw, variation, callsign, hello):
         vertical = f"maintain {spoken}"
     text = f"{callsign}, {hello}roger, cleared to {target.spoken_name}, {turn} heading {say.heading(heading)}, {vertical}"
     return _reply(engine, text, {"heading": heading, "altitude": level})
+
+
+def vectors_again(engine, station, issue, raw, variation, callsign, hello):
+    """'Request vectors' while on the arrival: out of a hold or off the approach, and onto vectors for final again."""
+    arrival = engine.flight.arrival
+    if arrival is None or arrival.airport != station.airport.ident or arrival.stage == "tower":
+        return None
+    if arrival.hold:
+        return _leave_hold(engine, station, issue, raw, variation, callsign)
+    if arrival.stage in ON_APPROACH:
+        # Not able to join it as cleared: the approach is flown from vectors instead, not from an initial fix.
+        arrival.stage, arrival.via, engine.flight.direct_to = "descend", None, None
+        arrival.procedure = None if arrival.procedure and arrival.procedure.kind in PROCEDURAL_KINDS else arrival.procedure
+    given = _vector(engine, station, issue, raw, variation, callsign, f"{hello}roger, ", first=False)
+    if given:
+        return given
+    if arrival.heading is not None:
+        heading = arrival.heading
+        return _reply(engine, f"{callsign}, {hello}roger, fly heading {say.heading(heading)}", {"heading": heading})
+    return _reply(engine, f"{callsign}, {hello}roger, expect vectors for the {arrival.words()}")
+
+
+def _vectors_to_track(engine, station, raw, variation, callsign, hello, part: str):
+    """'Request vectors' off the arrival: a heading back to the departure or to the filed route."""
+    if station.kind == "center" and station.center.oceanic:
+        return None  # no radar over the ocean: nobody to give a heading
+    flight = engine.flight
+    track = "departure" if part == "departure" and flight.sid_fixes else "route"
+    return rejoin(engine, track, raw, variation, callsign, hello, heading=True, faa=_faa(station))
+
+
+def rejoin(engine, track: str, raw, variation, callsign, hello, heading: bool, faa: bool):
+    """Back to a track the flight has left: direct to its next waypoint, or a heading toward it when vectors
+    are asked for. None when the engine knows no waypoint of that track."""
+    from . import questions
+    from .airways import next_point
+
+    if "lat" not in raw:
+        return None
+    ahead = next_point(questions.track_points(engine, track), raw["lat"], raw["lon"])
+    if ahead is None:
+        return None
+    name, lat, lon = ahead
+    flight = engine.flight
+    if heading or not name:
+        target = questions.heading_to(raw, lat, lon, variation)
+        current = raw.get("heading_mag", target)
+        turn = "fly" if abs((target - current + 180) % 360 - 180) < 8 else f"turn {turn_direction(current, target)}"
+        what = "your filed route" if track == "route" else f"the {track}"
+        if name:
+            word = _fix_word(engine, name, lat, lon)
+            text = f"roger, {turn} heading {say.heading(target)}, vectors to rejoin {what}, direct {word} when able"
+        else:
+            text = f"roger, {turn} heading {say.heading(target)}, vectors to rejoin {what}"
+        return _reply(engine, f"{callsign}, {hello}{text}", {"heading": target})
+    flight.direct_to = name
+    word = _fix_word(engine, name, lat, lon)
+    return _reply(engine, f"{callsign}, {hello}roger, {'proceed' if faa else 'route'} direct {word}")
 
 
 def _blank_plan():

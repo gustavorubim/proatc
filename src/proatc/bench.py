@@ -7,7 +7,7 @@
   prompt), not how well it hears you.
 - `proatc bench-intents`: a fixed set of transcripts, including the mistakes speech recognition
   makes, is run through the language model. Reports how often the intent and each value are right.
-  This calls the configured model (about seventy-five short requests: a fraction of a cent on OpenRouter).
+  This calls the configured model (about ninety short requests: a fraction of a cent on OpenRouter).
 
 Neither runs in CI: both need models or a key. Run them when changing stt.py, intents.py or the model.
 """
@@ -136,6 +136,10 @@ def bench_speech(tts, stt, quick: bool = False, report=print) -> list[SpeechRow]
 # ---- understanding ---------------------------------------------------------------
 
 # (what speech recognition wrote, the controller's last instruction, what it means)
+OFF_TRACK_SAID = (
+    "Speedbird one two three, you appear to be six miles off the departure track, confirm you are following the departure"
+)
+APPROACH_SAID = "Speedbird one two three, turn left heading zero niner zero, expect I L S approach runway zero one left"
 UNDERSTOOD = (
     ("Heathrow Delivery, Speedbird 123, information kilo, request IFR clearance to Edinburgh", "", {"intent": "request_clearance", "flight_rules": "IFR", "atis": "K"}),
     ("delivery speedbird one two three request clearance to paris with information bravo", "", {"intent": "request_clearance", "atis": "B"}),
@@ -213,6 +217,21 @@ UNDERSTOOD = (
     ("request return to stand", "", {"intent": "request_return"}),
     ("request runway two seven left for departure", "", {"intent": "request_runway", "runway": "27L"}),
     ("request frequency change to get the ATIS", "", {"intent": "report_leaving"}),
+    # Questions about the arrival, from a real flight: each was taken for "other" and answered "unable".
+    ("which runway are landing?", "", {"intent": "request_information", "item": "runway"}),
+    ("which runway am I landing on", "", {"intent": "request_information", "item": "runway"}),
+    ("request runway assignment", "", {"intent": "request_information", "item": "runway"}),
+    ("request the transition for the approach, say the transition name and the route", APPROACH_SAID, {"intent": "request_information", "item": "transition"}),
+    ("how will we join the approach, vectors or own navigation?", APPROACH_SAID, {"intent": "request_information", "item": "transition"}),
+    ("which initial approach fix should we expect", "", {"intent": "request_information", "item": "transition"}),
+    # Answers to what the controller asked.
+    ("affirm, following the departure", OFF_TRACK_SAID, {"intent": "affirm"}),
+    ("yes we are on the departure", OFF_TRACK_SAID, {"intent": "affirm"}),
+    ("negative", OFF_TRACK_SAID, {"intent": "negative"}),
+    ("negative, request vectors back to the departure", OFF_TRACK_SAID, {"intent": "request_vectors"}),
+    ("negative, request direct bee backs", OFF_TRACK_SAID, {"intent": "request_direct", "fix": "BIBAX"}),
+    ("now able flight level three eight zero", "Speedbird one two three, roger, maintain flight level three four zero, advise when able", {"intent": "affirm"}),
+    ("request vectors to final", "", {"intent": "request_vectors"}),
 )  # fmt: skip
 
 

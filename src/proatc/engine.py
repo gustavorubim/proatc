@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 
-from . import answers, chart, ifr, traffic, vfr
+from . import answers, chart, ifr, questions, traffic, vfr
 from . import phraseology as say
 from .atis import Issue, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
@@ -74,6 +74,7 @@ class Reply:
     note: str = ""  # with no text: why nobody answered (a blind call at an airfield without a controller)
     event: str = ""  # what this transmission is, for the debrief: readback_corrected, go_around, level_bust, ...
     asked: bool = False  # the pilot was already asked once to read back what was left out
+    asks: dict = field(default_factory=dict)  # with a question: what its answer needs (see questions.py)
 
 
 @dataclass
@@ -149,6 +150,9 @@ class Flight:
     seen_at: tuple | None = None  # (lat, lon, on the ground) at the last look at the aircraft
     sid_path: list = field(default_factory=list)  # the SID's track over the ground, for route watching
     star_path: list = field(default_factory=list)
+    sid_fixes: list = field(default_factory=list)  # the SID's waypoints as (name, lat, lon): the way back to it
+    star_fixes: list = field(default_factory=list)
+    question: object | None = None  # questions.Question: what a controller asked and the pilot has not answered
     off_route_since: float | None = None
     off_route_called: set[str] = field(default_factory=set)
     qnh_told: bool = False  # the destination's pressure was given with a descent to an altitude
@@ -440,6 +444,14 @@ class Engine:
             key = station.key
             callsign = self._callsign(raw, intent)
             intent = self._meaning(intent, station, raw)
+            answered = questions.answer(self, intent, station, issue, raw, variation, callsign, self._greeting_if(station))
+            if answered is not None:
+                self.flight.contacted.add(key)
+                return self._said(answered, key)
+            if intent.intent in ("affirm", "negative"):
+                # Nothing was asked: "negative" to an instruction is "unable"; otherwise there is nothing to answer.
+                waiting = self.flight.pending and self.flight.pending_key == key
+                intent = replace(intent, intent="unable" if intent.intent == "negative" and waiting else "acknowledge")
             if intent.intent == "say_again":
                 previous = self.flight.last_said.get(key)
                 if previous:
@@ -452,6 +464,7 @@ class Engine:
                 reply = self._emergency(intent, station, callsign)
                 if reply and reply.text:
                     self.flight.last_said[key] = reply.text
+                    questions.record(self, key, reply)
                 return reply
 
             reply = self._check_readback(intent, callsign, station)
@@ -471,11 +484,21 @@ class Engine:
                 return None
             if reply.correction:
                 return reply  # the original instruction stays pending and is what "say again" repeats
-            if reply.expect:
-                self._await_readback(reply, key)
-            if reply.text:
-                self.flight.last_said[key] = reply.text
-            return reply
+            questions.settle(self, intent, station)
+            return self._said(reply, key)
+
+    def _said(self, reply: Reply, key: str) -> Reply:
+        """What the controller said is remembered: for a readback, for "say again", and as a question to answer."""
+        if reply.expect:
+            self._await_readback(reply, key)
+        if reply.text:
+            self.flight.last_said[key] = reply.text
+            questions.record(self, key, reply)
+        return reply
+
+    def _greeting_if(self, station: Station) -> str:
+        """The station's name when this is the first call to it, without counting the call as made yet."""
+        return "" if station.key in self.flight.contacted else f"{station.callsign}, "
 
     def _meaning(self, intent: Intent, station: Station, raw: dict) -> Intent:
         """Calls that mean another call where the aircraft is: 'request delay' in the air is a hold,
@@ -1018,6 +1041,13 @@ class Engine:
     def tick(self, station: Station, issue: Issue | None, raw: dict) -> Reply | None:
         """Calls the controller makes without being asked. Call about once a second."""
         with self.lock:
+            reply = self._tick(station, issue, raw)
+            if reply is not None and not reply.correction:
+                questions.record(self, station.key, reply)
+            return reply
+
+    def _tick(self, station: Station, issue: Issue | None, raw: dict) -> Reply | None:
+        with self.lock:
             self._observe(raw)
             flight, airport = self.flight, station.airport
             if not raw.get("tail_number"):
@@ -1151,8 +1181,14 @@ class Engine:
 
         Each has a short label, the full transmission, and the intent it stands for, so a
         clicked call skips speech recognition and the language model. `needs` names a value
-        the app must ask for and put in place of {destination}.
+        the app must ask for and put in place of {destination}. The answers to a question the
+        controller asked come first and carry `answers`; `primary` marks the call most expected now.
         """
+        with self.lock:
+            items = self._suggestions(station, issue, raw)
+            return questions.arrange(self, station, issue, raw, items, self.opening(station, raw))
+
+    def _suggestions(self, station: Station, issue: Issue | None, raw: dict) -> list[dict]:
         with self.lock:
             flight, airport = self.flight, station.airport
             callsign = self._callsign(raw)
@@ -1370,5 +1406,6 @@ class Engine:
             "cleared_level": self._level_label(flight),
             "stand": flight.stand.name if flight.stand and flight.stand.name else None,
             "hold_short": flight.crossings[0].split("/")[0] if flight.crossings else None,
+            "question": flight.question.text if flight.question else None,
         }
         return {key: value for key, value in facts.items() if value}
