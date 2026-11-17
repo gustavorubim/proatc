@@ -178,13 +178,10 @@ def _real_engine(config, db, seed=None):
 
 
 def cmd_replay(config, path: str) -> int:
-    import json
-    from pathlib import Path
-
     from .navdata import AirportDB
-    from .replay import replay
+    from .replay import load, replay
 
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    payload = load(path)
     db = AirportDB.open(config.sim.xplane_path)
     result = replay(payload, db, lambda seed: _real_engine(config, db, seed))
     print(result.summary())

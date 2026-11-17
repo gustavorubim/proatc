@@ -1,7 +1,14 @@
-"""A record of the flight's radio work, saved on request for bug reports and debriefing.
+"""A record of the flight's radio work, for bug reports and debriefing.
 
 Every event the session emits is kept with the time and, for transmissions, where the
 aircraft was and who it was talking to. Nothing secret is recorded: no key, no audio.
+
+It is kept twice. In memory, for "Save log" and the debrief. And on disk as it happens (the
+journal): one file for each time the app runs, a line for each event, written at once so that a
+crash or a closed window loses nothing. The journal also holds a trace: every twenty seconds,
+where the aircraft is and who answers on the tuned frequency. A fault can then be looked into
+after the flight without anyone having thought to save a log. The files stay on this computer;
+the oldest are deleted.
 """
 
 from __future__ import annotations
@@ -13,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 
 KEPT = 5000
+JOURNALS_KEPT = 40  # runs of the app whose journal is kept
+JOURNAL_NAME = "session-{:%Y%m%d-%H%M%S}.jsonl"
 WITH_CONTEXT = ("pilot", "atc", "atis", "understood", "silent", "info", "error", "coach")
 SKIPPED = ("tx", "timings", "status", "settings", "log_saved", "chatter", "debrief", "capture", "phrase")
 
@@ -21,6 +30,38 @@ class FlightLog:
     def __init__(self):
         self.records: deque = deque(maxlen=KEPT)
         self.started = datetime.now()
+        self.journal: Path | None = None  # the file on disk, once `keep_journal` has been called
+        self._file = None
+
+    def keep_journal(self, folder: Path) -> Path | None:
+        """Write every record to a file in `folder` from now on, starting with what is already held."""
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            for old in sorted(folder.glob("session-*.jsonl"))[: -(JOURNALS_KEPT - 1) or None]:
+                old.unlink(missing_ok=True)
+            self.journal = folder / JOURNAL_NAME.format(self.started)
+            self._file = open(self.journal, "a", encoding="utf-8")  # noqa: SIM115  (kept open for the whole run)
+            for entry in list(self.records):
+                self._write(entry)
+        except OSError:
+            self.journal = self._file = None  # no journal is not a reason to stop
+        return self.journal
+
+    def _write(self, entry: dict) -> None:
+        if self._file is None:
+            return
+        try:
+            self._file.write(json.dumps(entry, default=str) + "\n")
+            self._file.flush()
+        except (OSError, ValueError):
+            self._file = None
+
+    def note(self, kind: str, context: dict | None = None, **fields) -> None:
+        """A record that is not a radio event: the session's start, the plan, the trace. Journal only."""
+        entry = {"t": round(time.time(), 2), "type": kind, **fields}
+        if context:
+            entry["context"] = context
+        self._write(entry)
 
     def record(self, event: dict, context: dict | None = None) -> None:
         kind = event.get("type")
@@ -30,6 +71,7 @@ class FlightLog:
         if context and kind in WITH_CONTEXT:
             entry["context"] = context
         self.records.append(entry)
+        self._write(entry)
 
     def text(self) -> str:
         """The conversation as a readable transcript."""
