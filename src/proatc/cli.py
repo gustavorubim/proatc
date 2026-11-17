@@ -158,8 +158,10 @@ def cmd_run(config) -> int:
     return 0
 
 
-def _real_engine(config, db, seed=None):
-    """An engine on this machine's X-Plane data, as the app builds it."""
+def _real_engine(config, db, seed=None, settings: dict | None = None, reported_weather: bool = True):
+    """An engine on this machine's X-Plane data, as the app builds it. `settings` overrides the holding and
+    traffic settings of the config. Without `reported_weather` every airport has the sim's weather at the
+    aircraft: the METAR file in X-Plane's folder changes from day to day, and a kept flight must not."""
     from .airspace import open_airspace
     from .airways import open_airways
     from .centers import CenterIndex
@@ -168,12 +170,12 @@ def _real_engine(config, db, seed=None):
     from .navfix import open_navfix
     from .procedures import NavaidNames
 
-    root = db.xplane_root
-    db.centers, db.metars = CenterIndex.open(root), MetarStore(root)
+    root, settings = db.xplane_root, settings or {}
+    db.centers, db.metars = CenterIndex.open(root), MetarStore(root) if reported_weather else None
     return Engine(
         db, seed=seed, centers=db.centers, navaids=NavaidNames(root), navfix=open_navfix(root), metars=db.metars,
-        holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root),
-        airways=open_airways(root),
+        holding=settings.get("holding", config.atc.holding), traffic=settings.get("traffic", config.atc.traffic),
+        airspace=open_airspace(root), airways=open_airways(root),
     )  # fmt: skip
 
 
@@ -186,6 +188,72 @@ def cmd_replay(config, path: str) -> int:
     result = replay(payload, db, lambda seed: _real_engine(config, db, seed))
     print(result.summary())
     return 1 if result.differences else 0
+
+
+def _journal_runner(config):
+    """Replays a kept journal on this machine's X-Plane data, with the settings it was kept with."""
+    from .navdata import AirportDB
+    from .replay import replay
+
+    db = AirportDB.open(config.sim.xplane_path)
+
+    def run(payload: dict, settings: dict):
+        return replay(payload, db, lambda seed: _real_engine(config, db, seed, settings, reported_weather=False))
+
+    return run
+
+
+def _settings(config) -> dict:
+    return {"holding": config.atc.holding, "traffic": config.atc.traffic}
+
+
+def cmd_journals(config, args) -> int:
+    """Keep real flights and check them before a release: see journals.py and docs/testing.md."""
+    from pathlib import Path
+
+    from . import journals
+
+    folder = Path(args.folder) if args.folder else journals.default_folder()
+    if args.action == "list":
+        lines = journals.listing(folder)
+        print("\n".join(lines) if lines else f"No kept flights in {folder}")
+        return 0
+    if args.action == "keep":
+        source = Path(args.journal) if args.journal else journals.newest_journal(journals.journal_folder())
+        if source is None or not source.is_file():
+            print(f"No journal to keep: {source or journals.journal_folder()}")
+            return 1
+        target = journals.keep(source, folder, _journal_runner(config), _settings(config))
+        counts = journals.read_accepted(target)["counts"]
+        print(f"Kept {source.name} as {target.stem} in {folder}")
+        print("Accepted as it replays now:", ", ".join(f"{value} {key.replace('_', ' ')}" for key, value in counts.items()))
+        return 0
+    if args.action == "accept":
+        return _accept(config, journals, folder, args)
+    found = journals.check(folder, _journal_runner(config), _settings(config))
+    if not found:
+        print(f"No kept flights in {folder}. Keep one after a flight: proatc journals keep")
+        return 0
+    for one in found:
+        print(journals.report(one, anonymous=args.anonymous))
+    changed = [one.name for one in found if one.changed]
+    print(f"\n{len(found)} flights checked, {len(changed)} changed" + (": " + ", ".join(changed) if changed else ""))
+    return 1 if changed else 0
+
+
+def _accept(config, journals, folder, args) -> int:
+    if args.all == bool(args.name):
+        print("Name one kept flight, or --all")
+        return 1
+    chosen = journals.kept(folder) if args.all else [journals.find(folder, args.name)]
+    if None in chosen:
+        print(f"No kept flight called {args.name} in {folder}")
+        return 1
+    runner = _journal_runner(config)
+    for journal in chosen:
+        journals.accept_one(journal, runner, _settings(config))
+        print(f"Accepted {journal.stem}")
+    return 0
 
 
 def cmd_verify_data(config, count: int) -> int:
@@ -233,6 +301,23 @@ def main() -> int:
     sub.add_parser("run", help="start the push-to-talk voice loop")
     replay = sub.add_parser("replay", help="run a saved flight log (.json) through the engine again and show what differs")
     replay.add_argument("log")
+    kept = sub.add_parser("journals", help="keep real flights' journals as regression tests and check them (private)")
+    kept_sub = kept.add_subparsers(dest="action", required=True)
+    for action, text in (
+        ("keep", "copy a journal (default: the newest) into the kept flights and accept its answers"),
+        ("check", "replay every kept flight and show the answers that changed since they were accepted"),
+        ("accept", "accept the answers a kept flight gets now, once a person has read the changes"),
+        ("list", "list the kept flights"),
+    ):
+        one = kept_sub.add_parser(action, help=text)
+        one.add_argument("--folder", help="the kept flights' folder (default: logs/regression in the data folder)")
+        if action == "keep":
+            one.add_argument("journal", nargs="?")
+        if action == "check":
+            one.add_argument("--anonymous", action="store_true", help="mask the callsign and round positions")
+        if action == "accept":
+            one.add_argument("name", nargs="?")
+            one.add_argument("--all", action="store_true")
     speech = sub.add_parser("bench-speech", help="measure speech recognition on spoken radio calls (needs the speech models)")
     speech.add_argument("--quick", action="store_true")
     speech.add_argument("--engine", choices=("kokoro", "phonon"), help="the voice engine to measure (default: the one in use)")
@@ -257,6 +342,8 @@ def main() -> int:
             return 0
         if args.command == "replay":
             return cmd_replay(config, args.log)
+        if args.command == "journals":
+            return cmd_journals(config, args)
         if args.command == "bench-speech":
             from .bench import bench_speech
             from .stt import SpeechToText

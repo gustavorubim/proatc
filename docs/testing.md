@@ -47,7 +47,8 @@ CI runs the first three on Windows, macOS and Linux, and the packaged-app self-t
 | Flights across a made-up world | `tests/test_world.py` | Whole flights are handed all the way to their destination, through zigzag boundaries, shared frequencies, cities with several airports, airports without approach, a coverage hole and an ocean | That the sim's real data has no surprise of another kind |
 | Real flights worldwide | `proatc verify-flights` | The same, between hundreds of real airport pairs on this machine's X-Plane data | Needs X-Plane; not in CI |
 | Real-data sweep | `proatc verify-data` | The engine's main paths at hundreds of real airports raise nothing and read right | Needs X-Plane; not in CI |
-| Log replay | `proatc replay flight-….json` | A saved flight gives the same answers again, or shows exactly which changed | Timing between calls |
+| Log replay | `proatc replay flight-….json` | A saved flight gives the same answers again, or shows exactly which changed | Timing closer than the twenty-second trace |
+| Kept flights | `proatc journals check` | Real flights kept on this machine still go the way a person last accepted | Needs X-Plane and kept journals; not in CI |
 | Benchmarks | `proatc bench-speech`, `proatc bench-intents` | Numbers for hearing and understanding, to compare before and after a change | How well it hears a real person |
 | App tests | `npm run test` | The window's state for each engine message; launcher and updater decisions | The window itself |
 | Packaged self-test | `npm run smoke` | The built app sets up its engine, loads every library and connects its window | A microphone, a joystick, a running sim |
@@ -95,6 +96,45 @@ To look into a report: open the newest journal, find the time, and read the `tra
 ```bash
 uv run proatc replay "path/to/session-20261117-201500.jsonl"
 ```
+
+## Kept flights
+
+A journal is a whole real flight. Keeping it turns it into a regression test: before a release, every kept flight is replayed and its answers compared with the ones a person last accepted for it.
+
+**Keep one** after a flight worth keeping (a fault was found in it, or it went through something new):
+
+```bash
+uv run proatc journals keep
+```
+
+It copies the newest journal (or the one named: `proatc journals keep path/to/session-….jsonl`) into `logs/regression/` in the data folder, names it by date and route (`2026-11-17-1008-EGLL-LFPG`), and accepts what the engine answers to it now. Beside each kept journal, `<name>.accepted.json` lists every replayed answer: where in the journal, what the pilot said, what the controller says now, and what it said in the real flight where that differs. `proatc journals list` shows what is kept.
+
+**Check before a release:**
+
+```bash
+uv run proatc journals check
+```
+
+For each kept flight it prints the counts (calls replayed, unprompted calls replayed, calls that could not be, moments the controller could speak, new unprompted calls) and every answer that changed since it was accepted, with the time into the flight, the frequency and the position. It exits 1 if anything changed.
+
+**What a change means.** Nothing changed: the release does not alter these flights. A change is either a fault or the intended effect of a change to the code. Read each one as a pilot would. A fixed fault changes the answers after it too (the flight goes another way from there), so expect a run of changes after the first. When every change is intended:
+
+```bash
+uv run proatc journals accept 2026-11-17-1008-EGLL-LFPG   # or --all
+```
+
+and say in the pull request what changed and why.
+
+**It stays on this computer.** A journal holds the pilot's callsign and every position of the flight. The corpus lives in the data folder, never in the repository; do not commit a journal, an accepted file or a line of either. To paste a result into a public issue, use `proatc journals check --anonymous`: it masks the callsign and rounds positions to a tenth of a degree. Read it before pasting all the same: a callsign the pilot spoke in an unusual way can survive the mask.
+
+**What a replay reproduces, and what it cannot.**
+
+- The seed, so squawk codes, stands and delays are the same; the plan, at the points it was loaded or changed; the engine's clock, run on the journal's times and stopped while the sim was paused, so a readback reminder runs out where it did.
+- The controller may speak unprompted at every record that holds the sim's state, the trace above all. A call it now makes where none was logged, or no longer makes, is reported. The app looks every half second and the trace every twenty, so an unprompted call made now up to thirty seconds before or after the logged one is taken as the same call (`shifted` in the counts), not reported.
+- A readback the copilot or the "Read back" button made is made again from what the engine now expects, as they would. What the pilot said or typed is replayed as said.
+- The station lookup's memory of who answers on each frequency is cleared before each replay.
+- Not reproduced: the reported weather (the journal does not hold the METAR, and X-Plane's METAR file changes daily, so kept flights use the sim's weather at the aircraft for every airport); other aircraft between calls (the trace leaves them out); anything the language model said. The holding and traffic settings are the ones the flight was kept with.
+- A kept flight depends on this machine's X-Plane data. After an X-Plane or navigation data update, expect changes; read them, then accept.
 
 ## Stress tests: whole flights
 
@@ -170,10 +210,11 @@ Run the relevant one before and after changing `stt.py`, the recognition prompt,
 
 ## Releasing
 
-1. `npm run version:set -- X.Y.Z`, `uv lock`, commit, push a tag `vX.Y.Z`.
-2. The release workflow builds and self-tests the installers for Windows, macOS and Linux into a **draft** release.
-3. **Wait until every build job has finished** and all files are attached (three installers, their permanent-name copies, three `.yml` files, the `.zip` and the `.blockmap`). Publishing earlier releases a version with no installer: this has happened once.
-4. Publish, then check the three download links in the README.
+1. `uv run proatc journals check`: no kept flight changes, or every change has been read and accepted (see "Kept flights").
+2. `npm run version:set -- X.Y.Z`, `uv lock`, commit, push a tag `vX.Y.Z`.
+3. The release workflow builds and self-tests the installers for Windows, macOS and Linux into a **draft** release.
+4. **Wait until every build job has finished** and all files are attached (three installers, their permanent-name copies, three `.yml` files, the `.zip` and the `.blockmap`). Publishing earlier releases a version with no installer: this has happened once.
+5. Publish, then check the three download links in the README.
 
 ## Rules for this repository
 
