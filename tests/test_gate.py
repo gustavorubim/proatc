@@ -474,3 +474,31 @@ def test_a_new_flight_forgets_who_the_last_one_was_sent_to(fields):
     again = station_on(db, 118100, on_stand)
     assert again.kind == "tower"  # was: the departure controller, which did not answer "request taxi"
     assert engine.handle(Intent("request_taxi"), again, ISSUE, on_stand) is not None
+
+
+def test_a_runway_the_taxi_network_writes_with_a_leading_zero_is_still_found_and_said_as_the_airport_says_it(tmp_path):
+    rows = [row.replace("runway 09R/27L", "runway 9R/27L") for row in CROSSING]  # the network writes "9R"
+    (tmp_path / "z.dat").write_text("\n".join(rows), encoding="utf-8")
+    build_index(tmp_path / "z.dat", tmp_path / "z.sqlite")
+    db = AirportDB(tmp_path / "z.sqlite")
+    engine = Engine(db, seed=1, procedures=lambda ident: parse_cifp([]))
+    ground = db.station(121700, *APRON)
+    taxi = engine.handle(Intent("request_taxi"), ground, ISSUE, taxiing(*APRON))
+    assert "hold short runway zero niner right" in taxi.text and engine.flight.crossings == ["09R/27L"]
+    assert route_to_runway(parse_taxi(rows), *APRON, "27R", (51.004, -0.98)).crossings == ["9R/27L"]  # its own name
+
+
+def test_without_a_taxiway_to_the_threshold_a_departure_starts_from_an_intersection_in_the_near_half():
+    rows = """1201 52.0000 -1.0000 both 0 apron
+1201 52.0010 -0.9955 both 1 middle
+1201 52.0010 -0.9900 both 2 east_end
+1201 52.0010 -1.0000 both 3 west_end
+1202 0 1 twoway taxiway_E A
+1202 0 3 twoway taxiway_E B
+1202 3 1 twoway runway 09/27
+1202 1 2 twoway runway 09/27""".splitlines()
+    route = route_to_runway(parse_taxi(rows), 52.0, -1.0, "27", (52.001, -0.99))
+    assert route.taxiways == ["A"] and route.points[-1] == (52.001, -0.9955)  # was: no route at all
+    # The west end leaves no runway ahead for 27: never an entry there.
+    far = [row for row in rows if "taxiway_E A" not in row]
+    assert route_to_runway(parse_taxi(far), 52.0, -1.0, "27", (52.001, -0.99)) is None

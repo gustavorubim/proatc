@@ -219,9 +219,12 @@ def route_to_runway(net: TaxiNetwork, lat: float, lon: float, runway_end: str, t
         return None
     gap = {n: distance_nm(*threshold, *net.nodes[n]) * 1852 for n in entries}
     full_length = {n: 0.0 for n in entries if gap[n] <= FULL_LENGTH_M}
-    # Without an entry at the threshold that the taxiways reach, take the one that leaves the most runway ahead.
+    # Without an entry at the threshold that the taxiways reach, take the one that leaves the most runway ahead: one
+    # in the half of the runway nearer the threshold, never one at its far end.
     route = _route(net, start, full_length, runway_name) if full_length else None
-    return route or _route(net, start, {n: gap[n] * 10 for n in entries}, runway_name)
+    span = max(distance_nm(*threshold, *net.nodes[n]) * 1852 for n in net.runway_nodes[runway_name])
+    intersections = {n: gap[n] * 10 for n in entries if gap[n] <= span / 2}
+    return route or (_route(net, start, intersections, runway_name) if intersections else None)
 
 
 def nearest_parking(net: TaxiNetwork, lat: float, lon: float) -> Parking | None:
