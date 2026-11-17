@@ -239,6 +239,45 @@ def test_an_rnav_approach_is_flown_from_its_initial_fix_not_vectored(tmp_path):
     assert "heading" in close.text and "direct" not in close.text
 
 
+def test_past_the_initial_fix_the_published_descent_is_not_called_a_level_bust_but_low_is_still_low(tmp_path):
+    # Found machine-flying gate to gate: cleared via the initial fix at 4,000 ft, the aircraft followed the
+    # procedure down past the fix and the controller said "check your level, cleared four thousand feet".
+    _, engine, approach, _ = make(tmp_path, east=[line for line in STAR if line.startswith("APPCH")], navfix=FIXES)
+    engine.handle(Intent("check_in"), approach, WESTERLY, at(51.3, 6.2, feet=7000, heading=230))
+    engine.flight.pending = None
+    before_fix = {**at(51.3, 5.95, feet=3500, heading=230), "vs_fpm": -800.0}
+    assert "check your level" in engine.tick(approach, WESTERLY, before_fix).text  # not yet on the procedure
+    engine.flight.bust_called_for = None
+    past_fix = {**at(51.08, 5.68, feet=3200, heading=230), "vs_fpm": -800.0}  # between the fix and the final segment
+    assert engine.tick(approach, WESTERLY, past_fix) is None
+    # Reached once is reached for good, wherever the procedure's legs then lead.
+    assert engine.flight.arrival.via_reached
+    engine.flight.bust_called_for = None
+    curving = {**at(51.25, 5.55, feet=3000, heading=180), "vs_fpm": -800.0}  # farther from the runway than the fix is
+    assert engine.tick(approach, WESTERLY, curving) is None
+    low = {**at(51.08, 5.68, feet=600, heading=230), "vs_fpm": -1500.0}
+    assert "low altitude alert" in engine.tick(approach, WESTERLY, low).text  # low is low, on a procedure too
+
+
+def test_a_long_final_flown_on_the_glide_path_is_not_a_level_bust_but_below_it_is_low(tmp_path):
+    # Found machine-flying gate to gate: established on the localizer 16 to 22 miles out, descending on the glide
+    # path, and the controller said "check your level". Below the path, the alert still comes.
+    from proatc.ifr import Arrival
+    from proatc.vectors import locate
+
+    _, engine, approach, _ = make(tmp_path, navfix=FIXES)
+    flight = engine.flight
+    flight.contacted.add(approach.key)
+    flight.arrival = Arrival("LFXX", "27", "I L S", 3000, 270.0, (51.0, 5.37), final_nm=10, stage="intercept")
+    flight.cleared_ft = 6000
+    on_path = {**at(51.0, 5.37 + 18 / (60 * 0.6293), feet=5800, heading=270), "vs_fpm": -800.0}  # 18 NM out
+    assert round(locate(on_path["lat"], on_path["lon"], (51.0, 5.37), 270.0).along_nm) == 18
+    assert engine.tick(approach, WESTERLY, on_path) is None
+    flight.bust_called_for = None
+    below = {**on_path, "elevation_m": 3500 * 0.3048, "agl_m": 3500 * 0.3048}  # 2,200 ft under a 3 degree path
+    assert "check your level" in engine.tick(approach, WESTERLY, below).text
+
+
 def test_a_hold_gives_an_expected_approach_time(tmp_path):
     from proatc.holding import HoldState, issue
     from proatc.navfix import Hold

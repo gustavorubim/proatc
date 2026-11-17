@@ -55,9 +55,11 @@ BACK_AGAIN_NM = 60  # a flight is not handed back to the centre it came from wit
 APPROACH_SOON_NM = 25  # this close to the hand-off to approach, a centre does not send the flight to another centre
 NEXT_STEP_WITHIN_FT = 2000  # the next step is given this close to the cleared level
 PROFILE_CROSS_NM = 1.5  # this near the centreline, inside the joining point, is on the final approach
+LONG_FINAL_NM = 25  # on the centreline and on the glide path this far out, the aircraft is on its final approach
 PROFILE_MARGIN_FT = 300  # below a three degree path by more than this is low, cleared for the approach or not
 MSA_RADIUS_NM = 25  # a minimum sector altitude covers this far from the airport
 LOW_AGL_FT = 1000  # descending below this height above the ground, away from the approach, draws an alert
+FIX_REACHED_NM = 2.5  # this close to an approach's initial fix, the aircraft has reached it (turns are anticipated)
 BUST_FT = 400  # how far through a cleared level before the controller says something
 HEADING_GRACE_S = 45  # time to roll onto an assigned heading before being asked about it
 STAGES = ["descend", "downwind", "base", "intercept", "procedure", "tower"]
@@ -107,6 +109,7 @@ class Arrival:
     extended: bool = False  # told the downwind leg is being extended for traffic
     circling_given: bool = False
     procedure: object | None = None  # procedures.Approach: the approach being flown, with its initial fixes
+    via_reached: bool = False  # the aircraft has reached the initial fix it was cleared via
     via: str | None = None  # the initial approach fix an approach flown as a procedure starts at
     unavailable: bool = False  # no instrument approach, and weather that rules out a visual one
     unavailable_told: bool = False
@@ -1395,7 +1398,8 @@ def _on_profile(arrival: Arrival, raw: dict) -> bool:
     if "lat" not in raw or "agl_m" not in raw:
         return False
     position = locate(raw["lat"], raw["lon"], arrival.threshold, arrival.course_true)
-    on_final = position.cross_nm < PROFILE_CROSS_NM and 0 < position.along_nm <= arrival.final_nm + 2
+    # A final joined farther out than planned is flown on the same path: the height check below is what keeps it safe.
+    on_final = position.cross_nm < PROFILE_CROSS_NM and 0 < position.along_nm <= max(arrival.final_nm + 2, LONG_FINAL_NM)
     return on_final and raw["agl_m"] / 0.3048 >= position.along_nm * 318 - PROFILE_MARGIN_FT
 
 
@@ -1421,6 +1425,23 @@ def _watch(engine, station, raw, callsign):
     return _traffic(engine, raw, callsign) or vfr.airspace_watch(engine, station, raw, callsign, _faa(station))
 
 
+def _flying_procedure(engine, arrival: Arrival, raw: dict) -> bool:
+    """Cleared for an approach via its initial fix, and past that fix: the aircraft descends with the published
+    procedure, and the altitude it was last given no longer applies. Before the fix it still does."""
+    if arrival.stage != "procedure" or not arrival.via or not engine.navfix or "lat" not in raw:
+        return False
+    fix = engine.navfix.position(arrival.via, arrival.threshold[0], arrival.threshold[1], 100)
+    if fix is None:
+        return False
+    if not arrival.via_reached:
+        # Reached once is reached for good: a procedure's legs may curve round the airport, so being nearer the
+        # runway than the fix is not a test of having passed it.
+        here = distance_nm(raw["lat"], raw["lon"], *arrival.threshold)
+        near = distance_nm(raw["lat"], raw["lon"], *fix) <= FIX_REACHED_NM
+        arrival.via_reached = near or here < distance_nm(*fix, *arrival.threshold) - 1.0
+    return arrival.via_reached
+
+
 def _safety(engine, station, raw, callsign):
     """A level bust or a low altitude alert."""
     flight, arrival = engine.flight, engine.flight.arrival
@@ -1432,7 +1453,8 @@ def _safety(engine, station, raw, callsign):
     cleared_approach = arrival is not None and arrival.stage in (*ON_APPROACH, "tower") and _on_profile(arrival, raw)
     if cleared is not None and flight.bust_called_for != cleared:
         climbing_through = feet > cleared + BUST_FT and rate > 300
-        descending_through = feet < cleared - BUST_FT and rate < -300 and not cleared_approach
+        on_procedure = arrival is not None and _flying_procedure(engine, arrival, raw)
+        descending_through = feet < cleared - BUST_FT and rate < -300 and not cleared_approach and not on_procedure
         if climbing_through or descending_through:
             flight.bust_called_for = cleared
             text = f"{callsign}, check your {'altitude' if faa else 'level'}, cleared {_level(engine, cleared, ident, faa)}"
