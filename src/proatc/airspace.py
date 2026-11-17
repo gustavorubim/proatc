@@ -104,23 +104,26 @@ def parse_openair(lines) -> list[Airspace]:
             found.append(Airspace(kind, name or "", floor[0], ceiling[0], floor[1], list(points)))
 
     for line in lines:
-        tag, _, rest = line.strip().partition(" ")
-        if tag == "AC":
-            finish()
-            kind, name, floor, ceiling, points = rest.strip().upper(), None, (0.0, False), (UNLIMITED_FT, False), []
-        elif tag == "AN":
-            name = " ".join(rest.split())
-        elif tag == "AL":
-            floor = _limit(rest)
-        elif tag == "AH":
-            ceiling = _limit(rest)
-        elif tag == "DP":
-            match = POINT.search(rest)
-            if match:
-                d1, m1, s1, ns, d2, m2, s2, ew = match.groups()
-                lat = (int(d1) + int(m1) / 60 + float(s1) / 3600) * (1 if ns == "N" else -1)
-                lon = (int(d2) + int(m2) / 60 + float(s2) / 3600) * (1 if ew == "E" else -1)
-                points.append((lat, lon))
+        try:
+            tag, _, rest = line.strip().partition(" ")
+            if tag == "AC":
+                finish()
+                kind, name, floor, ceiling, points = rest.strip().upper(), None, (0.0, False), (UNLIMITED_FT, False), []
+            elif tag == "AN":
+                name = " ".join(rest.split())
+            elif tag == "AL":
+                floor = _limit(rest)
+            elif tag == "AH":
+                ceiling = _limit(rest)
+            elif tag == "DP":
+                match = POINT.search(rest)
+                if match:
+                    d1, m1, s1, ns, d2, m2, s2, ew = match.groups()
+                    lat = (int(d1) + int(m1) / 60 + float(s1) / 3600) * (1 if ns == "N" else -1)
+                    lon = (int(d2) + int(m2) / 60 + float(s2) / 3600) * (1 if ew == "E" else -1)
+                    points.append((lat, lon))
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     finish()
     return found
 

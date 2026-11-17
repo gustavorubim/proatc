@@ -104,36 +104,39 @@ def parse_atc(lines) -> list[Center]:
     role = ""
     polygon: Polygon | None = None
     for line in lines:
-        word, _, rest = line.strip().partition(" ")
-        rest = rest.strip()
-        if word == "CONTROLLER":
-            current, role = Center("", ""), ""
-        elif current is None:
-            continue
-        elif word == "NAME":
-            current.name = rest
-        elif word == "FACILITY_ID":
-            current.facility = rest
-        elif word == "ROLE":
-            role = rest.lower()
-        elif word == "FREQ" and rest.isdigit():
-            current.freqs_khz.append(int(rest) * 10)
-        elif word == "AIRSPACE_POLYGON_BEGIN":
-            limits = rest.split()
-            polygon = Polygon(float(limits[0]) if limits else 0, float(limits[1]) if len(limits) > 1 else 99999, [])
-        elif word == "POINT" and polygon is not None:
-            lat, lon = rest.split()[:2]
-            polygon.points.append((float(lat), float(lon)))
-        elif word == "AIRSPACE_POLYGON_END" and polygon is not None:
-            if len(polygon.points) >= 3:
-                lats, lons = [p[0] for p in polygon.points], [p[1] for p in polygon.points]
-                polygon.box = (min(lats), max(lats), min(lons), max(lons))
-                current.polygons.append(polygon)
-            polygon = None
-        elif word == "CONTROLLER_END":
-            if role == "ctr" and current.name and current.freqs_khz and current.polygons:
-                centers.append(current)
-            current = None
+        try:
+            word, _, rest = line.strip().partition(" ")
+            rest = rest.strip()
+            if word == "CONTROLLER":
+                current, role = Center("", ""), ""
+            elif current is None:
+                continue
+            elif word == "NAME":
+                current.name = rest
+            elif word == "FACILITY_ID":
+                current.facility = rest
+            elif word == "ROLE":
+                role = rest.lower()
+            elif word == "FREQ" and rest.isdigit():
+                current.freqs_khz.append(int(rest) * 10)
+            elif word == "AIRSPACE_POLYGON_BEGIN":
+                limits = rest.split()
+                polygon = Polygon(float(limits[0]) if limits else 0, float(limits[1]) if len(limits) > 1 else 99999, [])
+            elif word == "POINT" and polygon is not None:
+                lat, lon = rest.split()[:2]
+                polygon.points.append((float(lat), float(lon)))
+            elif word == "AIRSPACE_POLYGON_END" and polygon is not None:
+                if len(polygon.points) >= 3:
+                    lats, lons = [p[0] for p in polygon.points], [p[1] for p in polygon.points]
+                    polygon.box = (min(lats), max(lats), min(lons), max(lons))
+                    current.polygons.append(polygon)
+                polygon = None
+            elif word == "CONTROLLER_END":
+                if role == "ctr" and current.name and current.freqs_khz and current.polygons:
+                    centers.append(current)
+                current = None
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     return centers
 
 

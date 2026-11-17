@@ -112,7 +112,8 @@ class Station:
             return f"{self.airport.spoken_name} Information"
         if match:
             role = match.group(2).title()
-            return f"{match.group(1).title()} {ROLE_WORDS.get(role, role)}"
+            place = " ".join(match.group(1).split())  # labels in the sim's data sometimes carry doubled spaces
+            return f"{place.title()} {ROLE_WORDS.get(role, role)}"
         return f"{self.airport.spoken_name} {STATION_WORD[self.kind]}"
 
     @property
@@ -129,6 +130,14 @@ def clean_name(name: str) -> str:
     name = re.sub(r"\[.*?\]|\(.*?\)|[-/]", " ", name)
     name = re.sub(r"\b(Intl|International|Airport|Airfield|Regional|Rgnl|Municipal|Muni|Field|Fld)\b\.?", " ", name, flags=re.I)
     return " ".join(name.split()) or name.strip()
+
+
+def latlon(lat: str, lon: str) -> tuple[float, float]:
+    """A latitude and longitude from a data file. Raises ValueError for anything that is not a place on Earth."""
+    place = (float(lat), float(lon))
+    if not (-90.0 <= place[0] <= 90.0 and -180.0 <= place[1] <= 180.0):  # also false for NaN and infinity
+        raise ValueError(f"not a position: {lat} {lon}")
+    return place
 
 
 def distance_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -176,37 +185,40 @@ def parse_apt(lines: Iterable[str], position=None) -> Iterator[Airport]:
         return current
 
     for line in lines:
-        if not line or line[0] not in "15":
-            continue
-        code, _, rest = line.partition(" ")
-        if code in ("1", "16", "17"):
-            done = finish()
-            if done:
-                yield done
-            current, meta = None, {}
-            if code == "1":
-                parts = rest.split(None, 4)
-                if len(parts) >= 4:
-                    current = Airport(parts[3], parts[4].strip() if len(parts) > 4 else parts[3], 0.0, 0.0, float(parts[0]))
-                    current.offset = position() if position else 0
-        elif current is None:
-            continue
-        elif code == "100":
-            t = line.split()
-            if len(t) >= 20:
-                lat1, lon1, lat2, lon2 = float(t[9]), float(t[10]), float(t[18]), float(t[19])
-                current.runways.append(
-                    Runway(t[8], lat1, lon1, t[17], lat2, lon2, distance_nm(lat1, lon1, lat2, lon2) * 1852, int(t[2]))
-                )
-        elif code == "1302":
-            parts = rest.split(None, 1)
-            if len(parts) == 2:
-                meta[parts[0]] = parts[1].strip()
-        elif code in FREQ_KINDS:
-            parts = rest.split(None, 1)
-            if parts and parts[0].isdigit():
-                khz = int(parts[0]) * (1 if len(code) == 4 else 10)
-                current.freqs.append(Freq(khz, FREQ_KINDS[code], parts[1].strip() if len(parts) > 1 else ""))
+        try:
+            if not line or line[0] not in "15":
+                continue
+            code, _, rest = line.partition(" ")
+            if code in ("1", "16", "17"):
+                done = finish()
+                if done:
+                    yield done
+                current, meta = None, {}
+                if code == "1":
+                    parts = rest.split(None, 4)
+                    if len(parts) >= 4:
+                        current = Airport(parts[3], parts[4].strip() if len(parts) > 4 else parts[3], 0.0, 0.0, float(parts[0]))
+                        current.offset = position() if position else 0
+            elif current is None:
+                continue
+            elif code == "100":
+                t = line.split()
+                if len(t) >= 20:
+                    (lat1, lon1), (lat2, lon2) = latlon(t[9], t[10]), latlon(t[18], t[19])
+                    current.runways.append(
+                        Runway(t[8], lat1, lon1, t[17], lat2, lon2, distance_nm(lat1, lon1, lat2, lon2) * 1852, int(t[2]))
+                    )
+            elif code == "1302":
+                parts = rest.split(None, 1)
+                if len(parts) == 2:
+                    meta[parts[0]] = parts[1].strip()
+            elif code in FREQ_KINDS:
+                parts = rest.split(None, 1)
+                if parts and parts[0].isdigit():
+                    khz = int(parts[0]) * (1 if len(code) == 4 else 10)
+                    current.freqs.append(Freq(khz, FREQ_KINDS[code], parts[1].strip() if len(parts) > 1 else ""))
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     done = finish()
     if done:
         yield done

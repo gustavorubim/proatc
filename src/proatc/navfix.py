@@ -82,71 +82,88 @@ class NavFix:
 def parse_fixes(fix_lines, nav_lines) -> dict[str, list[tuple[float, float]]]:
     fixes: dict[str, list[tuple[float, float]]] = {}
     for line in fix_lines:
-        t = line.split(None, 3)
-        if len(t) >= 3:
-            try:
-                fixes.setdefault(t[2], []).append((float(t[0]), float(t[1])))
-            except ValueError:
-                continue
+        try:
+            t = line.split(None, 3)
+            if len(t) >= 3:
+                try:
+                    fixes.setdefault(t[2], []).append((float(t[0]), float(t[1])))
+                except ValueError:
+                    continue
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     for line in nav_lines:
-        t = line.split(None, 8)
-        # NDB (2), VOR (3) and DME (12, 13) rows carry the ident in the eighth column.
-        if len(t) >= 8 and t[0] in ("2", "3", "12", "13"):
-            try:
-                point = (float(t[1]), float(t[2]))
-            except ValueError:
-                continue
-            if point not in fixes.setdefault(t[7], []):
-                fixes[t[7]].append(point)
+        try:
+            t = line.split(None, 8)
+            # NDB (2), VOR (3) and DME (12, 13) rows carry the ident in the eighth column.
+            if len(t) >= 8 and t[0] in ("2", "3", "12", "13"):
+                try:
+                    point = (float(t[1]), float(t[2]))
+                except ValueError:
+                    continue
+                if point not in fixes.setdefault(t[7], []):
+                    fixes[t[7]].append(point)
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     return fixes
 
 
 def parse_holds(lines) -> dict[str, list[Hold]]:
     holds: dict[str, list[Hold]] = {}
     for line in lines:
-        t = line.split()
-        if len(t) < 11 or t[7] not in ("L", "R"):
-            continue
         try:
-            hold = Hold(t[0], t[2], float(t[4]), t[7], float(t[5]) or 1.0, int(float(t[8])), int(float(t[9])), int(float(t[10])))
-        except ValueError:
-            continue
-        holds.setdefault(t[0], []).append(hold)
+            t = line.split()
+            if len(t) < 11 or t[7] not in ("L", "R"):
+                continue
+            try:
+                hold = Hold(
+                    t[0], t[2], float(t[4]), t[7], float(t[5]) or 1.0, int(float(t[8])), int(float(t[9])), int(float(t[10]))
+                )
+            except ValueError:
+                continue
+            holds.setdefault(t[0], []).append(hold)
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     return holds
 
 
 def parse_msa(lines) -> dict[str, int]:
     msa: dict[str, int] = {}
     for line in lines:
-        t = line.split()
-        if len(t) < 8 or t[4] != "M":
-            continue
-        sectors = t[5:]
-        altitudes = []
-        for index in range(0, len(sectors) - 2, 3):
-            bearing, altitude, radius = sectors[index : index + 3]
-            if bearing == "000" and altitude == "000":
-                break
-            if altitude.isdigit():
-                altitudes.append(int(altitude) * 100)
-        if altitudes:
-            msa[t[3]] = max(msa.get(t[3], 0), max(altitudes))
+        try:
+            t = line.split()
+            if len(t) < 8 or t[4] != "M":
+                continue
+            sectors = t[5:]
+            altitudes = []
+            for index in range(0, len(sectors) - 2, 3):
+                bearing, altitude, radius = sectors[index : index + 3]
+                if bearing == "000" and altitude == "000":
+                    break
+                if altitude.isdigit():
+                    altitudes.append(int(altitude) * 100)
+            if altitudes:
+                msa[t[3]] = max(msa.get(t[3], 0), max(altitudes))
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     return msa
 
 
 def parse_mora(lines) -> dict[tuple[int, int], int]:
     mora: dict[tuple[int, int], int] = {}
     for line in lines:
-        t = line.split()
-        if len(t) < 3 or t[0][0] not in "+-" or t[1][0] not in "+-":
-            continue
         try:
-            lat, lon = int(t[0]), int(t[1])
-        except ValueError:
-            continue
-        for offset, value in enumerate(t[2:32]):
-            if value.isdigit():
-                mora[(lat, lon + offset)] = int(value) * 100
+            t = line.split()
+            if len(t) < 3 or t[0][0] not in "+-" or t[1][0] not in "+-":
+                continue
+            try:
+                lat, lon = int(t[0]), int(t[1])
+            except ValueError:
+                continue
+            for offset, value in enumerate(t[2:32]):
+                if value.isdigit():
+                    mora[(lat, lon + offset)] = int(value) * 100
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     return mora
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import heapq
 from dataclasses import dataclass, field
 
-from .navdata import bearing, distance_nm
+from .navdata import bearing, distance_nm, latlon
 
 CROSSING_PENALTY_M = 3000  # prefer routes that do not cross another runway
 FULL_LENGTH_M = 400  # runway entries this close to the threshold count as full-length departures
@@ -69,24 +69,27 @@ def parse_taxi(lines: list[str]) -> TaxiNetwork:
     net = TaxiNetwork()
     pending: list[tuple[int, int, bool, bool, str]] = []
     for line in lines:
-        if line.startswith("1201 "):
-            t = line.split()
-            if len(t) >= 5:
-                net.nodes[int(t[4])] = (float(t[1]), float(t[2]))
-        elif line.startswith("1202 "):
-            t = line.split(None, 5)
-            if len(t) >= 5:
-                pending.append((int(t[1]), int(t[2]), t[3] == "twoway", t[4] == "runway", t[5].strip() if len(t) > 5 else ""))
-        elif line.startswith("1300 "):
-            t = line.split(None, 6)
-            if len(t) >= 6:
-                categories = set(t[5].split("|")) if len(t) > 5 else set()
-                net.parking.append(Parking(t[6].strip() if len(t) > 6 else "", float(t[1]), float(t[2]), t[4], categories))
-        elif line.startswith("1301 ") and net.parking:
-            t = line.split()
-            if len(t) >= 3:
-                net.parking[-1].operation = t[2]
-                net.parking[-1].airlines = {code.upper() for code in t[3:]}
+        try:
+            if line.startswith("1201 "):
+                t = line.split()
+                if len(t) >= 5:
+                    net.nodes[int(t[4])] = latlon(t[1], t[2])
+            elif line.startswith("1202 "):
+                t = line.split(None, 5)
+                if len(t) >= 5:
+                    pending.append((int(t[1]), int(t[2]), t[3] == "twoway", t[4] == "runway", t[5].strip() if len(t) > 5 else ""))
+            elif line.startswith("1300 "):
+                t = line.split(None, 6)
+                if len(t) >= 6:
+                    categories = set(t[5].split("|")) if len(t) > 5 else set()
+                    net.parking.append(Parking(t[6].strip() if len(t) > 6 else "", *latlon(t[1], t[2]), t[4], categories))
+            elif line.startswith("1301 ") and net.parking:
+                t = line.split()
+                if len(t) >= 3:
+                    net.parking[-1].operation = t[2]
+                    net.parking[-1].airlines = {code.upper() for code in t[3:]}
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     for a, b, twoway, runway, name in pending:
         if a not in net.nodes or b not in net.nodes:
             continue
