@@ -39,7 +39,7 @@ from .intents import Intent
 from .navdata import AirportDB, distance_nm
 from .radio import current_station, monitored, observe
 from .voice_loop import Session
-from .xpbridge import SimUnavailable, describe, magnetic_variation
+from .xpbridge import SimUnavailable, describe, magnetic_variation, same_channel
 
 BACKLOG = 200
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I: the code is typed on a phone
@@ -220,7 +220,7 @@ def build_state(session: Session, db: AirportDB) -> dict:
     # A hand-off frequency stops being offered once it is tuned. The engine keeps it until a call is made on
     # it (the copilot checks in on it): this thread only reads it.
     pending = state["flight"].get("next_frequency")
-    if pending and khz and abs(float(pending) * 1000 - khz) <= 5:
+    if pending and khz and same_channel(int(round(float(pending) * 1000)), khz):
         state["flight"].pop("next_frequency", None)
     state["status"]["can_tune"] = config.sim.allow_tuning
     if station and station.kind != "atis":

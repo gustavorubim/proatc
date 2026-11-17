@@ -41,7 +41,7 @@ from .radio import AtisBroadcaster, SecondRadio, SimClock, briefing, current_sta
 from .replay import snapshot
 from .stt import SpeechToText
 from .tts import TextToSpeech, download_models, models_present
-from .xpbridge import SimUnavailable, XPBridge, describe, magnetic_variation, transmit_radio, tuned_khz
+from .xpbridge import SimUnavailable, XPBridge, describe, magnetic_variation, same_channel, transmit_radio, tuned_khz
 
 MIN_SECONDS = 0.4
 
@@ -57,6 +57,7 @@ DEBRIEFER = (
     "tip. Plain language, no markdown, no lists, no score."
 )
 TRACE_EVERY_S = 20
+TUNE_WAIT_S = 5.0  # how long a written frequency may take to be reported: real sims have taken over 2 s
 GENERIC_CALLS = ("Say again", "Radio check", "Deviate left", "Deviate right", "Destination weather", "Clear of weather")
 
 
@@ -360,11 +361,14 @@ class Session:
         radio = 3 - radio if other else radio
         key = f"com{radio}_khz"
         self.bridge.write(key, khz)
-        deadline = self.clock.monotonic() + 2.0
-        while self.clock.monotonic() < deadline:
-            if abs(self.bridge.snapshot().get(key, 0) - khz) <= 5:
-                self.emit({"type": "info", "text": f"COM{radio} tuned to {khz / 1000:.3f}"})
+        deadline = self.clock.monotonic() + TUNE_WAIT_S
+        while True:  # looked at once more when the wait is over: a report that came just then is not a failure
+            reported = self.bridge.snapshot().get(key)
+            if same_channel(khz, reported):  # the sim may report the name of the 8.33 kHz channel it snapped to
+                self.emit({"type": "info", "text": f"COM{radio} tuned to {int(reported) / 1000:.3f}"})
                 return
+            if self.clock.monotonic() >= deadline:
+                break
             self.clock.sleep(0.1)
         raise SimUnavailable(
             f"The aircraft did not take {khz / 1000:.3f} on COM{radio}. Some add-on aircraft manage their own radios; tune it in the cockpit."
@@ -702,7 +706,7 @@ def hearing_hints(engine, callsign: str, station) -> str:
 
 
 def _same_frequency(mhz: str, khz: int | None) -> bool:
-    return khz is not None and abs(float(mhz) * 1000 - khz) <= 5
+    return khz is not None and same_channel(int(round(float(mhz) * 1000)), khz)
 
 
 def _someone_listening(bridge, db, emit: Emit) -> bool:
