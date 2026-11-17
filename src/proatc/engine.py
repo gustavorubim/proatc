@@ -123,6 +123,7 @@ class Flight:
     bust_called_for: int | None = None  # the cleared level a bust was already called for
     pending_at: float = 0.0  # when the pending instruction was given (engine clock)
     pending_key: str | None = None  # the station that gave it
+    pending_khz: int | None = None  # the frequency it was given on: a station that shares it may answer for it
     reminded: bool = False
     # Taxi (see _taxi_out, _taxi_in)
     crossings: list[str] = field(default_factory=list)  # runways ("09R/27L") still to be crossed, each needing a clearance
@@ -394,12 +395,12 @@ class Engine:
                 intent["runway"] = expect[key].split("/")[0]
         return intent
 
-    def _check_readback(self, intent: Intent, callsign: str, station) -> Reply | None:
+    def _check_readback(self, intent: Intent, callsign: str, station, raw: dict) -> Reply | None:
         pending = self.flight.pending
         # A request that happens to carry a number (a level asked for, a runway named) is not a readback.
         if pending is None or intent.intent not in ("readback", "other"):
             return None
-        if self.flight.pending_key != station.key:
+        if not self.waiting_on(station, raw):
             return None  # read back to someone else: the controller who gave the instruction has not heard it
         values = (intent.runway, intent.squawk, intent.frequency, intent.qnh, intent.altitude, intent.heading)
         if intent.intent != "readback" and all(value is None for value in values):
@@ -441,11 +442,11 @@ class Engine:
                     self.flight.last_said[key] = reply.text
                 return reply
 
-            self._reached(station)
-            reply = self._check_readback(intent, callsign, station)
+            self._reached(station, raw)
+            reply = self._check_readback(intent, callsign, station, raw)
             if reply is None:
                 if intent.intent == "readback":
-                    reply = Reply("", note=self._not_for(station))  # an acknowledgement with nothing outstanding
+                    reply = Reply("", note=self._not_for(station, raw))  # an acknowledgement with nothing outstanding
                 else:
                     contacted = set(self.flight.contacted)
                     reply = self._decide(intent, station, issue, raw, variation, callsign)
@@ -497,7 +498,21 @@ class Engine:
         hello = self._greeting(station)
         return Reply(f"{callsign}, {hello}roger {flight.emergency}, squawk seven seven zero zero, say intentions")
 
-    def _reached(self, station: Station) -> None:
+    def waiting_on(self, station: Station, raw: dict) -> bool:
+        """Whether the controller on frequency is the one waiting for a readback: the station that gave the
+        instruction, or whoever answers on the frequency it was given on (where a centre and an airport share
+        one, which of them answers can change while the pilot has not touched the radio)."""
+        from .xpbridge import tuned_khz
+
+        flight = self.flight
+        if flight.pending is None:
+            return False
+        if flight.pending_key == station.key:
+            return True
+        khz = tuned_khz(raw)
+        return flight.pending_khz is not None and khz is not None and abs(khz - flight.pending_khz) <= 5
+
+    def _reached(self, station: Station, raw: dict) -> None:
         """A call on the frequency the flight was handed to completes the hand-off: there is no frequency left
         to follow, and a hand-off not yet read back to the controller who gave it has been obeyed instead."""
         flight, khz = self.flight, getattr(station, "khz", None)
@@ -506,12 +521,12 @@ class Engine:
         if flight.next_frequency and abs(float(flight.next_frequency) * 1000 - khz) <= 5:
             flight.next_frequency = None
         handed = flight.pending.expect.get("frequency") if flight.pending else None
-        if handed and flight.pending_key != station.key and abs(float(handed) * 1000 - khz) <= 5:
+        if handed and not self.waiting_on(station, raw) and abs(float(handed) * 1000 - khz) <= 5:
             flight.pending = None
 
-    def _not_for(self, station: Station) -> str:
+    def _not_for(self, station: Station, raw: dict) -> str:
         """Why a readback got no answer: the instruction it reads back was another controller's."""
-        if self.flight.pending is None or self.flight.pending_key == station.key:
+        if self.flight.pending is None or self.waiting_on(station, raw):
             return ""
         return f"That readback was not for {station.callsign}: read it back to the controller who gave the instruction."
 
@@ -521,6 +536,9 @@ class Engine:
             flight.next_frequency = reply.expect["frequency"]  # offered in the app as a one-click tune
             flight.handoffs += 1
         flight.pending, flight.pending_key, flight.pending_at, flight.reminded = reply, key, self.now(), False
+        from .xpbridge import tuned_khz
+
+        flight.pending_khz = tuned_khz(self.last_raw)
 
     def _decide(
         self, intent: Intent, station: Station, issue: Issue | None, raw: dict, variation: float, callsign: str
@@ -973,24 +991,24 @@ class Engine:
                     pressure = self._pressure(issue, uses_faa_style(airport.ident))[0]
                     return Reply(f"{callsign}, information {say.letter(issue.letter)} is now current, {pressure}")
             # An instruction nobody read back is said once more.
-            if (
-                flight.pending
-                and not flight.reminded
-                and flight.pending_key == key
-                and self.now() - flight.pending_at > READBACK_WAIT_S
-            ):
-                flight.reminded = True
+            waiting = self.waiting_on(station, raw)
+            if waiting and not flight.reminded and self.now() - flight.pending_at > READBACK_WAIT_S:
+                flight.reminded, flight.pending_at = True, self.now()  # and the pilot has as long again to answer
                 body = self.instruction_body(flight.pending.text, station.callsign)
                 return Reply(
                     f"{callsign}, {station.callsign}, I say again, {body}", flight.pending.expect, correction=True,
                     event="readback_missed",
                 )  # fmt: skip
             if station.kind in ifr.RADAR_KINDS:
-                if flight.pending is not None and flight.pending_key == key and not flight.reminded:
-                    # One instruction at a time: the next waits for the readback of the last, or a new one
-                    # would take its place and that readback would never be asked for. Once the last has been
-                    # said again, the controller carries on rather than fall silent for good.
-                    return None
+                if waiting and self.now() - flight.pending_at <= READBACK_WAIT_S:
+                    # One instruction at a time: the next waits for the readback of the last, or a new one would
+                    # take its place and that readback would never be asked for. Not for ever: once the last has
+                    # been said again and still not answered, the controller carries on. What needs no readback
+                    # (a level bust, a low altitude alert, traffic) is said at once.
+                    reply = ifr.alerts(self, station, raw, callsign)
+                    if reply:
+                        flight.last_said[key] = reply.text
+                    return reply
                 reply = ifr.tick(self, station, issue, raw, magnetic_variation(raw), callsign)
                 if reply:
                     flight.last_said[key] = reply.text
@@ -1116,7 +1134,7 @@ class Engine:
                     item["needs"] = needs
                 items.append(item)
 
-            if flight.pending and flight.pending_key == key:  # read back to the controller who gave it
+            if self.waiting_on(station, raw):  # read back to the controller who gave it
                 said = self.instruction_body(flight.pending.text, station.callsign)
                 said = re.sub(r", information [\w-]+ is current", "", said)  # the pilot does not read that back
                 items.append(
