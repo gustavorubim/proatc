@@ -228,6 +228,7 @@ HOLD_SHORT_NM = 0.05  # where the pilot stops short of a runway: inside the engi
 WAYPOINT_NM = 2.0  # a waypoint this close is passed
 CAPTURE_NM = 0.6  # the final approach course is captured this close to it
 OWN_FINAL_NM = 8.0  # without radar vectors, the pilot joins final this far out
+OWN_TURN_NM = 3.0  # and to turn back onto it, first goes this far out to the side
 REPORT_FINAL_NM = 6.0
 GLIDE_FT_PER_NM = 318.0  # three degrees
 TOO_MANY_VECTORS = 12
@@ -309,6 +310,24 @@ def _weathers(origin: str, destination: str) -> tuple[Weather, Weather | None]:
     return weather(first), (weather(second) if second and second != first else None)
 
 
+def _main_taxiways(network) -> set[int]:
+    """The nodes of the largest group of taxiways connected to each other."""
+    seen: set[int] = set()
+    best: set[int] = set()
+    for first in network.taxi_nodes():
+        if first in seen:
+            continue
+        group, stack = set(), [first]
+        while stack:
+            node = stack.pop()
+            if node not in group:
+                group.add(node)
+                stack += [edge.to for edge in network.both_ways.get(node, []) if not edge.runway]
+        seen |= group
+        best = max(best, group, key=len)
+    return best
+
+
 class GateToGate:
     """One flight from a stand at the origin to a stand at the destination. `run()` gives (problems, transcript).
 
@@ -349,6 +368,7 @@ class GateToGate:
         self.landing_runway: str | None = None  # the runway it is to land on, as said (a circling runway, say)
         self.expected_runway: str | None = None  # "expect ... approach runway X"
         self.landing_cleared: str | None = None
+        self.turned_out = False  # flying its own approach, it has gone out to turn back in
         self.side: str | None = None  # side of the final approach course while intercepting it
         self.silent_nm = 0.0
         self.in_contact = False
@@ -911,7 +931,8 @@ class GateToGate:
             offsets = (engine._offset_nm(self.destination, name, {"lat": lat, "lon": lon}) for name in runways)
             return all(offset is None or offset > HOLD_SHORT_NM for offset in offsets)
 
-        beside = [node for node in network.taxi_nodes() - on_runways if clear_of_runways(node)]
+        main = _main_taxiways(network)  # an exit that leads somewhere: not a stub or a turn pad
+        beside = [node for node in main - on_runways if clear_of_runways(node)]
         node = min(beside, key=lambda n: distance_nm(plane.lat, plane.lon, *network.nodes[n]), default=None)
         target = network.nodes[node] if node is not None else _moved(plane.lat, plane.lon, (plane.heading + 90) % 360, 0.1)
         self.lateral = ("path", [target])
@@ -1006,13 +1027,21 @@ class GateToGate:
         final, position = self._final(), self._final_position()
         if final is None:
             return self.plane.heading
-        if position.along_nm >= 4 and position.cross_nm < 1.5:
+        inbound = abs((self.plane.heading - final[1] + 180) % 360 - 180) < 60  # not flying out along it
+        if position.along_nm >= 4 and position.cross_nm < 1.5 and inbound:
             self.lateral = ("final", None)
             return self._wanted_heading()
         gate = _on_centreline(final[0], final[1], OWN_FINAL_NM)
-        if distance_nm(self.plane.lat, self.plane.lon, *gate) < 1.0:
+        if distance_nm(self.plane.lat, self.plane.lon, *gate) < 1.0 and inbound:
             self.lateral = ("final", None)
             return self._wanted_heading()
+        if not inbound and position.along_nm > -1 and position.cross_nm < OWN_TURN_NM and not self.turned_out:
+            # Over the field or out along final the wrong way: out to the side and further out, then back in.
+            side = (final[1] + (90 if position.side == "left" else -90)) % 360
+            outer = _moved(*_on_centreline(final[0], final[1], OWN_FINAL_NM + 4), (side + 180) % 360, OWN_TURN_NM)
+            if distance_nm(self.plane.lat, self.plane.lon, *outer) > 1.5:
+                return bearing(self.plane.lat, self.plane.lon, *outer)
+            self.turned_out = True
         return bearing(self.plane.lat, self.plane.lon, *gate)
 
     def _ias(self) -> float:

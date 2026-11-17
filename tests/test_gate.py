@@ -352,15 +352,17 @@ def test_an_approach_altitude_under_the_airport_is_raised_above_it():
 def test_an_r_nav_approach_is_never_cleared_below_the_minimum_sector_altitude(world):  # noqa: F811
     db, engine, _ = world
     approach = db.station(124300, 51.0, 5.5, feet=9000)
-    fixes = {"NEARS": (51.0, 5.75)}
+    fixes = {"NEARS": (51.0, 5.75), "FARRR": (51.0, 6.45)}  # 14 and 40 miles out on the approach to 27
     engine.navfix = SimpleNamespace(position=lambda fix, lat, lon, within=400: fixes.get(fix), grid_safe_ft=lambda *_: 0)
-    procedure = SimpleNamespace(kind="R", initial_fixes=lambda: [("NEARS", 4000)])
-    engine.flight.arrival = ifr.Arrival("LFXX", "27", "R NAV", 2500, 270.0, (51.0, 5.37), procedure=procedure)
-    raw = at(51.0, 6.2, feet=22000, heading=270)
-    position = locate(raw["lat"], raw["lon"], (51.0, 5.37), 270.0)
-    # Direct to the fix from wherever the aircraft is: the sector altitude, 14,400 ft, not the fix's own 4,000.
-    reply = ifr._via_initial_fix(engine, approach, ISSUE, raw, CALLSIGN, "", position, 14400, False)
-    assert reply.expect["altitude"] == 14400
+    for fix, aircraft_lon, expected in (("FARRR", 7.2, 14400), ("NEARS", 6.2, None)):
+        procedure = SimpleNamespace(kind="R", initial_fixes=lambda fix=fix: [(fix, 4000)])
+        engine.flight.arrival = ifr.Arrival("LFXX", "27", "R NAV", 2500, 270.0, (51.0, 5.37), procedure=procedure)
+        raw = at(51.0, aircraft_lon, feet=22000, heading=270)
+        position = locate(raw["lat"], raw["lon"], (51.0, 5.37), 270.0)
+        # The sector altitude is 14,400 ft: held there until the fix, not the fix's own 4,000. From a fix 14 miles
+        # out nobody could get down from 14,400 ft: that one is not used, and the flight is vectored instead.
+        reply = ifr._via_initial_fix(engine, approach, ISSUE, raw, CALLSIGN, "", position, 14400, False)
+        assert (reply.expect["altitude"] if reply else None) == expected
 
 
 def test_a_departure_controller_hands_on_to_the_centre_ahead_when_none_covers_the_airport(fields):
@@ -502,3 +504,30 @@ def test_without_a_taxiway_to_the_threshold_a_departure_starts_from_an_intersect
     # The west end leaves no runway ahead for 27: never an entry there.
     far = [row for row in rows if "taxiway_E A" not in row]
     assert route_to_runway(parse_taxi(far), 52.0, -1.0, "27", (52.001, -0.99)) is None
+
+
+def test_a_runway_the_taxi_network_does_not_tag_is_still_a_crossing(tmp_path):
+    untagged = [line for line in CROSSING if "runway 09R/27L" not in line]  # the route crosses 09R/27L all the same
+    (tmp_path / "u.dat").write_text("\n".join(untagged), encoding="utf-8")
+    build_index(tmp_path / "u.dat", tmp_path / "u.sqlite")
+    db = AirportDB(tmp_path / "u.sqlite")
+    engine = Engine(db, seed=1, procedures=lambda ident: parse_cifp([]))
+    engine.flight.runway = "27R"
+    taxi = engine.handle(Intent("request_taxi"), db.station(121700, *APRON), ISSUE, taxiing(*APRON))
+    assert engine.flight.crossings == ["09R/27L"] and "hold short runway zero niner right" in taxi.text  # was: nothing
+
+
+def test_after_landing_a_stand_is_given_that_the_taxiways_reach_from_the_exit(tmp_path):
+    rows = """1201 52.0000 -1.0000 both 0 exit
+1201 52.0000 -0.9950 both 1 apron
+1201 52.0100 -1.0000 both 2 island
+1201 52.0100 -0.9950 both 3 island_apron
+1202 0 1 twoway taxiway_E A
+1202 2 3 twoway taxiway_E B
+1300 52.0100 -0.9949 0.0 gate jets NEAR
+1300 52.0000 -0.9949 0.0 gate jets REACHED""".splitlines()
+    network = parse_taxi(rows)
+    engine = Engine(None, seed=1)
+    near = next(stand for stand in network.parking if stand.name == "NEAR")
+    stand, route = engine._reachable_stand(network, {"lat": 52.0, "lon": -1.0}, near)
+    assert stand.name == "REACHED" and route.taxiways == ["A"]

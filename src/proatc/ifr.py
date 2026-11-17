@@ -57,6 +57,7 @@ NEXT_STEP_WITHIN_FT = 2000  # the next step is given this close to the cleared l
 PROFILE_CROSS_NM = 1.5  # this near the centreline, inside the joining point, is on the final approach
 LONG_FINAL_NM = 25  # on the centreline and on the glide path this far out, the aircraft is on its final approach
 PROFILE_MARGIN_FT = 300  # below a three degree path by more than this is low, cleared for the approach or not
+IAF_FT_PER_NM = 400  # a little over three degrees: the steepest an approach from its initial fix is given
 MSA_RADIUS_NM = 25  # a minimum sector altitude covers this far from the airport
 LOW_AGL_FT = 1000  # descending below this height above the ground, away from the approach, draws an alert
 FIX_REACHED_NM = 2.5  # this close to an approach's initial fix, the aircraft has reached it (turns are anticipated)
@@ -75,6 +76,7 @@ CROSSING_NM = 2.5
 SPEED_MARGIN_KT = 15
 SPEEDS_KT = {"descend": 250, "downwind": 220, "base": 180, "intercept": 160}
 JOIN_NM = (9, 10, 12)  # how far out final is joined; it differs from one arrival to the next
+FINAL_MAX_NM = 22  # but never so close in that the joining altitude is far above a three degree path, up to this
 EXTEND_UP_TO_NM = 8  # a downwind leg is extended at most this far beyond the usual base turn
 VISUAL_WITHIN_NM = 25
 VISUAL_VISIBILITY_SM = 5
@@ -687,7 +689,7 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
     flight.runway, flight.diverting = runway, False
     flight.arrival = Arrival(
         airport.ident, runway, approach.spoken if approach else "visual", platform, course, engine._threshold(airport, flown),
-        final_nm=min(join, 16), approach_runway=flown if flown != runway else None,
+        final_nm=min(join, FINAL_MAX_NM), approach_runway=flown if flown != runway else None,
         missed_ft=approach.missed_ft if approach else None, go_arounds=flight.go_arounds, unavailable=unavailable,
         procedure=approach,
     )  # fmt: skip
@@ -828,8 +830,9 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     return _reply(engine, f"{callsign}, {lead}{', '.join(parts)}", expect)
 
 
-def _initial_fix(engine, airport, arrival, raw, position):
-    """(fix, crossing altitude, position) of the published initial approach fix that suits where the aircraft is."""
+def _initial_fix(engine, airport, arrival, raw, position, floor: float = 0):
+    """(fix, crossing altitude, position) of the published initial approach fix that suits where the aircraft is:
+    one it can get down from to the runway, given the floor it must be held at until the fix."""
     approach = arrival.procedure
     if not approach or approach.kind not in PROCEDURAL_KINDS or not engine.navfix:
         return None
@@ -843,6 +846,8 @@ def _initial_fix(engine, airport, arrival, raw, position):
             continue  # too close in to be a way in, or already behind the aircraft
         if locate(*where, arrival.threshold, arrival.course_true).along_nm < 3:
             continue  # beyond the runway: the way in from there turns back over the airport, which is not watched here
+        if max(altitude or arrival.platform_ft, floor) - airport.elev_ft > out * IAF_FT_PER_NM:
+            continue  # held at the sector altitude to the fix, the flight could not get down from it in time
         miles = distance_nm(raw["lat"], raw["lon"], *where)
         if best is None or miles < best[0]:
             best = (miles, fix, altitude, where)
@@ -852,16 +857,16 @@ def _initial_fix(engine, airport, arrival, raw, position):
 def _via_initial_fix(engine, station, issue, raw, callsign, lead, position, safe, faa):
     """An R NAV approach is not vectored: direct to its initial approach fix, and cleared for the procedure."""
     flight, arrival, airport = engine.flight, engine.flight.arrival, station.airport
-    found = _initial_fix(engine, airport, arrival, raw, position)
+    # Direct to the fix from wherever the aircraft is: never below the minimum sector altitude, nor, beyond its 25
+    # miles, below the minimum off-route altitude of the terrain under the aircraft; never below the field.
+    floor = max(safe, safe_floor_ft(engine, raw) if position.distance_nm > MSA_RADIUS_NM else 0, airport.elev_ft + 1500)
+    found = _initial_fix(engine, airport, arrival, raw, position, floor)
     if not found:
         return None
     fix, crossing_ft, where = found
     word = _fix_word(engine, fix, *where)
     arrival.stage, arrival.via, arrival.heading, flight.direct_to = "procedure", fix, None, fix
     flight.heading_assigned = None
-    # Direct to the fix from wherever the aircraft is: never below the minimum sector altitude, nor, beyond its 25
-    # miles, below the minimum off-route altitude of the terrain under the aircraft; never below the field.
-    floor = max(safe, safe_floor_ft(engine, raw) if position.distance_nm > MSA_RADIUS_NM else 0, airport.elev_ft + 1500)
     altitude = max(crossing_ft or arrival.platform_ft, int(math.ceil(floor / 100) * 100))
     parts = [f"{'proceed' if faa else 'route'} direct {word}"]
     expect: dict = {}
