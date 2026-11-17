@@ -119,6 +119,7 @@ def build_state(session: Session, db: AirportDB) -> dict:
         "simbrief_user": load_settings().get("simbrief_user", ""),
         "suggestions": [],
         "airspace": [],
+        "map": None,
         "settings": {"values": editable_values(config), "options": session.options, "capturing": session.capturing},
         "cost": {**session.usage, "cost": round(session.usage["cost"], 5)},
     }
@@ -167,6 +168,7 @@ def build_state(session: Session, db: AirportDB) -> dict:
             )
         state["airport"] = info
     state["flight"] = session.engine.summary()
+    state["map"] = session.engine.taxi_map(raw)
     index = session.engine.airspace
     if index and "lat" in raw:
         feet = raw.get("elevation_m", 0.0) / 0.3048
@@ -306,6 +308,10 @@ class AppServer:
         elif name == "new_flight":
             session.engine.reset()
             self.emit({"type": "info", "text": "New flight: clearances and contacts cleared."})
+        elif name == "chart":
+            found = session.engine.chart(str(command.get("ident", "")).strip().upper()[:8])
+            if found:
+                self.emit({"type": "chart", **found})
         elif name == "tune":
             session.tune(str(command.get("mhz", "")))
         elif name == "capture_ptt":

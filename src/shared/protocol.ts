@@ -15,6 +15,35 @@ export interface Frequency {
   tuned: boolean
 }
 
+/** An airport's map: metres east and north of its reference point. Sent once, when asked for. */
+export interface Chart {
+  ident: string
+  name: string
+  runways: { name: string; width: number; ends: [string, number, number][] }[]
+  /** Polygons of rings of x, y, x, y…; a polygon's first ring is its outline, the rest are holes. */
+  pavement: number[][][]
+  /** Centrelines, as x1, y1, x2, y2… per taxiway. */
+  taxiways: { name: string; lines: number[] }[]
+  labels: { name: string; at: [number, number] }[]
+  stands: { name: string; at: [number, number] }[]
+  bounds: [number, number, number, number]
+}
+
+/** Where the aircraft is on that map, and the taxi route it was given. */
+export interface TaxiView {
+  ident: string
+  position: [number, number]
+  heading: number
+  route?: {
+    /** From the aircraft to the place it must stop: the next runway to hold short of, or the end. */
+    cleared: [number, number][]
+    /** The rest of the route, not yet cleared. */
+    beyond: [number, number][]
+    goal: { label: string; at: [number, number] }
+    hold?: { runway: string; at: [number, number] }
+  }
+}
+
 export interface EngineState {
   type: 'state'
   ready: boolean
@@ -75,6 +104,8 @@ export interface EngineState {
   } | null
   /** Controlled or restricted airspace the aircraft is inside, smallest first. */
   airspace?: { kind: string; name: string; floor_ft: number; ceiling_ft: number | null }[]
+  /** On the ground at an airport: the aircraft on its map. */
+  map?: TaxiView | null
   simbrief_user: string
   settings: {
     values: {
@@ -136,6 +167,7 @@ export type EngineEvent =
   | { type: 'atis'; airport: string; mhz: string; text: string }
   | { type: 'chatter'; station: string; callsign: string; said: string; answered: string }
   | Debrief
+  | ({ type: 'chart' } & Chart)
 
 export type EngineMessage = EngineState | EngineEvent
 
@@ -157,6 +189,7 @@ export type Command =
   | { cmd: 'reset_cost' }
   | { cmd: 'debrief' }
   | { cmd: 'new_flight' }
+  | { cmd: 'chart'; ident: string }
 
 export interface UpdateState {
   state: 'none' | 'checking' | 'downloading' | 'ready' | 'error' | 'available'
