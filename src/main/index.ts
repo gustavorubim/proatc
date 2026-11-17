@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { app, BrowserWindow, ipcMain, shell } from 'electron'
 import type { Connection } from '../shared/protocol'
 import { type Engine, engineEnv, enginePaths, engineSteps, freePort, startEngine } from './engine'
+import { mayReveal } from './reveal'
 import { checkForUpdates, getUpdateState, installUpdate, openReleases, startUpdates } from './updates'
 
 // Tests point the app at a throwaway data folder so they never touch the real one.
@@ -154,9 +155,9 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('connection', () => connection)
   ipcMain.handle('engine-log', () => ({ lines: engineLog, failure: engineFailure }))
   ipcMain.handle('app-version', () => app.getVersion())
-  // Only a flight log the engine wrote may be shown in the file manager.
-  ipcMain.handle('reveal', (_event, path: string) => {
-    if (typeof path !== 'string' || !/[\\/]logs[\\/]flight-\d{8}-\d{6}\.txt$/.test(path)) return false
+  // Only a flight log or a problem report the engine wrote may be shown in the file manager.
+  ipcMain.handle('reveal', (_event, path: unknown) => {
+    if (!mayReveal(path)) return false
     shell.showItemInFolder(path)
     return true
   })
