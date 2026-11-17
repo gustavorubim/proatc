@@ -54,6 +54,7 @@ DEBRIEFER = (
     "and a list of events. In at most four short sentences, say what went well, what to work on first, and one concrete "
     "tip. Plain language, no markdown, no lists, no score."
 )
+TRACE_EVERY_S = 20
 GENERIC_CALLS = ("Say again", "Radio check", "Deviate left", "Deviate right", "Destination weather", "Clear of weather")
 
 
@@ -91,6 +92,7 @@ class Session:
         self.options: dict = {"inputs": [], "outputs": [], "voices": [], "joysticks": []}
         self.capturing = False
         self.joystick = None
+        self._traced, self._traced_plan = None, False  # the plan is noted the first time, even when there is none
         self._last_atc: tuple[str, str] | None = None
         self._read_back: object | None = None  # the instruction the copilot has already read back
         self._tune_failed: str | None = None
@@ -106,6 +108,46 @@ class Session:
         except Exception:
             pass  # the log must never break the radio
         self._sink(event)
+
+    # ---- the journal on disk -----------------------------------------------
+
+    def _start_journal(self) -> None:
+        """From here on the flight is written to disk as it happens (see flightlog.py)."""
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            release = version("proatc")
+        except PackageNotFoundError:
+            release = "source"
+        if self.log.keep_journal(PROJECT_DIR / "logs" / "journal") is None:
+            return
+        self.log.note("session", version=release, seed=self.engine.seed, model=self.config.llm.model,
+                      voice_engine=self.tts.engine_name, copilot=self.config.atc.copilot)  # fmt: skip
+        threading.Thread(target=self._trace_loop, name="journal-trace", daemon=True).start()
+
+    def _trace_loop(self) -> None:
+        stop = threading.Event()
+        while not stop.wait(TRACE_EVERY_S):
+            try:
+                self.trace()
+            except Exception:
+                pass  # the journal must never break the radio
+
+    def trace(self) -> None:
+        """Where the aircraft is and who answers on the tuned frequency; the plan when it changes."""
+        plan = self.engine.flight.plan.summary() if self.engine.flight.plan else None
+        if plan != self._traced_plan:
+            self._traced_plan = plan
+            self.log.note("plan", plan=plan)
+        context = self._context()
+        if context is None:
+            return
+        context["raw"] = {key: value for key, value in context["raw"].items() if not key.startswith("tcas_")}
+        mark = (context["tuned"], context["station"], context["raw"].get("lat"), context["raw"].get("lon"),
+                context["raw"].get("elevation_m"), json.dumps(context["flight"], sort_keys=True, default=str))  # fmt: skip
+        if mark != self._traced:  # a parked aircraft is not written every twenty seconds
+            self._traced = mark
+            self.log.note("trace", context)
 
     def _context(self) -> dict | None:
         if not self.ready or not self.bridge.connected:
@@ -188,6 +230,7 @@ class Session:
         except Exception:
             pass  # the settings screen then offers no choices; everything else works
         self.ready = True
+        self._start_journal()
         emit({"type": "status", "text": f"\nReady. Hold [{config.ptt.key}] to talk, release to send. Ctrl+C to quit.\n"})
 
     def _joystick_button(self, down: bool) -> None:

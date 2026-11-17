@@ -62,17 +62,41 @@ class Result:
         return "\n".join(lines)
 
 
+def load(path) -> dict:
+    """A log from disk: "Save log"'s .json file, or a journal (.jsonl), in the shape `replay` takes."""
+    import json
+    from pathlib import Path
+
+    text = Path(path).read_text(encoding="utf-8")
+    if Path(path).suffix != ".jsonl":
+        return json.loads(text)
+    events = []
+    for line in text.splitlines():
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue  # a line cut short when the app was closed
+    session = next((event for event in events if event.get("type") == "session"), {})
+    return {"seed": session.get("seed"), "events": events}
+
+
+def _set_plan(engine, plan: dict | None) -> None:
+    from .flightplan import FlightPlan
+
+    if not plan:
+        engine.set_plan(None)
+        return
+    known = {key: plan[key] for key in FlightPlan.__dataclass_fields__ if key in plan}
+    known["route"] = str(plan.get("route", "")).split()
+    engine.set_plan(FlightPlan(**known))
+
+
 def replay(payload: dict, db, make_engine) -> Result:
-    """Run a saved log (the .json file) again. `make_engine(seed)` builds a fresh engine on `db`."""
+    """Run a saved log again. `make_engine(seed)` builds a fresh engine on `db`."""
     events = payload.get("events", [])
     engine = make_engine(payload.get("seed"))
-    plan = payload.get("plan")
-    if plan:
-        from .flightplan import FlightPlan
-
-        known = {key: plan[key] for key in FlightPlan.__dataclass_fields__ if key in plan}
-        known["route"] = str(plan.get("route", "")).split()
-        engine.set_plan(FlightPlan(**known))
+    if payload.get("plan"):
+        _set_plan(engine, payload["plan"])
     book = AtisBook()
     result = Result(differences=[])
     pilot_text = ""
@@ -81,6 +105,9 @@ def replay(payload: dict, db, make_engine) -> Result:
         raw = (event.get("context") or {}).get("raw")
         if kind == "pilot":
             pilot_text = event.get("text", "")
+            continue
+        if kind == "plan":  # a journal holds the plan where it was loaded or changed
+            _set_plan(engine, event.get("plan"))
             continue
         if kind == "understood":
             if not raw or "fields" not in event:

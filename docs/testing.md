@@ -71,6 +71,25 @@ uv run proatc replay path/to/flight-20261116-201500.json
 
 On unchanged code this prints no differences. To fix a reported fault: replay the log, see the wrong answer, change the code, replay again, and see that answer (and only that answer) change. Then add a unit test or a golden step for it.
 
+### The journal: every flight is on disk
+
+From 0.11 nobody has to remember to save a log. Each time the app runs it writes a journal, a line per event as it happens, to `logs/journal/session-YYYYMMDD-HHMMSS.jsonl` in its data folder:
+
+| System | Data folder |
+|---|---|
+| Windows | `%APPDATA%\Pro ATC\engine` |
+| macOS | `~/Library/Application Support/Pro ATC/engine` |
+| Linux | `~/.config/Pro ATC/engine` |
+| From source | the project folder |
+
+It holds everything "Save log" does, plus a `session` line (version, seed, model), the `plan` whenever it changes, and a `trace` every twenty seconds while something changes: position, tuned frequency, which station answers on it (or none), and the flight's state. The last 40 runs are kept. Nothing leaves the computer; there is no key and no audio in it.
+
+To look into a report: open the newest journal, find the time, and read the `trace` lines around it. A frequency with `"station": null` is one nobody answers on. Then replay it:
+
+```bash
+uv run proatc replay "path/to/session-20261117-201500.jsonl"
+```
+
 ## Fuzz tests
 
 Every random choice is seeded. A failure message names the seed and the step (`seed 137 step 22 Westfield Tower`); `one_flight(make, stations, 137)` in `tests/test_robust.py` reproduces it. Do not loosen `BAD_TEXT` in `src/proatc/verify.py` to make a failure pass: it lists what a controller's sentence must never contain.
