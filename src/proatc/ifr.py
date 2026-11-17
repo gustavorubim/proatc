@@ -59,6 +59,7 @@ STAGES = ["descend", "downwind", "base", "intercept", "procedure", "tower"]
 ON_APPROACH = ("intercept", "procedure")  # cleared for the approach: by vectors, or by its own initial fix
 PROCEDURAL_KINDS = "RHP"  # R NAV, R N P and G P S approaches are flown from an initial fix when one is published
 PROCEDURE_WITHIN_NM = 45
+JOINED_NM = 2.0  # within this distance of a track, the aircraft has joined it
 OFF_TRACK_NM = 4.0
 OFF_TRACK_AFTER_S = 45
 EN_ROUTE_OFF_TRACK_NM = 10.0  # in the cruise, between waypoints that may be far apart
@@ -196,7 +197,9 @@ def clearance(engine, station, issue, raw, callsign, hello, faa, atis_part, on_c
     fixes = route_fixes(plan.route)
     flight.sid_constraints = restrictions.build_sid(engine, sid, airport, runway, fixes) if sid else []
     track = restrictions.path(engine, sid, "SID", airport, runway, fixes) if sid else []
-    flight.sid_path = [(airport.lat, airport.lon), *track] if track else []
+    # Only the SID's own waypoints. A departure usually begins on a heading (runway heading, then a turn to
+    # intercept): a straight line from the airport to the first waypoint is not where it goes.
+    flight.sid_path = track
     flight.squawk = flight.squawk if flight.squawk and flight.squawk not in ("1200", "7000") else _squawk(engine._rng)
 
     level = _level(engine, initial, airport.ident, faa)
@@ -1055,6 +1058,12 @@ def _route_watch(
     if not points or not name or name in flight.off_route_called or flight.direct_to or flight.deviating or flight.emergency:
         return None
     gap = restrictions.off_track_nm(points, raw["lat"], raw["lon"])
+    if name not in flight.on_track:
+        # A track is watched from the moment the aircraft is on it. Before that it is on a heading after
+        # take-off, or on its way to the first waypoint, and is not "off" a track it has not reached.
+        if gap is not None and gap <= JOINED_NM:
+            flight.on_track.add(name)
+        return None
     if gap is None or gap <= limit:
         flight.off_route_since = None
         return None

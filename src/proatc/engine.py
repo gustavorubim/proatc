@@ -148,6 +148,7 @@ class Flight:
     star_path: list = field(default_factory=list)
     off_route_since: float | None = None
     off_route_called: set[str] = field(default_factory=set)
+    on_track: set[str] = field(default_factory=set)  # the SID, STAR or route the aircraft has been on: only those are watched
     qnh_told: bool = False  # the destination's pressure was given with a descent to an altitude
     route_points: list | None = None  # the filed route, waypoint by waypoint; None until worked out
 

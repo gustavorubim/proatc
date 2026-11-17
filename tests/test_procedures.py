@@ -136,7 +136,7 @@ def departure(tmp_path):
 
 def test_sid_crossings_are_judged_by_their_kind_and_their_speed(tmp_path):
     engine, radar = departure(tmp_path)
-    assert engine.flight.sid == "WEST2A" and len(engine.flight.sid_path) == 5
+    assert engine.flight.sid == "WEST2A" and len(engine.flight.sid_path) == 4  # its waypoints only: no line from the airport
     assert engine.tick(radar, ISSUE, {**at(51.0, -1.1, feet=2400), "ias_kt": 200}) is None  # above 2000: fine
     too_high = engine.tick(radar, ISSUE, {**at(51.0, -1.3, feet=6000), "ias_kt": 210})
     assert too_high.text == f"{CALLSIGN}, you were to cross Wmid at or below altitude five thousand feet"
@@ -155,6 +155,16 @@ def test_a_flight_that_leaves_its_sid_is_asked_once(tmp_path):
     clock = [0.0]
     engine.now = lambda: clock[0]
     off = {**at(51.12, -1.45, feet=7000), "ias_kt": 250}  # seven miles north of the track
+    # Found on a real flight out of Boston: the departure began on runway heading, then turned to intercept,
+    # and the controller called it "six miles off the departure track" before it had reached the track.
+    clock[0] = -500.0
+    assert engine.tick(radar, ISSUE, off) is None
+    clock[0] = -300.0
+    assert engine.tick(radar, ISSUE, off) is None and engine.flight.on_track == set()  # not on it yet: not "off" it
+    on_it = {**at(51.005, -1.2, feet=6000), "ias_kt": 250}
+    clock[0] = -100.0
+    assert engine.tick(radar, ISSUE, on_it) is None and engine.flight.on_track == {"WEST2A"}  # joined: watched from now
+    clock[0] = 0.0
     assert engine.tick(radar, ISSUE, off) is None  # only just noticed
     clock[0] = 50.0
     asked = engine.tick(radar, ISSUE, off)
