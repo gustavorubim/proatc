@@ -2,7 +2,15 @@
 
 Talk to air traffic control in X-Plane 12 with your own voice. Pro ATC is a free, open-source app that plays every controller, from clearance to landing, IFR or VFR, at any airport in the sim.
 
-**[Download for Windows, macOS or Linux](https://github.com/gustavorubim/proatc/releases/latest)**
+## Download
+
+| Your system | Download | First start |
+|---|---|---|
+| **Windows** 10 or 11 | [ProATC-windows-x64-setup.exe](https://github.com/gustavorubim/proatc/releases/latest/download/ProATC-windows-x64-setup.exe) | "More info", then "Run anyway" |
+| **macOS** 12 or newer, Apple Silicon (M1 or newer) | [ProATC-mac-arm64.dmg](https://github.com/gustavorubim/proatc/releases/latest/download/ProATC-mac-arm64.dmg) | System Settings > Privacy & Security > "Open Anyway" |
+| **Linux** x64 | [ProATC-linux-x86_64.AppImage](https://github.com/gustavorubim/proatc/releases/latest/download/ProATC-linux-x86_64.AppImage) | `sudo apt install libportaudio2`, then `chmod +x` and run |
+
+These links always give the newest version. [All releases](https://github.com/gustavorubim/proatc/releases) · [Installing on each system](docs/install.md)
 
 ![Pro ATC window](docs/screenshot.png)
 
@@ -15,12 +23,14 @@ Talk to air traffic control in X-Plane 12 with your own voice. Pro ATC is a free
 
 ## Get started
 
-1. Download from the [latest release](https://github.com/gustavorubim/proatc/releases/latest): the `.exe` for Windows, the `.dmg` for a Mac with Apple Silicon, the `.AppImage` for Linux. The app is not signed, so the system warns the first time ([what to do](docs/install.md)).
+1. Download the file for your system from the table above and install it. The app is not signed, so the system warns the first time ([what to do](docs/install.md)).
 2. Open Pro ATC and wait for the first-time setup (a few minutes, about 3 GB).
 3. Click "Add OpenRouter key" and paste a key from [openrouter.ai/keys](https://openrouter.ai/keys).
 4. Start X-Plane 12, load a flight, click a frequency in the app and hold right Ctrl to talk.
 
-Needs X-Plane 12.1.1 or newer on Windows 10 or 11, macOS 12 or newer (Apple Silicon), or Linux (x64). Works with SimBrief and Navigraph. No plugin to install. Windows is the system it is developed and flown on; the Mac and Linux builds are new.
+Needs X-Plane 12.1.1 or newer. Works with SimBrief and Navigraph. No plugin to install.
+
+Windows is the system Pro ATC is developed and flown on. The Mac and Linux versions are new: they are built and started by automated tests, and not yet flown. If you try one, [tell us how it went](https://github.com/gustavorubim/proatc/issues/new/choose). Intel Macs are not supported yet.
 
 ## Good to know
 
