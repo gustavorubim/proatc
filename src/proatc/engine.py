@@ -20,7 +20,7 @@ from . import chart, ifr, traffic, vfr
 from . import phraseology as say
 from .atis import Issue, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
-from .navdata import Airport, AirportDB, Station, distance_nm
+from .navdata import Airport, AirportDB, Station, bearing, distance_nm, expect_station, prefer_airports
 from .taxi import (
     TaxiNetwork,
     aircraft_category,
@@ -101,6 +101,8 @@ class Flight:
     descent_given: bool = False
     told_approach: bool = False
     told_sector: str | None = None  # last centre the flight was sent to
+    approach_told_by: str | None = None  # the station that last said "contact approach"
+    left_sector: tuple | None = None  # (centre, lat, lon): the centre that handed the flight on, and where
     sector_ahead: str | None = None  # the centre the flight was sent to before reaching its boundary
     direct_to: str | None = None
     next_frequency: str | None = None  # the frequency of the last hand-off, until it is tuned
@@ -200,6 +202,11 @@ class Engine:
                 from .procedures import load
 
                 self._procedures[ident] = load(self.db.xplane_root, ident)
+            airport = self.db.airport(ident)
+            if airport:
+                from .procedures import use_airport_runway_names
+
+                use_airport_runway_names(self._procedures[ident], [end for runway in airport.runways for end, _ in runway.ends()])
         return self._procedures[ident]
 
     def set_plan(self, plan) -> None:
@@ -211,6 +218,7 @@ class Engine:
                 self.reset()
             self.flight.plan = plan
             self.flight.route_points = None
+            prefer_airports([plan.origin, plan.destination, plan.alternate] if plan else [])
 
     def route(self) -> list[tuple[str, float, float]]:
         """The filed route as every waypoint it passes, with positions. Worked out once per plan."""
@@ -293,11 +301,20 @@ class Engine:
                 return runway.lat2, runway.lon2
         return airport.lat, airport.lon
 
-    def _handoff(self, airport: Airport, kind: str) -> tuple[str, str, str] | None:
-        """(spoken callsign, spoken frequency, 'nnn.nnn') of the airport's station of this kind."""
-        station = self.db.station_of(airport, kind)
+    def _handoff(self, airport: Airport, kind: str, raw: dict | None = None) -> tuple[str, str, str] | None:
+        """(spoken callsign, spoken frequency, 'nnn.nnn') of the airport's station of this kind. With the
+        aircraft's position, the sector that works its side of the airport."""
+        bearing_from = None
+        if raw and "lat" in raw:
+            variation = raw.get("heading_mag", 0.0) - raw.get("heading_true", 0.0) if "heading_true" in raw else 0.0
+            bearing_from = (bearing(airport.lat, airport.lon, raw["lat"], raw["lon"]) + variation) % 360
+        station = self.db.station_of(airport, kind, bearing_from)
         if not station:
             return None
+        if raw is not None:
+            # Said to an aircraft in flight: on that frequency it is this station that answers, even where
+            # a centre or another airport shares it.
+            expect_station(station.khz, station.key)
         return station.callsign, say.frequency(station.khz), f"{station.khz / 1000:.3f}"
 
     def _greeting(self, station: Station) -> str:

@@ -35,6 +35,17 @@ FREQ_KINDS.update({code[2:]: kind for code, kind in list(FREQ_KINDS.items())})
 
 # How far from the airport each kind of station can be worked, in nautical miles.
 RANGE_NM = {"atis": 60, "unicom": 30, "delivery": 10, "ground": 10, "tower": 30, "approach": 60, "departure": 60}
+# How high above the airport each kind of station is heard and worked. An airliner in the cruise that is
+# tuned to a centre is not talking to the tower of an airfield six miles below that shares the frequency.
+CEILING_FT = {
+    "atis": 60000,
+    "unicom": 10000,
+    "delivery": 3000,
+    "ground": 3000,
+    "tower": 10000,
+    "approach": 19500,
+    "departure": 19500,
+}
 STATION_WORD = {
     "atis": "Information",
     "unicom": "Traffic",
@@ -45,6 +56,37 @@ STATION_WORD = {
     "departure": "Departure",
 }
 FREQ_TOLERANCE_KHZ = 5
+SECTOR = re.compile(r"\((\d{3})\s*-\s*(\d{3})\)")  # "APP (091-240)": the bearings from the airport a sector works
+
+# Around a large city one approach frequency is listed at several airports. Two things decide which of them
+# the pilot is talking to, ahead of mere distance: the airports of the flight's own plan, and the station
+# already found on that frequency. Shared by every connection to the index in this process.
+_PREFERRED: tuple[str, ...] = ()
+_HELD: dict[int, tuple[str, str]] = {}
+
+
+# frequency -> key of the station being talked to on it. A centre and an airport's controller can share a
+# frequency: the one in contact stays, and a flight that is handed to a station is answered by that station.
+TALKING_TO: dict[int, str] = {}
+
+
+def expect_station(khz: int, key: str) -> None:
+    """A flight has been sent to this station on this frequency."""
+    TALKING_TO[khz] = key
+
+
+def is_preferred(ident: str) -> bool:
+    return ident in _PREFERRED
+
+
+def prefer_airports(idents) -> None:
+    """The airports of the flight's plan: on a frequency several airports share, theirs is the station meant."""
+    global _PREFERRED
+    _PREFERRED = tuple(ident.upper() for ident in idents if ident)
+    _HELD.clear()
+    TALKING_TO.clear()
+
+
 SPOKEN_LABEL = re.compile(
     r"([A-Za-z][A-Za-z' ]*?) "
     r"(Tower|Twr|Ground|Gnd|Approach|App|Departure|Dep|Delivery|Del|Clearance|Information|ATIS|Control|Radar|Director|Arrival|Radio)"
@@ -387,7 +429,8 @@ class AirportDB:
             )
         ]
         airport.freqs = [
-            Freq(*f) for f in self.db.execute("SELECT khz, kind, label FROM freqs WHERE ident = ?", (airport.ident,))
+            Freq(*f)
+            for f in self.db.execute("SELECT khz, kind, label FROM freqs WHERE ident = ? ORDER BY rowid", (airport.ident,))
         ]
         return airport
 
@@ -406,9 +449,20 @@ class AirportDB:
         source = self.db.execute("SELECT value FROM meta WHERE key='source'").fetchone()[0]
         return Path(source).parents[3]
 
-    def station_of(self, airport: Airport, kind: str) -> Station | None:
-        """The airport's own station of this kind (first listed), for hand-offs."""
-        freq = next((f for f in airport.freqs if f.kind == kind), None)
+    def station_of(self, airport: Airport, kind: str, bearing_from: float | None = None) -> Station | None:
+        """The airport's own station of this kind, for hand-offs: the sector that works the bearing the
+        aircraft is on when the frequencies are labelled by sector, otherwise the first listed."""
+        listed = [f for f in airport.freqs if f.kind == kind]
+        freq = listed[0] if listed else None
+        if bearing_from is not None:
+            for candidate in listed:
+                sector = SECTOR.search(candidate.label or "")
+                if sector:
+                    start, end = int(sector.group(1)), int(sector.group(2))
+                    inside = start <= bearing_from <= end if start <= end else bearing_from >= start or bearing_from <= end
+                    if inside:
+                        freq = candidate
+                        break
         return Station(airport, kind, freq.khz, freq.label, 0.0) if freq else None
 
     def nearest(self, lat: float, lon: float, radius_nm: float = 30, limit: int = 5) -> list[tuple[float, Airport]]:
@@ -421,21 +475,30 @@ class AirportDB:
         ranked = sorted((distance_nm(lat, lon, a_lat, a_lon), ident) for ident, a_lat, a_lon in rows)
         return [(dist, self.airport(ident)) for dist, ident in ranked[:limit] if dist <= radius_nm]
 
-    def station(self, khz: int, lat: float, lon: float) -> Station | None:
-        """The nearest in-range station transmitting on this frequency, if any."""
+    def station(self, khz: int, lat: float, lon: float, feet: float | None = None) -> Station | None:
+        """The in-range station transmitting on this frequency, if any: within its distance, and, when the
+        aircraft's altitude is given, within its height above the airport."""
         dlat = 61 / 60
         dlon = dlat / max(math.cos(math.radians(lat)), 0.05)
         rows = self.db.execute(
-            "SELECT a.ident, a.lat, a.lon, f.khz, f.kind, f.label FROM freqs f JOIN airports a ON a.ident = f.ident "
+            "SELECT a.ident, a.lat, a.lon, f.khz, f.kind, f.label, a.elev_ft FROM freqs f JOIN airports a ON a.ident = f.ident "
             "WHERE f.khz BETWEEN ? AND ? AND a.lat BETWEEN ? AND ? AND a.lon BETWEEN ? AND ?",
             (khz - FREQ_TOLERANCE_KHZ, khz + FREQ_TOLERANCE_KHZ, lat - dlat, lat + dlat, lon - dlon, lon + dlon),
         ).fetchall()
-        best = None
-        for ident, a_lat, a_lon, f_khz, kind, label in rows:
+        in_range = []
+        for ident, a_lat, a_lon, f_khz, kind, label, elev_ft in rows:
             dist = distance_nm(lat, lon, a_lat, a_lon)
-            if dist <= RANGE_NM[kind] and (best is None or dist < best[0]):
-                best = (dist, ident, f_khz, kind, label)
-        if not best:
+            too_high = feet is not None and feet - (elev_ft or 0.0) > CEILING_FT[kind] and ident not in _PREFERRED
+            if dist <= RANGE_NM[kind] and not too_high:
+                in_range.append((dist, ident, f_khz, kind, label))
+        if not in_range:
+            _HELD.pop(khz, None)
             return None
+        held = _HELD.get(khz)
+        planned = [found for found in in_range if found[1] in _PREFERRED]
+        kept = [found for found in in_range if held == (found[1], found[3])]
+        # The flight's own airport, else the station already being talked to, else the nearest.
+        best = min(planned or kept or in_range)
+        _HELD[khz] = (best[1], best[3])
         dist, ident, f_khz, kind, label = best
         return Station(self.airport(ident), kind, f_khz, label, dist)

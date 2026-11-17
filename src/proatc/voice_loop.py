@@ -489,7 +489,8 @@ class Session:
                 self._tune_failed = frequency  # say it once, then leave it to the pilot
                 self.emit({"type": "error", "text": str(error)})
                 return
-            flight.next_frequency = None
+            if flight.next_frequency == frequency:  # a newer hand-off, given meanwhile, is kept
+                flight.next_frequency = None
             if mode == "full":
                 time.sleep(1.5)  # let the sim report the new frequency
                 raw, station, issue = self._station_and_issue()
@@ -681,6 +682,8 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
         event["event"] = engine.flight.last_event
         engine.flight.last_event = ""
     emit(event)
+    if context.get("way_out"):
+        emit({"type": "coach", "text": f"The controller has no instruction for that. Here you could say: “{context['way_out']}”"})
 
     def timings() -> None:  # when the first sound is ready to play
         voiced = time.perf_counter()
@@ -712,5 +715,9 @@ def _answer(transcript, intent, context, station_key, station, issue, raw, contr
         # The rules engine has no answer. The model may inform or decline; it may not clear or instruct,
         # because nothing it says would be known to the engine or checked against the airport's data.
         text = controller.reply(transcript, context, station_key, inform_only=True)
+        # A controller without an instruction to give is a dead end for the pilot: say what would work here.
+        calls = [call for call in engine.suggestions(station, issue, raw) if call["label"] not in GENERIC_CALLS]
+        if calls:
+            context["way_out"] = calls[0]["text"].replace("{destination}", "your destination")
         return text if informational(text) else f"{engine._callsign(raw)}, unable, say again your request"
     return controller.reply(transcript, context, station_key)

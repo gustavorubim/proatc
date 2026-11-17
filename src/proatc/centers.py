@@ -25,10 +25,11 @@ ATC_FILES = (
     "Custom Data/1200 atc data/Earth nav data/atc.dat",
     "Resources/default scenery/1200 atc data/Earth nav data/atc.dat",
 )
-CACHE = PROJECT_DIR / "data" / "centers-v1.pickle"
+CACHE = PROJECT_DIR / "data" / "centers-v2.pickle"
 
 
 BEYOND_BOUNDARY_DEG = 0.75  # about 45 NM
+_HELD: dict[int, str] = {}  # frequency -> the centre last found on it, shared by every index in this process
 
 
 @dataclass
@@ -37,8 +38,13 @@ class Polygon:
     ceiling_ft: float
     points: list[tuple[float, float]]
     box: tuple[float, float, float, float] = (0, 0, 0, 0)  # min lat, max lat, min lon, max lon
+    # An area that crosses the date line (the Pacific's oceanic sectors): its longitudes are kept from 0 to
+    # 360, and a position is looked up the same way. Without this it would seem to cover half the world.
+    wraps: bool = False
 
     def contains(self, lat: float, lon: float) -> bool:
+        if self.wraps and lon < 0:
+            lon += 360.0
         if not (self.box[0] <= lat <= self.box[1] and self.box[2] <= lon <= self.box[3]):
             return False
         inside = False
@@ -90,7 +96,8 @@ class Center:
         """Roughly within `margin_deg` of the airspace: just across its boundary."""
         wide = margin_deg / max(math.cos(math.radians(lat)), 0.05)
         return any(
-            p.box[0] - margin_deg <= lat <= p.box[1] + margin_deg and p.box[2] - wide <= lon <= p.box[3] + wide
+            p.box[0] - margin_deg <= lat <= p.box[1] + margin_deg
+            and p.box[2] - wide <= (lon + 360.0 if p.wraps and lon < 0 else lon) <= p.box[3] + wide
             for p in self.polygons
         )
 
@@ -147,6 +154,10 @@ def parse_atc(lines) -> list[Center]:
                 polygon.points.append((float(lat), float(lon)))
             elif word == "AIRSPACE_POLYGON_END" and polygon is not None:
                 if len(polygon.points) >= 3:
+                    lons = [p[1] for p in polygon.points]
+                    if max(lons) - min(lons) > 180:  # it crosses the date line, it does not span the globe
+                        polygon.wraps = True
+                        polygon.points = [(lat, lon + 360.0 if lon < 0 else lon) for lat, lon in polygon.points]
                     lats, lons = [p[0] for p in polygon.points], [p[1] for p in polygon.points]
                     polygon.box = (min(lats), max(lats), min(lons), max(lons))
                     current.polygons.append(polygon)
@@ -195,11 +206,24 @@ class CenterIndex:
         """A centre that covers this position and works this frequency."""
         working = [c for c in self.centers if c.has_frequency(khz)]
         inside = [c for c in working if c.contains(lat, lon)]
-        # A radio does not stop at a line on the map: just across the boundary the last centre still answers,
-        # and sends the flight to the next one.
-        inside = inside or [c for c in working if c.near(lat, lon, BEYOND_BOUNDARY_DEG)]
+        inside = [c for c in inside if c.name == _HELD.get(khz)] or inside  # two centres on one frequency: no switching
+        if not inside:
+            # A radio does not stop at a line on the map: just across the boundary the last centre still
+            # answers, and sends the flight to the next one. Several centres can work one frequency: the
+            # one that was being talked to is the one that answers.
+            # Only the centre that was being talked to: one the aircraft was never inside does not answer.
+            inside = [c for c in working if c.name == _HELD.get(khz) and c.near(lat, lon, BEYOND_BOUNDARY_DEG)]
         best = min(inside, key=lambda c: c.area, default=None)
+        if best:
+            _HELD[khz] = best.name
+        else:
+            _HELD.pop(khz, None)
         return CenterStation(best, khz) if best else None
+
+    @staticmethod
+    def expect(khz: int, center: Center) -> None:
+        """A flight has been sent to this centre on this frequency: it answers from just outside its boundary too."""
+        _HELD[khz] = center.name
 
     def station_for(self, center: Center) -> CenterStation:
         return CenterStation(center, center.freqs_khz[0])

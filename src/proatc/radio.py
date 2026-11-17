@@ -8,7 +8,7 @@ import time
 
 import numpy as np
 
-from . import chatter
+from . import chatter, navdata
 from . import phraseology as say
 from .atis import AtisBook, runways_in_use, uses_faa_style
 from .events import Emit, console
@@ -39,11 +39,25 @@ def current_station(db: AirportDB, state: dict) -> tuple[int | None, Station | N
     khz = tuned_khz(state)
     if not khz or "lat" not in state or "lon" not in state:
         return khz, None
-    station = db.station(khz, state["lat"], state["lon"])
-    if station is None and db.centers:
-        # No airport station on this frequency: an en-route centre whose airspace the aircraft is in.
-        station = db.centers.on_frequency(khz, state["lat"], state["lon"])
-    return khz, station
+    return khz, station_on(db, khz, state)
+
+
+def station_on(db: AirportDB, khz: int, state: dict) -> Station | None:
+    """Who answers on a frequency where the aircraft is. An airport's station and a centre can share one:
+    the station already being talked to stays; otherwise the airport of the flight's plan, then an airport
+    station the aircraft is low enough for, then the centre."""
+    feet = state["elevation_m"] / 0.3048 if "elevation_m" in state and not state.get("on_ground", True) else None
+    local = db.station(khz, state["lat"], state["lon"], feet)
+    centre = db.centers.on_frequency(khz, state["lat"], state["lon"]) if db.centers else None
+    found = [station for station in (local, centre) if station is not None]
+    if not found:
+        navdata.TALKING_TO.pop(khz, None)
+        return None
+    kept = next((station for station in found if station.key == navdata.TALKING_TO.get(khz)), None)
+    planned = local if local is not None and navdata.is_preferred(local.airport.ident) else None
+    chosen = kept or planned or found[0]
+    navdata.TALKING_TO[khz] = chosen.key
+    return chosen
 
 
 def observe(db: AirportDB, airport, state: dict) -> Weather | None:
@@ -142,10 +156,7 @@ def monitored(db: AirportDB, state: dict) -> tuple[dict, Station | None]:
     other = other_radio(state)
     if not other["khz"] or "lat" not in state or other["khz"] == tuned_khz(state):
         return other, None
-    station = db.station(other["khz"], state["lat"], state["lon"])
-    if station is None and db.centers:
-        station = db.centers.on_frequency(other["khz"], state["lat"], state["lon"])
-    return other, station
+    return other, station_on(db, other["khz"], state)
 
 
 class SecondRadio(threading.Thread):
