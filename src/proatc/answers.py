@@ -599,6 +599,8 @@ def _owner(engine, intent, station, raw, gives_clearance: bool):
         return _radar_for(engine, raw)
     if airport is None or wanted is None or station.kind == wanted:
         return None
+    if _airborne(raw) and wanted in ("clearance", "delivery", "ground"):
+        return None  # in the air nobody is sent to a ground frequency: the controller says what it can do instead
     if wanted == "clearance":
         if gives_clearance:
             return None

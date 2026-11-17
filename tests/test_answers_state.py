@@ -331,3 +331,16 @@ def test_the_truth_check_catches_a_false_answer():
     assert truth(engine, station, high, None, Reply(f"{CALLSIGN}, climb altitude three thousand five hundred feet"))
     assert truth(engine, station, high, None, Reply(f"{CALLSIGN}, descend altitude four thousand feet"))
     assert not truth(engine, station, high, None, Reply(f"{CALLSIGN}, descend altitude three thousand five hundred feet"))
+
+
+def test_an_aircraft_in_the_air_is_never_sent_to_a_ground_frequency(tmp_path):
+    # Found replaying a real flight: climbing out at 6,000 ft, "confirm departure runway and initial clearance" was
+    # taken for a clearance request, and departure answered "contact Boston Delivery ... for clearance".
+    from proatc import answers
+    from proatc.intents import Intent
+    from tests.test_answers import build_world, climbing_with_departure
+
+    engine, departure, raw = climbing_with_departure(build_world(tmp_path))
+    said = answers.way_out(engine, Intent("request_clearance"), departure, raw, "Golf Alfa Bravo Charlie Delta", "")
+    assert "Delivery" not in said.text and "Ground" not in said.text and "frequency" not in said.expect
+    assert said.text.startswith("Golf Alfa Bravo Charlie Delta, unable")

@@ -275,6 +275,9 @@ When this was first run, nearly nine flights in ten had a problem (the table bel
 | `--flights 100`, after | 3 |
 | `--flights 300`, after | 5 |
 | 1,000 other flights (`pick_flights(db, 1000, seed=2, towered=True)`), after | 16 (27 before the last round of fixes) |
+| `--flights 300`, 0.15 as released (after the review's safety fixes and the level-bust fix below) | 70, of which 49 "no taxi route" and 14 "not parked" (no route along a runway without a backtrack clearance, a known limit), 5 too high to land over high ground, 3 stands too far from a taxiway, 1 the date-line flight. No level busts, no hand-off faults. |
+
+An independent review of the first version of these fixes found that some were unsafe: taxi routes along the departure runway with no clearance for it, an initial approach fix cleared below the minimum safe altitude, altitude alerts silenced however far out once cleared for the approach, intercepts that could not be flown. They were reverted to the safe behaviour. Fixing the alerts then made the controller call a correct descent a level bust 24 times in 300 flights; past the initial fix of a cleared procedure, or on the localizer on a long final at or above the glide path, it no longer does.
 
 A flight stops at its first serious problem, so the "before" count hides faults behind the first one. What is left, not fixed: stands that no taxiway comes within 300 to 1,400 metres of, or taxiways that reach no runway at all (KADW, KCSG), which is the scenery's data; arrivals that reach their destination too high to land, over high ground (Himalaya, Alps: the vectoring altitude is the highest sector altitude within 25 miles) or after a stretch with no centre in the sim's data; a few flights left on a silent frequency where centres' boundaries leave a gap; and a flight across the date line near the pole whose destination tower is not found on the far side (as in `fly`). The model pilot does not fly holds, circling, missed approaches or speed restrictions on the STAR; it flies with no wind and no other traffic, and takes its next heading, level, approach and runway from the replies and the engine's state rather than from hearing them.
 
@@ -344,6 +347,7 @@ Baseline on 0.8 (Windows, NVIDIA graphics card, `small.en`, default model `anthr
 | `bench-speech`, 300 calls | word errors 8.3%; numbers right in 284 of 300 calls (95%); 0.15 s a call |
 | `bench-speech`, by condition | clean 8.0%, radio effect 7.5%, noisy radio 9.3% word errors |
 | `bench-intents`, 61 transcripts | 60 understood exactly (98%); the miss was a blind call taken for a position report, which the engine treats the same way |
+| `bench-intents` on 0.15, 89 transcripts | 85 understood exactly (96%). The misses: "roger" to an instruction taken as an acknowledgement (treated as the readback anyway); a blind call taken for a position report; "request frequency change to get the ATIS" taken as a request for information; "negative, request vectors back to the departure" taken as "negative" (it still gets a way back, direct to the next waypoint) |
 
 The two voice engines, compared on 0.9 (same machine; `proatc bench-speech --engine kokoro` and `--engine phonon`):
 
