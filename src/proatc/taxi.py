@@ -9,6 +9,7 @@ from .navdata import bearing, distance_nm, latlon
 
 CROSSING_PENALTY_M = 3000  # prefer routes that do not cross another runway
 STAND_REACH_M = 200  # a stand this close to a taxiway node can be taxied to
+START_OFF_RUNWAY_M = 300  # a node off the runways this near is where a route starts, rather than one on one
 UNNAMED = ("none", "null")  # what some scenery tools write for a taxiway with no name
 FULL_LENGTH_M = 400  # runway entries this close to the threshold count as full-length departures
 
@@ -211,7 +212,7 @@ def route_to_runway(net: TaxiNetwork, lat: float, lon: float, runway_end: str, t
     if not net.usable:
         return None
     runway_name = next((name for name in net.runway_nodes if end_key(runway_end) in map(end_key, name.split("/"))), None)
-    start = net.nearest_node(lat, lon)
+    start = _start_node(net, lat, lon)
     if runway_name is None or start is None:
         return None
     entries = net.runway_nodes[runway_name] & net.taxi_nodes()
@@ -225,6 +226,19 @@ def route_to_runway(net: TaxiNetwork, lat: float, lon: float, runway_end: str, t
     span = max(distance_nm(*threshold, *net.nodes[n]) * 1852 for n in net.runway_nodes[runway_name])
     intersections = {n: gap[n] * 10 for n in entries if gap[n] <= span / 2}
     return route or (_route(net, start, intersections, runway_name) if intersections else None)
+
+
+def _start_node(net: TaxiNetwork, lat: float, lon: float) -> int | None:
+    """Where a route starts: the nearest taxiway node, but not one on a runway when one off the runways is about as
+    near (an aircraft that has vacated is not put back on the runway to start its taxi)."""
+    nearest = net.nearest_node(lat, lon)
+    on_runways = set().union(*net.runway_nodes.values()) if net.runway_nodes else set()
+    if nearest is None or nearest not in on_runways:
+        return nearest
+    off = net.nearest_node(lat, lon, net.taxi_nodes() - on_runways)
+    if off is not None and distance_nm(lat, lon, *net.nodes[off]) * 1852 <= START_OFF_RUNWAY_M:
+        return off
+    return nearest
 
 
 def nearest_parking(net: TaxiNetwork, lat: float, lon: float) -> Parking | None:
@@ -279,7 +293,7 @@ def route_to_point(net: TaxiNetwork, lat: float, lon: float, target: tuple[float
     """Taxi route from the aircraft to the taxiway node nearest `target` (a stand or apron)."""
     if not net.usable:
         return None
-    start = net.nearest_node(lat, lon)
+    start = _start_node(net, lat, lon)
     goal = net.nearest_node(*target)
     if start is None or goal is None:
         return None

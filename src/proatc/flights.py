@@ -37,7 +37,7 @@ from .flightplan import FlightPlan
 from .intents import Intent
 from .navdata import AirportDB, bearing, distance_nm
 from .navfix import open_navfix
-from .procedures import NavaidNames, choose_approach
+from .procedures import NavaidNames
 from .radio import current_station
 from .vectors import locate
 from .verify import BAD_TEXT, Report
@@ -224,6 +224,7 @@ TAXI_KT = 18.0
 TURN_DEG_S = 3.0  # a rate one turn
 ROTATE_KT = 150.0
 LANDING_KT = 140.0
+VACATED_NM = 0.03  # this far from a runway's centreline is off it (small fields have taxiways 45 m away)
 HOLD_SHORT_NM = 0.05  # where the pilot stops short of a runway: inside the engine's "holding short", outside "on it"
 WAYPOINT_NM = 2.0  # a waypoint this close is passed
 CAPTURE_NM = 0.6  # the final approach course is captured this close to it
@@ -682,12 +683,13 @@ class GateToGate:
             return
         navfix, engine = self.engine.navfix, self.engine
         airport = self.destination if self.engine.flight.has_been_airborne else self.origin
-        near = distance_nm(plane.lat, plane.lon, airport.lat, airport.lon) <= 25
+        near = distance_nm(plane.lat, plane.lon, airport.lat, airport.lon) <= 27  # the sector altitude's 25, and its runways
         if near:
             sector = (navfix.airport_safe_ft(airport.ident) if navfix else None) or 0
             runway = self.approach_runway or self.expected_runway
-            approach = choose_approach(engine.procedures(airport.ident), runway) if runway else None
-            published = approach.platform_ft if approach and approach.platform_ft else None
+            approaches = engine.procedures(airport.ident).approaches.values() if runway else []
+            heights = [a.platform_ft for a in approaches if a.runway == runway and a.platform_ft]
+            published = min(heights) if heights else None  # any approach to that runway publishes it
             floor = min(sector, published) if published and sector else (sector or published or 0)
             floor = max(floor, airport.elev_ft + 1000)
         else:
@@ -848,8 +850,8 @@ class GateToGate:
             name = f"{runway.end1}/{runway.end2}"
             if name in self.crossing_cleared:
                 continue
-            if self.takeoff_cleared and self.departure_runway in (runway.end1, runway.end2):
-                continue
+            if self.stage == "lining up":
+                break  # cleared for takeoff: onto the runway, wherever other runways meet it there
             onto = engine._offset_nm(airport, name, {"lat": target[0], "lon": target[1]})
             if onto is None or onto > ON_RUNWAY_NM:
                 continue  # the route does not go onto this runway here
@@ -929,7 +931,7 @@ class GateToGate:
         def clear_of_runways(node: int) -> bool:
             lat, lon = network.nodes[node]
             offsets = (engine._offset_nm(self.destination, name, {"lat": lat, "lon": lon}) for name in runways)
-            return all(offset is None or offset > HOLD_SHORT_NM for offset in offsets)
+            return all(offset is None or offset > VACATED_NM for offset in offsets)
 
         main = _main_taxiways(network)  # an exit that leads somewhere: not a stub or a turn pad
         beside = [node for node in main - on_runways if clear_of_runways(node)]

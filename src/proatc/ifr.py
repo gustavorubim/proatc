@@ -33,7 +33,7 @@ from .atis import uses_faa_style
 from .intents import Intent
 from .navdata import Airport, bearing, distance_nm, expect_station
 from .procedures import choose_approach, choose_sid, choose_star, circling_approach, route_fixes, spoken_name
-from .vectors import CLOSE_NM, FINAL_NM, established, locate, next_vector, turn_direction
+from .vectors import CLOSE_NM, FINAL_NM, VECTOR_RANGE_NM, established, locate, next_vector, turn_direction
 
 RADAR_KINDS = ("departure", "approach", "center")
 CHECK_IN = ("check_in", "initial_call", "position_report", "inbound")
@@ -682,7 +682,7 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
             approach, flown, runway = other, other.runway, other.runway
         elif issue is not None and not _weather_allows(issue, VISUAL_VISIBILITY_SM, VISUAL_CEILING_FT):
             unavailable = True
-    platform = _platform(approach, airport)
+    platform = _platform(approach, airport, (engine.navfix.airport_safe_ft(airport.ident) if engine.navfix else None) or 0)
     course = next(heading for rw in airport.runways for ident, heading in rw.ends() if ident == flown)
     # Final is joined no closer than a three degree path from the joining altitude allows.
     join = max(engine._rng.choice(JOIN_NM), math.ceil((platform - airport.elev_ft) / 320))
@@ -696,13 +696,14 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
     return flight.arrival
 
 
-def _platform(approach, airport: Airport) -> int:
-    """The altitude final is joined at: the approach's own, else 3,000 ft above the airport. Never less than
-    1,500 ft above it: procedure data that does not match the airport's elevation would put the flight in the ground."""
+def _platform(approach, airport: Airport, safe: float = 0) -> int:
+    """The altitude final is joined at: the approach's own, else 3,000 ft above the airport, but then no lower than
+    the minimum sector altitude `safe` (nothing published says lower is safe). Never less than 1,500 ft above the
+    airport: procedure data that does not match the airport's elevation would put the flight in the ground."""
     floor = int(math.ceil((airport.elev_ft + 1500) / 100) * 100)
     if approach and approach.platform_ft:
         return max(approach.platform_ft, floor)
-    return int(math.ceil((airport.elev_ft + 3000) / 500) * 500)
+    return max(int(math.ceil((airport.elev_ft + 3000) / 500) * 500), int(math.ceil(safe / 100) * 100))
 
 
 def _tailwind_kt(airport: Airport, runway: str, issue) -> float:
@@ -1633,7 +1634,9 @@ def tick(engine, station, issue, raw, variation, callsign):
         # Inside the joining point counts only near the centreline: abeam the airport, forty miles to the side, the
         # flight is not on final, and the tower is out of range.
         inside = 0 < position.along_nm < arrival.final_nm - 4 and position.cross_nm < CLOSE_NM
-        if established(position, arrival.final_nm) or inside:
+        # Flying in along final, not across or away from it on the way to an initial fix beyond the airport.
+        inbound = abs((raw.get("heading_true", arrival.course_true) - arrival.course_true + 180) % 360 - 180) < 90
+        if inbound and (established(position, arrival.final_nm) or inside):
             return _to_tower(engine, station, callsign)
         return None
     asked = engine.requested_runway(station.airport, issue)  # checked against the wind again: dropped if it fails

@@ -347,6 +347,7 @@ def test_an_approach_altitude_under_the_airport_is_raised_above_it():
     assert ifr._platform(SimpleNamespace(platform_ft=2500), high) == 4800  # procedure data for another elevation
     assert ifr._platform(SimpleNamespace(platform_ft=6000), high) == 6000
     assert ifr._platform(None, high) == 6500
+    assert ifr._platform(None, high, safe=8000) == 8000  # nothing published: never below the sector altitude
 
 
 def test_an_r_nav_approach_is_never_cleared_below_the_minimum_sector_altitude(world):  # noqa: F811
@@ -531,3 +532,23 @@ def test_after_landing_a_stand_is_given_that_the_taxiways_reach_from_the_exit(tm
     near = next(stand for stand in network.parking if stand.name == "NEAR")
     stand, route = engine._reachable_stand(network, {"lat": 52.0, "lon": -1.0}, near)
     assert stand.name == "REACHED" and route.taxiways == ["A"]
+
+
+def test_a_taxi_route_starts_off_the_runway_the_aircraft_has_just_left():
+    network = parse_taxi([row for row in CROSSING if row.startswith(("1201", "1202", "1300"))])
+    just_off = (50.99965, -1.0)  # 39 m from a node on 09R/27L, 65 m from the one short of it
+    route = route_to_point(network, *just_off, (50.996, -1.0))
+    assert route.points[0] == (50.999, -1.0)  # was: the node on the runway, so the route led back onto it
+
+
+def test_approach_hands_a_flight_to_tower_only_when_it_flies_in_along_final(world):  # noqa: F811
+    db, engine, _ = world
+    flight = engine.flight
+    flight.has_been_airborne, flight.origin_ident, flight.cleared_ft = True, "EGXX", 2500
+    approach = db.station(124300, 51.0, 5.5, feet=3000)
+    flight.contacted.add(approach.key)
+    flight.arrival = ifr.Arrival("LFXX", "27", "R NAV", 2500, 270.0, (51.0, 5.37), stage="procedure", final_nm=10)
+    outbound = at(51.0, 5.50, feet=4000, heading=90)  # over final on the way out to an initial fix
+    assert ifr.tick(engine, approach, ISSUE, outbound, 0.0, CALLSIGN) is None  # was: "contact Eastfield Tower"
+    inbound = at(51.0, 5.50, feet=1800, heading=270)
+    assert ifr.tick(engine, approach, ISSUE, inbound, 0.0, CALLSIGN).text.startswith(f"{CALLSIGN}, contact Eastfield Tower")
