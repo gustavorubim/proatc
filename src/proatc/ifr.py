@@ -880,7 +880,7 @@ def _runway_change(engine, station, issue, raw, callsign):
     """The runway in use has changed under an arrival that is not yet on final: a new approach, new vectors."""
     flight = engine.flight
     old = flight.arrival
-    flight.runway = None
+    flight.runway, flight.arrival = None, None  # chosen afresh, not kept from the arrival being replaced
     new = _setup_arrival(engine, station, issue, raw, Intent())
     if new is None or new.runway == old.runway:
         flight.arrival, flight.runway = old, old.runway
@@ -986,14 +986,24 @@ def after_takeoff(engine, airport: Airport, raw: dict):
     center = None
     if engine.centers and "lat" in raw:
         # The centre here, or where no centre covers the airport, the one the flight is climbing into.
-        places = [(raw["lat"], raw["lon"]), *(_ahead(raw, miles) for miles in range(10, DEPARTURE_LOOK_NM + 1, 10))]
-        center = next((found for place in places if (found := engine.centers.at(*place, _feet(raw)))), None)
+        place = _centre_place(engine, raw)
+        center = engine.centers.at(*place, _feet(raw)) if place else None
     if center:
         station = engine.centers.station_for(center)
         engine.centers.expect(station.khz, center)
         expect_station(station.khz, station.key)
         return station.callsign, say.frequency(station.khz), f"{station.khz / 1000:.3f}"
     return None
+
+
+def _centre_place(engine, raw: dict) -> tuple[float, float] | None:
+    """Where to look for the centre to hand a departure to: where the aircraft is, or, where no centre covers that
+    (the sim's data has holes), the first place ahead on its heading that one does."""
+    if not engine.centers or "lat" not in raw:
+        return None
+    here = (raw["lat"], raw["lon"])
+    places = [here, *(_ahead(raw, miles) for miles in range(10, DEPARTURE_LOOK_NM + 1, 10))]
+    return next((place for place in places if engine.centers.at(*place, _feet(raw))), None)
 
 
 def _ahead(raw: dict, miles: float | None = None) -> tuple[float, float]:
@@ -1054,6 +1064,23 @@ def _centre_handoff(engine, raw, callsign, exclude=None, where=None):
     expect_station(station.khz, station.key)  # and not an airport's controller that shares the frequency
     text = f"{callsign}, contact {station.callsign} {say.frequency(station.khz)}"
     return _reply(engine, text, {"frequency": f"{station.khz / 1000:.3f}"})
+
+
+def _descent_due(engine, station, raw, callsign, destination, remaining: float, gate: float, faa: bool):
+    """The first descent, or the next step down, when a three degree path to the hand-off needs it; else None."""
+    flight = engine.flight
+    cleared = flight.cleared_ft or 0
+    goal = _descent_target(engine, destination, raw)
+    if not flight.descent_given:
+        # Three degrees is about 300 ft per mile; ten miles in hand for slowing down.
+        if remaining <= (_feet(raw) - goal) / 300 + gate + 10:
+            return _descent(engine, station, raw, callsign, "", faa)
+    elif cleared > goal and _near_cleared(engine, raw):
+        # The next step waits for the distance too: an aircraft that came down quickly is held at its
+        # level until a three degree path needs the next one, not sent lower a hundred miles out.
+        if remaining <= (cleared - goal) / 300 + gate + 10 + STEP_LEAD_NM:
+            return _descend(engine, _next_level(cleared, _feet(raw), goal), destination.ident, faa, callsign, "")
+    return None
 
 
 def _crossing_missed(engine, crossing, raw, ident: str, faa: bool, callsign: str):
@@ -1160,8 +1187,13 @@ def tick(engine, station, issue, raw, variation, callsign):
         # the flight comes within its range while still on the oceanic frequency.
         landing = engine.db.airport(plan.destination) if plan and plan.destination else None
         if landing and not flight.arrival and (not flight.told_approach or _approach_missed(engine, station)):
-            if distance_nm(raw["lat"], raw["lon"], landing.lat, landing.lon) <= _handoff_nm(engine, landing):
+            remaining, gate = distance_nm(raw["lat"], raw["lon"], landing.lat, landing.lon), _handoff_nm(engine, landing)
+            if remaining <= gate:
                 return _to_approach(engine, station, landing, raw, callsign)
+            # Without radar the descent is still given, or the flight reaches its destination in the cruise.
+            descent = _descent_due(engine, station, raw, callsign, landing, remaining, gate, _centre_faa(station))
+            if descent:
+                return descent
         if not station.center.contains(raw["lat"], raw["lon"]):
             return _centre_handoff(engine, raw, callsign, exclude=station.center)
         return None
@@ -1195,7 +1227,9 @@ def tick(engine, station, issue, raw, variation, callsign):
         if cleared < top and _near_cleared(engine, raw) and away <= DEPARTURE_HANDOFF_NM:
             return _climb(engine, _next_level(cleared, _feet(raw), top), airport.ident, faa, callsign, "")
         if away > DEPARTURE_HANDOFF_NM or (cleared >= top and _feet(raw) >= cleared - 1500):
-            return _centre_handoff(engine, raw, callsign)
+            place = _centre_place(engine, raw)
+            here = place == (raw["lat"], raw["lon"])
+            return _centre_handoff(engine, raw, callsign, where=None if here or place is None else place)
         return None
 
     if part == "passing":
@@ -1279,17 +1313,7 @@ def tick(engine, station, issue, raw, variation, callsign):
             if any(not c.passed for c in flight.constraints):
                 return None  # the arrival's restrictions set the pace
         if destination:
-            goal = _descent_target(engine, destination, raw)
-            if not flight.descent_given:
-                # Three degrees is about 300 ft per mile; ten miles in hand for slowing down.
-                start_nm = (_feet(raw) - goal) / 300 + gate + 10
-                if remaining <= start_nm:
-                    return _descent(engine, station, raw, callsign, "", faa)
-            elif cleared > goal and _near_cleared(engine, raw):
-                # The next step waits for the distance too: an aircraft that came down quickly is held at its
-                # level until a three degree path needs the next one, not sent lower a hundred miles out.
-                if remaining <= (cleared - goal) / 300 + gate + 10 + STEP_LEAD_NM:
-                    return _descend(engine, _next_level(cleared, _feet(raw), goal), destination.ident, faa, callsign, "")
+            return _descent_due(engine, station, raw, callsign, destination, remaining, gate, faa)
         return None
 
     arrival = flight.arrival

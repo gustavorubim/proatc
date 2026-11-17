@@ -918,6 +918,11 @@ class Engine:
         active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
         if not active:
             return None
+        arrival = self.flight.arrival
+        if arrival is not None and arrival.airport == airport.ident:
+            # The runway approach brought the flight to, even one not in use: straight in to the other end with
+            # little tailwind, where the runway in use has no approach.
+            return arrival.runway
         if self.flight.runway in active:
             return self.flight.runway
         if intent.runway in active:

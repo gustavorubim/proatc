@@ -219,6 +219,7 @@ def _verify_full(db, count: int, show: str | None) -> int:
     """Gate to gate: clearance, taxi, takeoff, the climb, the cruise, the approach, landing and taxi to a stand."""
     from .flights import fly_full, full_summary, pick_flights, shared_data, sweep_full
 
+    sys.stdout.reconfigure(errors="replace")  # station names in any language, to a console that may not have them
     if show:
         problems, said = fly_full(db, shared_data(db), *show.upper().split("-")[:2])
         print("\n".join(said))

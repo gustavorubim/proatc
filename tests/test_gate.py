@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from proatc import ifr
+from proatc import phraseology as say
 from proatc.atis import Issue
 from proatc.centers import CenterIndex, parse_atc
 from proatc.engine import Engine, Phase
@@ -52,6 +53,12 @@ APT = """A
 1302 icao_code EGTT
 100 45.00 1 1 0.25 1 3 0  09 56.0000 -0.0200 0 0 3 2 1 0 27 56.0000 0.0200 0 0 3 2 1 0
 1054 119900 Lonefield Tower
+
+1    100 0 0 EGDD Deptfield
+1302 icao_code EGDD
+100 45.00 1 1 0.25 1 3 0  09 56.0000 0.9800 0 0 3 2 1 0 27 56.0000 1.0200 0 0 3 2 1 0
+1054 118300 Deptfield Tower
+1056 124500 Deptfield Departure
 """.splitlines()
 
 
@@ -69,6 +76,7 @@ ATC = (
     sector("WESTSIDE", "EGWW", [13210], 50.0, 54.0, -3.0, 2.0)
     + sector("EASTSIDE", "EDEE", [13210], 50.0, 54.0, 2.0, 8.0)
     + sector("NORTHSIDE", "EGNN", [12345], 56.15, 58.0, -3.0, 2.0)
+    + sector("NORTH OCEANIC", "EGGX", [12790], 58.0, 62.0, -3.0, 2.0)
 )
 
 
@@ -312,3 +320,59 @@ def test_an_r_nav_approach_keeps_its_published_initial_altitude_below_a_high_sec
     # A mountain behind the airport makes the sector altitude 19,000 ft; the procedure was designed for 4,000.
     reply = ifr._via_initial_fix(engine, approach, ISSUE, raw, CALLSIGN, "", position, 19000, False)
     assert "descend altitude four thousand feet" in reply.text and reply.expect["altitude"] == 4000
+
+
+def test_a_departure_controller_hands_on_to_the_centre_ahead_when_none_covers_the_airport(fields):
+    db = fields
+    engine = engine_for(db)
+    engine.set_plan(FlightPlan("EGDD", "EGAA", [], 24000))
+    departure = db.station(124500, 56.0, 1.0, feet=20000)
+    flight = engine.flight
+    flight.rules, flight.has_been_airborne, flight.origin_ident, flight.cleared_ft = "IFR", True, "EGDD", 24000
+    flight.contacted.add(departure.key)
+    topping_out = at(56.05, 1.0, feet=23500, heading=0, speed=200.0)
+    assert ifr.tick(engine, departure, ISSUE, topping_out, 0.0, CALLSIGN).text == (
+        f"{CALLSIGN}, contact Northside Control one two three decimal four five"
+    )  # was: nothing, until the departure frequency went silent sixty miles out
+
+
+def test_an_oceanic_sector_gives_the_descent_to_a_destination_inside_it(fields):
+    db = fields
+    engine = engine_for(db)
+    engine.set_plan(FlightPlan("EGAA", "EGTT", [], 36000))
+    ocean = next(centre for centre in db.centers.centers if centre.oceanic)
+    radio = db.centers.station_for(ocean)
+    flight = engine.flight
+    flight.rules, flight.has_been_airborne, flight.origin_ident, flight.cleared_ft = "IFR", True, "EGAA", 36000
+    flight.contacted.add(radio.key)
+    southbound = at(58.2, 0.0, feet=36000, heading=180, speed=230.0)  # 132 miles out
+    assert ifr.tick(engine, radio, None, southbound, 0.0, CALLSIGN) is None
+    nearer = at(57.9, 0.0, feet=36000, heading=180, speed=230.0)  # 114 miles: a three degree path starts here
+    reply = ifr.tick(engine, radio, None, nearer, 0.0, CALLSIGN)
+    assert reply.text == f"{CALLSIGN}, descend flight level two six zero"  # was: the cruise level, all the way in
+
+
+def test_runways_crossed_where_two_runways_meet_are_both_cleared():
+    rows = """1201 52.0000 -1.0000 both 0 apron
+1201 52.0010 -1.0000 both 1 intersection
+1201 52.0020 -1.0000 both 2 beyond
+1201 52.0010 -1.0010 both 3 west
+1201 52.0015 -1.0005 both 4 north_west
+1202 0 1 twoway taxiway_E A
+1202 1 2 twoway taxiway_E A
+1202 3 1 twoway runway 08/26
+1202 1 4 twoway runway 01/19""".splitlines()
+    route = route_to_point(parse_taxi(rows), 52.0, -1.0, (52.002, -1.0))
+    assert sorted(route.crossings) == ["01/19", "08/26"]  # was: only the first one listed for that node
+
+
+def test_a_stand_name_with_two_spaces_is_said_with_one():
+    assert say.stand("Ga Ramp  3") == "Ga Ramp 3"
+
+
+def test_the_tower_clears_the_flight_to_land_on_the_runway_approach_brought_it_to(world):  # noqa: F811
+    db, engine, _ = world
+    airport = db.airport("LFXX")
+    # Wind from the west: 27 is in use. Approach brought the flight straight in to 09 (no approach to 27).
+    engine.flight.arrival = ifr.Arrival("LFXX", "09", "V O R", 2500, 90.0, (51.0, 5.33))
+    assert engine._landing_runway(airport, ISSUE, at(51.0, 5.25, feet=1500), Intent("established")) == "09"

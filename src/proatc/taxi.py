@@ -59,6 +59,9 @@ class TaxiNetwork:
                 return name
         return None
 
+    def runways_of(self, node: int, excluding: str | None = None) -> list[str]:
+        return [name for name, nodes in self.runway_nodes.items() if node in nodes and name != excluding]
+
 
 @dataclass
 class Route:
@@ -134,7 +137,6 @@ def _shortest(net: TaxiNetwork, graph: dict[int, list[Edge]], start: int, target
 
 
 def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str | None) -> Route:
-    crossings: list[str] = []
     steps: list[tuple[str, float]] = []  # (taxiway, direction of travel) per edge, goal first
     on_runway: list[bool] = []
     path = [goal]
@@ -145,20 +147,17 @@ def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str
         distance += edge.length_m
         steps.append((edge.name, bearing(*net.nodes[prior], *net.nodes[node])))
         on_runway.append(edge.runway)
-        crossed = net.runway_of(node, excluding=target_runway) if node != goal else None
-        if crossed and crossed not in crossings:
-            crossings.append(crossed)
         node = prior
         path.append(node)
     steps.reverse()
     on_runway.reverse()
-    crossings.reverse()
     path.reverse()
+    # In the order the runways are met, every runway at each node: where two runways cross, both are crossed.
     crossing_index: dict[str, int] = {}
     for index, node in enumerate(path[1:-1], start=1):
-        crossed = net.runway_of(node, excluding=target_runway)
-        if crossed and crossed not in crossing_index:
-            crossing_index[crossed] = index
+        for crossed in net.runways_of(node, excluding=target_runway):
+            crossing_index.setdefault(crossed, index)
+    crossings = list(crossing_index)
     names: list[str] = []
     turns: list[str] = []
     heading = None
