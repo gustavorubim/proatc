@@ -32,7 +32,7 @@ from websockets.sync.server import serve
 
 from . import phraseology as say
 from .airspace import CONTROLLED
-from .atis import runways_in_use, uses_faa_style
+from .atis import decoded, runways_in_use, uses_faa_style
 from .config import PROJECT_DIR, Config, editable_values, load_settings, save_settings
 from .flightplan import PlanError, fetch_simbrief, manual
 from .intents import Intent
@@ -198,6 +198,7 @@ def build_state(session: Session, db: AirportDB) -> dict:
                 wind="calm" if w.wind_kt < 1 else f"{direction:03d}° / {round(w.wind_kt)} kt",
                 pressure=f"{w.qnh_hpa * 0.02953:.2f} inHg" if faa else f"QNH {int(w.qnh_hpa)}",
                 temperature=f"{round(w.temperature_c)}°C",
+                atis=decoded(airport, w, issue.letter, issue.zulu_seconds, magnetic_variation(raw)),
             )
         state["airport"] = info
     state["flight"] = session.engine.summary()

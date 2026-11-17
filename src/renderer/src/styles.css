@@ -1143,3 +1143,41 @@ input[type='range'] {
     margin: 8px 12px 0;
   }
 }
+
+/* ---- the ATIS, written down ---- */
+
+.atis {
+  margin: 0 0 10px;
+  display: grid;
+  gap: 3px;
+  font-size: 12.5px;
+}
+
+.atis > div {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.atis dt {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.atis dd {
+  margin: 0;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.atis dd .chip {
+  margin-right: 6px;
+}
+
+.atis .alert dd {
+  color: var(--red);
+  font-weight: 700;
+}

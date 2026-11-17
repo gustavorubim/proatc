@@ -434,20 +434,34 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
           <div className="eyebrow">
             {airport.ident} · {airport.name}
           </div>
-          {airport.atis_letter && (
-            <div className="chips">
-              <span className="chip chip-atis" title="Current ATIS information">
-                {airport.atis_name}
-              </span>
-              {airport.runways_in_use?.map((runway) => (
-                <span className="chip" key={runway} title="Runway in use">
-                  RWY {runway}
-                </span>
+          {airport.atis_letter && airport.atis ? (
+            <dl className="atis" title="The current ATIS, written down">
+              {airport.atis.map((row, index) => (
+                <div key={row.label} className={row.alert ? 'alert' : ''}>
+                  <dt>{row.label}</dt>
+                  <dd>
+                    {index === 0 ? <span className="chip chip-atis">{airport.atis_name}</span> : null}
+                    {index === 0 ? row.value.split(' · ')[1] : row.value}
+                  </dd>
+                </div>
               ))}
-              <span className="chip">{airport.wind}</span>
-              <span className="chip">{airport.pressure}</span>
-              <span className="chip">{airport.temperature}</span>
-            </div>
+            </dl>
+          ) : (
+            airport.atis_letter && (
+              <div className="chips">
+                <span className="chip chip-atis" title="Current ATIS information">
+                  {airport.atis_name}
+                </span>
+                {airport.runways_in_use?.map((runway) => (
+                  <span className="chip" key={runway} title="Runway in use">
+                    RWY {runway}
+                  </span>
+                ))}
+                <span className="chip">{airport.wind}</span>
+                <span className="chip">{airport.pressure}</span>
+                <span className="chip">{airport.temperature}</span>
+              </div>
+            )
           )}
           <ul className="freqs">
             {airport.frequencies.map((frequency) => (
