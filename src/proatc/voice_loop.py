@@ -402,7 +402,7 @@ class Session:
 
     def debrief(self) -> dict:
         """Review the radio work so far; with a language model, add the instructor's remarks."""
-        result = review(self.log.records)
+        result = review(self.log.entries())
         if self.controller and result["transmissions"] >= 5:  # too little to say anything useful about
             try:
                 facts = {key: result[key] for key in ("minutes", "transmissions", "readbacks", "say_again", "stations")}
@@ -418,7 +418,7 @@ class Session:
                  "model": self.config.llm.model}  # fmt: skip
         if self.ready:
             extra["seed"] = self.engine.seed
-        extra["debrief"] = review(self.log.records)
+        extra["debrief"] = review(self.log.entries())
         extra["debrief_text"] = "\n" + as_text(extra["debrief"])
         if self.ready and self.engine.flight.plan:
             extra["plan"] = self.engine.flight.plan.summary()

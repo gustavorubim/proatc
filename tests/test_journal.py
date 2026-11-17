@@ -1,6 +1,8 @@
 """The flight written to disk as it happens, so that a fault can be looked into after the flight."""
 
 import json
+import sys
+import threading
 
 from proatc import config as config_module
 from proatc import flightlog
@@ -147,3 +149,47 @@ def test_a_journal_can_be_replayed(tmp_path):
     saved = log.save(tmp_path / "saved", {"seed": 5})
     assert replay(load(saved.with_suffix(".json")), db, make).calls == 2
     assert ISSUE is not None
+
+
+def test_records_and_notes_from_several_threads_at_once_are_all_on_disk_each_on_a_whole_line(tmp_path):
+    switch = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # the threads change places as often as they can
+    log = FlightLog()
+    threads, per_thread, long_text = 6, 200, "x" * 2000
+    start, failures = threading.Barrier(threads + 1), []
+
+    def work(number):
+        start.wait()
+        try:
+            for index in range(per_thread):
+                if index % 3:
+                    log.record({"type": "info", "text": f"{number}-{index} {long_text}"})
+                else:
+                    log.note("trace", {"tuned": "121.700"}, mark=f"{number}-{index}", padding=long_text)
+                if number == 0:
+                    log.text()  # "Save log" reads the records while they are being added to
+        except Exception as error:
+            failures.append(error)
+
+    workers = [threading.Thread(target=work, args=(number,)) for number in range(threads)]
+    for worker in workers:
+        worker.start()
+    try:
+        start.wait()
+        for _ in range(20):
+            log.record({"type": "info", "text": "main"})
+        journal = log.keep_journal(tmp_path / "journal")  # started while records are being made
+        for worker in workers:
+            worker.join()
+    finally:
+        sys.setswitchinterval(switch)
+    assert not failures
+
+    written = lines(journal)  # every line parses
+    marks = [entry["text"].split()[0] if entry["type"] == "info" else entry["mark"] for entry in written]
+    kept = [entry["text"].split()[0] for entry in log.records if entry["text"] != "main"]
+    marks = [mark for mark in marks if mark != "main"]
+    infos = {f"{n}-{i}" for n in range(threads) for i in range(per_thread) if i % 3}
+    assert len(kept) == len(infos) and set(kept) == infos  # none lost in memory
+    assert {mark for mark in marks if mark in infos} == infos and len(marks) == len(set(marks))  # none twice
+    assert [mark for mark in marks if mark in infos] == kept  # in the order they were kept

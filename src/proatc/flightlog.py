@@ -14,6 +14,7 @@ the oldest are deleted.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections import deque
 from datetime import datetime
@@ -32,6 +33,9 @@ class FlightLog:
         self.started = datetime.now()
         self.journal: Path | None = None  # the file on disk, once `keep_journal` has been called
         self._file = None
+        # Records come from the session's thread, the trace thread and the radio threads at once: one lock keeps
+        # each line whole on disk, in the order it was kept in memory, and none lost.
+        self._lock = threading.RLock()
 
     def keep_journal(self, folder: Path) -> Path | None:
         """Write every record to a file in `folder` from now on, starting with what is already held."""
@@ -39,22 +43,30 @@ class FlightLog:
             folder.mkdir(parents=True, exist_ok=True)
             for old in sorted(folder.glob("session-*.jsonl"))[: -(JOURNALS_KEPT - 1) or None]:
                 old.unlink(missing_ok=True)
-            self.journal = folder / JOURNAL_NAME.format(self.started)
-            self._file = open(self.journal, "a", encoding="utf-8")  # noqa: SIM115  (kept open for the whole run)
-            for entry in list(self.records):
-                self._write(entry)
+            with self._lock:  # what is already held goes first, before any record made meanwhile
+                self.journal = folder / JOURNAL_NAME.format(self.started)
+                self._file = open(self.journal, "a", encoding="utf-8")  # noqa: SIM115  (kept open for the whole run)
+                for entry in list(self.records):
+                    self._write(entry)
         except OSError:
             self.journal = self._file = None  # no journal is not a reason to stop
         return self.journal
 
     def _write(self, entry: dict) -> None:
-        if self._file is None:
-            return
-        try:
-            self._file.write(json.dumps(entry, default=str) + "\n")
-            self._file.flush()
-        except (OSError, ValueError):
-            self._file = None
+        line = json.dumps(entry, default=str) + "\n"
+        with self._lock:
+            if self._file is None:
+                return
+            try:
+                self._file.write(line)
+                self._file.flush()
+            except (OSError, ValueError):
+                self._file = None
+
+    def entries(self) -> list[dict]:
+        """The records kept in memory as they are now; other threads may add to them meanwhile."""
+        with self._lock:
+            return list(self.records)
 
     def note(self, kind: str, context: dict | None = None, **fields) -> None:
         """A record that is not a radio event: the session's start, the plan, the trace. Journal only."""
@@ -70,13 +82,14 @@ class FlightLog:
         entry = {"t": round(time.time(), 2), **event}
         if context and kind in WITH_CONTEXT:
             entry["context"] = context
-        self.records.append(entry)
-        self._write(entry)
+        with self._lock:  # in memory and on disk in the same order
+            self.records.append(entry)
+            self._write(entry)
 
     def text(self) -> str:
         """The conversation as a readable transcript."""
         lines = [f"Pro ATC flight log, started {self.started:%Y-%m-%d %H:%M}", ""]
-        for entry in self.records:
+        for entry in self.entries():
             stamp = datetime.fromtimestamp(entry["t"]).strftime("%H:%M:%S")
             kind = entry["type"]
             where = entry.get("context", {})
@@ -104,6 +117,6 @@ class FlightLog:
         stem = folder / f"flight-{datetime.now():%Y%m%d-%H%M%S}"
         extra = dict(extra or {})
         stem.with_suffix(".txt").write_text(self.text() + extra.pop("debrief_text", ""), encoding="utf-8")
-        payload = {"started": self.started.isoformat(timespec="seconds"), **(extra or {}), "events": list(self.records)}
+        payload = {"started": self.started.isoformat(timespec="seconds"), **(extra or {}), "events": self.entries()}
         stem.with_suffix(".json").write_text(json.dumps(payload, indent=1, default=str), encoding="utf-8")
         return stem.with_suffix(".txt")
