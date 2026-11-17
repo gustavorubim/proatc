@@ -123,7 +123,15 @@ It prints the problems grouped by kind with example flights. To see one flight's
 uv run proatc verify-flights --show KBOS-KIAD
 ```
 
-When this was first run, 180 of 300 flights had a problem. The rules that fixed them are general, not per airport: a station has a ceiling as well as a range; the station being talked to keeps answering; a flight that is handed to a station is answered by that station; the next centre is given before the boundary and not for a clipped corner, nor straight back, nor twice in twenty miles; an airport without approach is handed over inside its tower's range; a sector across the date line does not cover the world. What is left after them is in the baseline below. A release that makes the number worse is not ready.
+When this was first run, 180 of 300 flights had a problem. The rules that fixed them are general, not per airport: a station has a ceiling as well as a range; the station being talked to keeps answering; a flight that is handed to a station is answered by that station; the next centre is given before the boundary and not for a clipped corner, nor straight back, nor twice in twenty miles; an airport without approach is handed over inside its tower's range; a sector across the date line does not cover the world. A release that makes the numbers below worse is not ready.
+
+| Run (0.14, real X-Plane data) | Flights with a problem |
+|---|---|
+| `verify-flights --flights 300`, before the rules | 180 |
+| `verify-flights --flights 300`, after | 1 |
+| 1,000 other flights, after | 2 |
+
+The ones left: a route across the date line near the pole (Siberia to Alaska), and one where two entries for the same centre in the sim's data overlap. Both recover later in the flight.
 
 ## Fuzz tests
 
