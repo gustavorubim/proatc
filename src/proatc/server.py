@@ -220,10 +220,10 @@ def build_state(session: Session, db: AirportDB) -> dict:
         feet = raw.get("elevation_m", 0.0) / 0.3048
         inside = [space for space in index.at(raw["lat"], raw["lon"], feet) if space.kind in CONTROLLED or space.area <= 1.0]
         state["airspace"] = [space.describe() for space in inside[:2]]
-    # A hand-off frequency stops being offered once it is tuned.
-    pending = session.engine.flight.next_frequency
+    # A hand-off frequency stops being offered once it is tuned. The engine keeps it until a call is made on
+    # it (the copilot checks in on it): this thread only reads it.
+    pending = state["flight"].get("next_frequency")
     if pending and khz and abs(float(pending) * 1000 - khz) <= 5:
-        session.engine.flight.next_frequency = None
         state["flight"].pop("next_frequency", None)
     state["status"]["can_tune"] = config.sim.allow_tuning
     if station and station.kind != "atis":

@@ -47,6 +47,7 @@ CI runs the first three on Windows, macOS and Linux, and the packaged-app self-t
 | Flights across a made-up world | `tests/test_world.py` | Whole flights are handed all the way to their destination, through zigzag boundaries, shared frequencies, cities with several airports, airports without approach, a coverage hole and an ocean | That the sim's real data has no surprise of another kind |
 | Real flights worldwide | `proatc verify-flights` | The same, between hundreds of real airport pairs on this machine's X-Plane data | Needs X-Plane; not in CI |
 | Real-data sweep | `proatc verify-data` | The engine's main paths at hundreds of real airports raise nothing and read right | Needs X-Plane; not in CI |
+| Timing tests | `tests/test_session_timing.py`, `tests/sim.py` | The session's job loop, the ATIS broadcaster and the second radio, run together: hand-offs, readbacks and tuning end right when they overlap | Real audio devices, a real sim's tuning delays |
 | Log replay | `proatc replay flight-….json` | A saved flight gives the same answers again, or shows exactly which changed | Timing closer than the twenty-second trace |
 | Kept flights | `proatc journals check` | Real flights kept on this machine still go the way a person last accepted | Needs X-Plane and kept journals; not in CI |
 | Benchmarks | `proatc bench-speech`, `proatc bench-intents` | Numbers for hearing and understanding, to compare before and after a change | How well it hears a real person |
@@ -222,6 +223,26 @@ When this was first run, 180 of 300 flights had a problem. The rules that fixed 
 | 1,000 other flights, after | 2 |
 
 The ones left: a route across the date line near the pole (Siberia to Alaska), and one where two entries for the same centre in the sim's data overlap. Both recover later in the flight.
+
+## Timing tests: two things at once
+
+Three things run at the same time in the app: the session's job loop (the pilot's calls and the copilot), the ATIS broadcaster (which also makes the controllers' unprompted calls and plays the chatter) and the second radio. Every other test calls them one step at a time, so none can see a fault that needs two of them at the same moment. One such fault lost a real flight its hand-off to approach: a centre said "contact approach" while the copilot was tuning the previous hand-off, and the copilot checked in with the wrong centre.
+
+`tests/sim.py` runs the real `Session`, `AtisBroadcaster` and `SecondRadio` threads against stand-ins: a sim whose aircraft flies a straight line and whose radio reports a new frequency after a delay (or never, or refuses it), a sound card on which a sentence lasts as long as it takes to say, voices, a microphone, a push-to-talk key and a language model. Every wait and sleep in `voice_loop.py` and `radio.py` goes through a clock (`proatc/clock.py`); the tests pass `SimTime`, which runs one thread at a time and moves time on only when all of them are waiting. A minute of flight takes a fraction of a second and gives the same result on every run.
+
+To add a scenario, in `tests/test_session_timing.py`:
+
+```python
+def test_what_happens_as_a_sentence(rigs):
+    rig = rigs(tune_delay=1.8)  # copilot, auto_tune, refuse, chatter, seed, ...
+    rig.controller_says(5, handoff_to_next_centre)  # the controller on frequency says it at 5 s
+    rig.run_until(12)
+    rig.tune_by_hand(EAST_2)  # or rig.say(text, Intent(...)), rig.click(...)
+    rig.run_until(50)
+    ok(rig, rig.settled_on(EAST, "Eastland Control"))  # frequency, checked in, nothing owed, nobody talked over
+```
+
+`rig.transcript()` prints the run with times and the station on frequency. **A new fault involving the copilot, or two things happening at once, is reproduced here first**, then fixed. Run a new scenario twenty times in a row: it must pass every time.
 
 ## Fuzz tests
 

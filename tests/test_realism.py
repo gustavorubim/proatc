@@ -88,6 +88,7 @@ def test_downwind_is_extended_for_traffic_on_final(tmp_path):
     _, engine, approach, _ = make(tmp_path)
     engine.handle(Intent("check_in"), approach, ISSUE, at(51.1, 5.0, feet=7000, heading=90))
     assert engine.flight.arrival.stage == "downwind"
+    engine.flight.pending = None  # read back: the next instruction waits for it
     turning_point = at(51.1, 5.75, feet=3500, heading=90)
     other_on_final = (51.0, 5.53, 2200.0, 270.0, False)  # six miles out on the I L S
     held = engine.tick(approach, ISSUE, with_traffic(turning_point, other_on_final))
@@ -399,7 +400,7 @@ def test_chatter_plays_on_an_idle_frequency_and_keeps_out_of_the_way(tmp_path):
     assert events[-1]["said"] == tts.spoken[0] and caster._chatter_at > 0
 
     caster._chatter_at = caster._chatter_until = 0.0
-    engine.flight.pending = object()  # the controller is waiting for a readback: no talking over it
+    engine.flight.pending, engine.flight.pending_key = object(), tower.key  # the controller waits for a readback
     caster._chatter(tower, state)
     assert player.played == 1
     engine.flight.pending, caster._chatter_at = None, 0.0

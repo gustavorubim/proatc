@@ -8,6 +8,7 @@ import pytest
 from proatc import config as config_module
 from proatc import traffic
 from proatc.atis import AtisBook, Issue, compose, split_runways
+from proatc.clock import Clock
 from proatc.config import Config, Llm, editable_values, load_config, save_overrides, validate
 from proatc.engine import Engine
 from proatc.flightlog import FlightLog
@@ -157,14 +158,18 @@ class Sim:
         self.raw[key] = value
 
 
+class NoWaiting(Clock):
+    def sleep(self, seconds):
+        pass
+
+
 def copilot_session(tmp_path, monkeypatch, mode, raw, auto_tune=False):
     monkeypatch.setattr(config_module, "PROJECT_DIR", tmp_path)
-    monkeypatch.setattr("proatc.voice_loop.time.sleep", lambda seconds: None)
     db, engine, _, _ = make(tmp_path)
     engine.set_plan(None)
     engine.flight.has_been_airborne = False
     events = []
-    session = Session(Config(), emit=events.append)
+    session = Session(Config(), emit=events.append, clock=NoWaiting())
     session.config.atc.copilot, session.config.sim.auto_tune = mode, auto_tune
     session.db, session.engine, session.book, session.bridge, session.ready = db, engine, AtisBook(), Sim(raw), True
     return session, engine, events
@@ -180,11 +185,11 @@ def test_copilot_reads_back_once_and_tunes_the_handoff(tmp_path, monkeypatch):
     ground = session.db.station(121700, 51.0, -1.0)
     engine.handle(Intent("request_taxi"), ground, ISSUE, session.bridge.snapshot())
     session._after_transmission()
+    session._after_transmission()
+    assert session.jobs.qsize() == 1  # the same instruction is not queued twice
     kind, text, intent = session.jobs.get_nowait()
     assert kind == "copilot" and intent == Intent("readback", runway="27")
     assert text.startswith("Taxi to holding point runway two seven") and text.endswith(CALLSIGN)
-    session._after_transmission()
-    assert session.jobs.empty()  # the same instruction is not read back twice
     assert engine.handle(intent, ground, ISSUE, session.bridge.snapshot()).text == ""
 
     engine.handle(Intent("ready_for_departure"), ground, ISSUE, session.bridge.snapshot())  # "contact tower"
@@ -194,7 +199,15 @@ def test_copilot_reads_back_once_and_tunes_the_handoff(tmp_path, monkeypatch):
     engine.handle(readback, ground, ISSUE, session.bridge.snapshot())
     session._after_transmission()
     assert session.bridge.writes == [("com1_khz", 118100)]  # tuned without being asked
-    assert {"type": "info", "text": "COM1 tuned to 118.100"} in events and engine.flight.next_frequency is None
+    assert {"type": "info", "text": "COM1 tuned to 118.100"} in events
+    assert session.jobs.get_nowait()[0] == "after"  # then the copilot looks again, to check in
+    session._after_transmission()
+    assert session.bridge.writes == [("com1_khz", 118100)]  # tuned once
+    # The hand-off is done when the tower is called on its frequency, not when the radio is turned.
+    assert engine.flight.next_frequency == "118.100"
+    tower = session.db.station(118100, 51.0, -1.0)
+    engine.handle(Intent("ready_for_departure"), tower, ISSUE, session.bridge.snapshot())
+    assert engine.flight.next_frequency is None
 
 
 def test_copilot_off_leaves_the_radio_to_the_pilot_unless_auto_tune_is_on(tmp_path, monkeypatch):
@@ -241,7 +254,9 @@ def test_copilot_checks_in_with_tower_on_the_approach(tmp_path):
     engine.handle(Intent("check_in"), approach, ISSUE, at(51.03, 5.75, feet=3000, heading=270))
     engine.handle(Intent("established"), approach, ISSUE, at(51.0, 5.6, feet=2500, heading=270))
     calls = engine.suggestions(tower, ISSUE, at(51.0, 5.6, feet=2500, heading=270))
-    assert calls[0]["label"] == "Read back"  # the frequency change first
+    # "Contact tower" is read back to approach, who said it, not to the tower.
+    assert calls[0]["label"] == "Check in"
+    assert engine.suggestions(approach, ISSUE, at(51.0, 5.6, feet=2500, heading=270))[0]["label"] == "Read back"
     first = next(call for call in calls if call["label"] == "Check in")
     assert (first["label"], first["intent"]) == ("Check in", {"intent": "established"})
     assert first["text"] == f"Eastfield Tower, {CALLSIGN}, established I L S runway two seven"
@@ -318,6 +333,7 @@ def test_a_sid_crossing_flown_low_is_called(tmp_path):
     assert "Bravo Romeo Victor three Charlie departure" in clearance.text
     assert [(c.fix, c.altitude_ft) for c in engine.flight.sid_constraints] == [("BRV", 4000)]
     engine.handle(Intent("check_in"), departure, ISSUE, at(51.0, -1.1, feet=2000))
+    engine.flight.pending = None  # read back: the next instruction waits for it
     assert engine.tick(departure, ISSUE, at(51.0, -1.12, feet=2500)) is None  # three miles short of the fix
     low = engine.tick(departure, ISSUE, at(51.0, -1.19, feet=3000))
     assert low.text == f"{CALLSIGN}, you were to cross Bravo Romeo Victor at or above altitude four thousand feet, expedite climb"
