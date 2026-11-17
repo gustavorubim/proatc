@@ -149,6 +149,72 @@ def compose(
     return " ".join(line for line in lines if line)
 
 
+CLOUD_CODES = ((0.3, "FEW"), (0.55, "SCT"), (0.9, "BKN"), (9.0, "OVC"))
+
+
+def decoded(airport: Airport, weather: Weather, letter: str, zulu_seconds: float, variation: float = 0.0) -> list[dict]:
+    """The same ATIS as `compose`, written down: rows of label and value for the app's side panel.
+
+    Every row says what the recording says, in the same units; a row with "alert" matters for the approach."""
+    faa = uses_faa_style(airport.ident)
+    hours, minutes = int(zulu_seconds // 3600) % 24, int(zulu_seconds // 60) % 60
+    rows: list[dict] = [{"label": "Information", "value": f"{letter} · {hours:02d}{minutes:02d}Z"}]
+    active = runways_in_use(airport, weather.wind_dir_true, weather.wind_kt)
+    landing, departing = split_runways(active)
+    if active and landing != departing:
+        rows.append({"label": "Runways", "value": f"Landing {', '.join(landing)} · departing {', '.join(departing)}"})
+    elif active:
+        rows.append({"label": "Runway" if len(active) == 1 else "Runways", "value": ", ".join(active)})
+    if weather.wind_kt < 1:
+        wind = "Calm"
+    else:
+        direction = round(((weather.wind_dir_true + variation) % 360) / 10) * 10 or 360
+        gusting = weather.gust_kt and weather.gust_kt >= weather.wind_kt + 5
+        wind = f"{direction:03d}° / {round(weather.wind_kt)} kt" + (f", gusting {round(weather.gust_kt)}" if gusting else "")
+    rows.append({"label": "Wind", "value": wind})
+    if faa:
+        miles = weather.visibility_sm
+        visibility = "10 SM" if miles >= 10 else f"{max(1, round(miles))} SM" if miles >= 1 else "Less than 1 SM"
+    else:
+        metres = weather.visibility_sm * 1609.34
+        visibility = (
+            "10 km or more"
+            if metres >= 9999
+            else f"{int(metres // 1000)} km"
+            if metres >= 5000
+            else f"{max(100, round(metres, -2)):.0f} m"
+        )
+    low = weather.visibility_sm < 3
+    rows.append({"label": "Visibility", "value": visibility, **({"alert": True} if low else {})})
+    present = [
+        "Thunderstorm" if weather.thunderstorm else "",
+        "Light rain" if 0.05 < weather.rain <= 0.5 else "Rain" if weather.rain > 0.5 else "",
+        "Snow" if weather.snow else "",
+        "Fog" if weather.fog and weather.visibility_sm < 0.65 else "",
+    ]
+    present = [item for item in present if item]
+    if present:
+        rows.append({"label": "Weather", "value": ", ".join(present), "alert": True})
+    layers = [c for c in weather.clouds if c.base_ft_agl < 25000]
+    if layers:
+        parts = []
+        for cloud in layers:
+            code = next(code for limit, code in CLOUD_CODES if cloud.coverage < limit)
+            parts.append(f"{code} {max(100, round(cloud.base_ft_agl, -2)):,.0f} ft" + (" CB" if cloud.cumulonimbus else ""))
+        ceiling = min((c.base_ft_agl for c in layers if c.coverage >= 0.55), default=99999)
+        rows.append({"label": "Clouds", "value": " · ".join(parts), **({"alert": True} if ceiling < 1000 else {})})
+    else:
+        rows.append({"label": "Clouds", "value": "Sky clear" if faa else "No significant cloud"})
+    rows.append({"label": "Temperature", "value": f"{round(weather.temperature_c)}°C · dew point {round(weather.dewpoint_c)}°C"})
+    if faa:
+        rows.append({"label": "Altimeter", "value": f"{round(weather.qnh_hpa * 2.953) / 100:.2f} inHg"})
+    else:
+        rows.append({"label": "QNH", "value": f"{int(weather.qnh_hpa)} hPa"})
+    if low_visibility(weather):
+        rows.append({"label": "Procedures", "value": "Low visibility procedures in force", "alert": True})
+    return rows
+
+
 @dataclass
 class Issue:
     letter: str
