@@ -291,11 +291,12 @@ def _number(words: str) -> int:
 
 def _runway_said(text: str, airport, lead: str) -> str | None:
     """The runway of this airport named in `text` right after `lead` ("approach runway", "cleared to land"...)."""
-    ends = [end for runway in airport.runways for end in (runway.end1, runway.end2)]
-    for end in sorted(ends, key=lambda end: -len(say.runway(end))):
-        if re.search(rf"\b{lead} {say.runway(end)}(?![a-z ]*(?:left|right|center)\b)", text):
-            return end
-    return None
+    found = []
+    for end in (end for runway in airport.runways for end in (runway.end1, runway.end2)):
+        match = re.search(rf"\b{lead} {say.runway(end)}\b(?! (?:left|right|center)\b)", text)
+        if match:
+            found.append((match.start(), -len(say.runway(end)), end))
+    return min(found)[2] if found else None  # the first one named
 
 
 def _weathers(origin: str, destination: str) -> tuple[Weather, Weather | None]:
@@ -729,7 +730,7 @@ class GateToGate:
             wanted = "Request push and start"
         elif self.stage == "taxi request":
             wanted = "Request taxi"
-        elif self.stage in ("taxi out", "taxi in") and self.holding_short:
+        elif self.stage in ("taxi out", "taxi in") and self.holding_short and self.holding_short not in self.crossing_cleared:
             if self.holding_short not in self.hold_short_said:
                 # A runway on the route that the controller never named: a pilot does not cross it unasked.
                 self.problem("taxi route crosses a runway not given as a crossing", self.holding_short, stop=True)
@@ -810,6 +811,7 @@ class GateToGate:
                     self.problem("taxi route does not reach its goal", f"ends {gap * 1852:.0f} m from stand {stand.name}")
             self.set_stage("taxi in")
         self.lateral, self.holding_short = ("path", points), None
+        self.hold_short_said, self.crossing_cleared = set(self.hold_short_said), set()  # this airport's, from now on
 
     def _check_reaches_runway(self, airport, end: tuple[float, float]) -> None:
         runway = self.departure_runway
