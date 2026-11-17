@@ -55,8 +55,10 @@ STREAM_STEP_S = 0.1
 class Player:
     """One voice at a time on the speakers; a new transmission cuts off the previous one."""
 
-    def __init__(self, device: int | None = None):
+    def __init__(self, device: int | None = None, alongside: bool = False):
         self.device = device
+        # A second radio plays alongside the first: its sound has its own stream and stops nobody else's.
+        self.alongside = alongside
         self._lock = threading.Lock()
         self._generation = 0
         self._ends_at = 0.0
@@ -77,7 +79,8 @@ class Player:
         with self._lock:
             self._generation += 1
             ticket = self._generation
-            sd.stop()
+            if not self.alongside:
+                sd.stop()
             self._ends_at = float("inf")  # not known until the last piece has come
         threading.Thread(target=self._feed, args=(ticket, pieces, sample_rate), name="speech", daemon=True).start()
         return ticket
@@ -115,7 +118,8 @@ class Player:
         with self._lock:
             self._generation += 1
             self._ends_at = 0.0
-            sd.stop()
+            if not self.alongside:
+                sd.stop()
 
     def wait(self, ticket: int, should_stop=lambda: False) -> bool:
         """Block until this transmission ends. False if it was cut off or `should_stop` fired."""

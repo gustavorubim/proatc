@@ -157,6 +157,12 @@ export function SettingsDialog({
               <option value="always">Always</option>
             </select>
           </Row>
+          <Row
+            label="Listen to the second radio"
+            hint="An ATIS on the COM you are not transmitting on is heard too, when the aircraft's audio panel has it on"
+          >
+            <Toggle on={values.atc.second_radio} onChange={(on) => change('atc', 'second_radio', on)} />
+          </Row>
           <Row label="Other traffic" hint="Traffic calls and runway sequencing against X-Plane's AI aircraft">
             <Toggle on={values.atc.traffic} onChange={(on) => change('atc', 'traffic', on)} />
           </Row>

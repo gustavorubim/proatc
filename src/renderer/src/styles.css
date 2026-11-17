@@ -258,7 +258,7 @@ input {
 
 .freqs li {
   display: grid;
-  grid-template-columns: 70px 1fr;
+  grid-template-columns: 70px 1fr auto;
   gap: 8px;
   align-items: baseline;
   padding: 5px 6px;
@@ -1141,5 +1141,69 @@ input[type='range'] {
   .map {
     flex: 0 0 300px;
     margin: 8px 12px 0;
+  }
+}
+
+/* ---- the second radio ---- */
+
+.second {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.second .tag {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.second .name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.second.listening {
+  color: var(--text);
+}
+
+.second.listening .tag {
+  color: #242832;
+  background: var(--tan);
+  border-color: var(--tan);
+}
+
+.freqs button.other {
+  visibility: hidden;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+.freqs li:hover button.other {
+  visibility: visible;
+}
+
+.freqs button.other:hover {
+  color: var(--text);
+  border-color: var(--tan);
+}
+
+@media (hover: none) {
+  .freqs button.other {
+    visibility: visible;
   }
 }

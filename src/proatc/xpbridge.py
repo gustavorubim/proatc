@@ -38,6 +38,11 @@ DATAREFS = {
     "paused": "sim/time/paused",
     "heading_true": "sim/flightmodel/position/true_psi",
     "com_selection": "sim/cockpit2/radios/actuators/audio_com_selection",  # 6 = COM1, 7 = COM2
+    # The audio panel: which radios are being listened to, and how loud.
+    "com1_listen": "sim/cockpit2/radios/actuators/audio_selection_com1",
+    "com2_listen": "sim/cockpit2/radios/actuators/audio_selection_com2",
+    "com1_volume": "sim/cockpit2/radios/actuators/audio_volume_com1",
+    "com2_volume": "sim/cockpit2/radios/actuators/audio_volume_com2",
     "zulu_seconds": "sim/time/zulu_time_sec",
     # Weather at the aircraft (names from the sim's DataRefs.txt).
     "wx_qnh_pas": "sim/weather/aircraft/qnh_pas",
@@ -68,6 +73,24 @@ def tuned_khz(state: dict) -> int | None:
     key = "com2_khz" if state.get("com_selection") == 7 else "com1_khz"
     value = state.get(key)
     return int(value) if value else None
+
+
+def transmit_radio(state: dict) -> int:
+    """The COM radio selected for transmitting: 1 or 2."""
+    return 2 if state.get("com_selection") == 7 else 1
+
+
+def other_radio(state: dict) -> dict:
+    """The COM radio that is not transmitted on: its number, its frequency, and whether it is being listened to.
+
+    It is listened to when the aircraft's audio panel has its reception on and its volume up. An aircraft
+    that does not report its audio panel is taken as not listening."""
+    number = 3 - transmit_radio(state)
+    khz = state.get(f"com{number}_khz")
+    volume = state.get(f"com{number}_volume")
+    listening = bool(khz) and bool(state.get(f"com{number}_listen")) and (volume is None or volume > 0.05)
+    return {"radio": number, "khz": int(khz) if khz else None, "listening": listening,
+            "volume": 1.0 if volume is None else max(0.0, min(1.0, float(volume)))}  # fmt: skip
 
 
 def magnetic_variation(state: dict) -> float:
