@@ -12,6 +12,8 @@ Functions over the Engine, like ifr.py and vfr.py; every one runs under the engi
 
 from __future__ import annotations
 
+import math
+
 from . import ifr
 from . import phraseology as say
 from .atis import runways_in_use, split_runways, uses_faa_style
@@ -42,6 +44,10 @@ BELONGS = {
     "request_flight_following": "radar",
 }  # fmt: skip
 RUNWAY_TAILWIND_KT = 5  # a runway asked for is given with no more tailwind than this
+NEAR_NM = 30  # the sim's weather at the aircraft stands for an airport's this close
+SHORT_RUNWAY_M = 1200  # shorter than this and well short of the airport's longest: not for an airliner
+HANDOFF_AGAIN_S = 60  # after "unable" to a hand-off, how long before it is given again
+CANCEL_BELOW_MS = 15  # a takeoff is not cancelled by a plain "unable" faster than this (the tower's own threshold)
 RUNWAY_CROSSWIND_KT = 25
 
 
@@ -72,6 +78,8 @@ def weather_at(engine, airport, raw: dict):
         reported = engine.metars.weather(airport.ident, airport.elev_ft)
         if reported:
             return reported
+    if raw.get("wx_source") == 1 and "lat" in raw and distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon) > NEAR_NM:
+        return None  # real weather with no report for that airport: what is around the aircraft is not its weather
     return from_snapshot(raw, airport.elev_ft)
 
 
@@ -124,6 +132,11 @@ def _altitude(engine, intent, station, issue, raw, variation) -> str:
     word = "altitude" if faa else "level"
     if flight.cleared_ft is None or (not _airborne(raw) and flight.has_been_airborne):
         return f"no {word} assigned"
+    arrival = flight.arrival
+    if _airborne(raw) and arrival and arrival.stage in ("intercept", "procedure", "tower") and not flight.diverting:
+        return f"cleared {arrival.words()}"  # the approach's own levels apply now
+    if _airborne(raw) and flight.rules != "IFR" and not flight.plan:
+        return f"no {word} assigned, maintain V F R"
     level = ifr._level(engine, flight.cleared_ft, _level_ident(engine, station), faa)
     feet = ifr._feet(raw)
     if not _airborne(raw):
@@ -142,18 +155,34 @@ def _altitude(engine, intent, station, issue, raw, variation) -> str:
 
 
 def _heading(engine, intent, station, issue, raw, variation) -> str:
-    arrival = engine.flight.arrival
+    flight = engine.flight
+    arrival = flight.arrival
     if not _airborne(raw):
         return "no heading assigned"
-    if arrival and arrival.heading is not None and arrival.stage in ("downwind", "base", "intercept"):
-        return f"fly heading {say.heading(arrival.heading)}"
+    if arrival and arrival.stage in ("procedure", "tower") and not flight.diverting:
+        return f"no heading assigned, cleared {arrival.words()}"
+    if flight.heading_assigned is not None:
+        return f"fly heading {say.heading(flight.heading_assigned)}"
+    if arrival and arrival.go_arounds and arrival.stage is None and not flight.diverting:
+        published = bool(arrival.missed_ft) and arrival.approach != "visual"
+        return "fly the published missed approach" if published else "fly runway heading"
+    if flight.direct_to:
+        word = ifr._fix_word(engine, flight.direct_to, raw.get("lat", 0.0), raw.get("lon", 0.0))
+        return f"no heading assigned, {'proceed' if faa_for(station) else 'route'} direct {word}"
     return "no heading assigned, own navigation"
 
 
 def _speed(engine, intent, station, issue, raw, variation) -> str:
-    arrival = engine.flight.arrival
-    if arrival and arrival.speed_kt and _airborne(raw):
+    flight = engine.flight
+    arrival = flight.arrival
+    if arrival and arrival.speed_kt and _airborne(raw) and not flight.diverting:
         knots = say.digits(arrival.speed_kt)
+        if arrival.stage in ("intercept", "procedure", "tower") and "lat" in raw:
+            if distance_nm(raw["lat"], raw["lon"], *arrival.threshold) <= 4.2:
+                return "no speed restrictions"  # the last one held only to four miles
+            return (
+                f"maintain {knots} knots until four mile final" if faa_for(station) else f"speed {knots} knots until four miles"
+            )
         return f"maintain {knots} knots" if faa_for(station) else f"speed {knots} knots"
     return "no speed restrictions"
 
@@ -177,6 +206,9 @@ def _runway(engine, intent, station, issue, raw, variation) -> str:
     if airport is None:
         return "no runway assigned, say destination"
     own = _own_runway(engine, airport)
+    weather = issue.weather if issue and station.airport else weather_at(engine, airport, raw)
+    if own and weather is not None and acceptable_runway(airport, own, weather):
+        own = None  # given earlier, and the wind has changed since: the runway in use is the answer
     landing = _airborne(raw) or engine.flight.has_been_airborne
     if own:
         return f"{'landing' if landing else 'departure'} runway {say.runway(own)}"
@@ -230,6 +262,12 @@ def _route(engine, intent, station, issue, raw, variation) -> str:
             fix = ifr._fix_word(engine, flight.direct_to, raw.get("lat", 0.0), raw.get("lon", 0.0))
             return f"{'proceed' if faa else 'route'} direct {fix}"
         return _clearance(engine, intent, station, issue, raw, variation) + (" as filed" if flight.rules == "IFR" else "")
+    if (
+        not flight.taxi_goal
+        and flight.phase.value == "taxiing in"
+        and flight.taxi_airport == getattr(station.airport, "ident", None)
+    ):
+        return f"taxi to {'the gate' if faa else 'parking'}"  # no stand known: the clearance was to parking
     if not flight.taxi_goal or not station.airport or "lat" not in raw:
         return "no taxi clearance issued"
     route = engine._route_from(station.airport, raw)
@@ -249,7 +287,8 @@ def expected_approach(engine, airport, issue, raw: dict) -> str | None:
     if not active:
         return None
     landing = split_runways(active)[0]
-    runway = engine.requested_runway(airport) or landing[0]
+    weather = issue.weather if issue else weather_at(engine, airport, raw)
+    runway = engine.requested_runway(airport, weather=weather) or landing[0]
     procedures = engine.procedures(airport.ident)
     found = (flight.requested_approach and choose_approach(procedures, runway, flight.requested_approach)) or choose_approach(
         procedures, runway
@@ -258,13 +297,20 @@ def expected_approach(engine, airport, issue, raw: dict) -> str | None:
 
 
 def _approach(engine, intent, station, issue, raw, variation) -> str:
-    arrival = engine.flight.arrival
-    airport = station.airport if station.kind in ("approach", "tower") else destination(engine)
+    flight = engine.flight
+    arrival = flight.arrival
+    if not _airborne(raw) and flight.has_been_airborne:
+        return "no approach assigned"  # landed: the approach is over
+    airport = destination(engine)
     if airport is None:
         return "no approach assigned, say destination"
     if arrival and arrival.airport == airport.ident and arrival.stage in ("intercept", "procedure", "tower"):
         return f"cleared {arrival.words()}"
     here = station.airport is not None and station.airport.ident == airport.ident
+    if flight.diverting and not here:
+        # On the way to another airport: its own approach controller gives the approach there.
+        who = _who(engine, "approach", airport) or _who(engine, "tower", airport)
+        return f"{who} will advise the approach" if who else "no approach assigned"
     expected = expected_approach(engine, airport, issue if here else None, raw)
     if expected:
         return f"expect {expected}" if here else f"{airport.spoken_name}, expect {expected}"
@@ -317,15 +363,22 @@ def _wind(engine, intent, station, issue, raw, variation) -> str:
 # ---- requests every controller answers ----------------------------------------------
 
 
-def acceptable_runway(airport, runway: str, weather) -> str | None:
-    """Why this runway cannot be given ('tailwind eight knots'), or None when it can."""
+def acceptable_runway(airport, runway: str, weather, raw: dict | None = None) -> str | None:
+    """Why this runway cannot be given ('tailwind eight knots'), or None when it can. Without the weather it
+    cannot be given: nobody knows the wind."""
+    from .taxi import aircraft_category
+
     ends = {end: heading for rw in airport.runways for end, heading in rw.ends()}
     if runway not in ends:
         return "no such runway"
-    if weather is None or weather.wind_kt < 1:
+    length = next(rw.length_m for rw in airport.runways if runway in (rw.end1, rw.end2))
+    longest = max(rw.length_m for rw in airport.runways)
+    if raw is not None and length < min(SHORT_RUNWAY_M, 0.6 * longest) and aircraft_category(raw.get("aircraft_type")) != "props":
+        return "runway too short"
+    if weather is None:
+        return "wind not known"
+    if weather.wind_kt < 1:
         return None
-    import math
-
     angle = math.radians(weather.wind_dir_true - ends[runway])
     tail, cross = -weather.wind_kt * math.cos(angle), abs(weather.wind_kt * math.sin(angle))
     if tail > RUNWAY_TAILWIND_KT:
@@ -340,30 +393,72 @@ def unable(engine, station, raw, callsign, hello, faa: bool):
     from .engine import Phase
 
     flight = engine.flight
-    pending, flight.pending = flight.pending, None
-    expect = pending.expect if pending else {}
-    if not _airborne(raw) and flight.phase == Phase.TAKEOFF_CLEARED and station.kind == "tower":
+    pending = flight.pending if flight.pending and flight.pending_key == station.key else None
+    if pending is None:
+        # Read back a moment ago: still the instruction this station gave last, if it said nothing since.
+        text, expect, given = flight.last_instruction.get(station.key, ("", {}, 0))
+        # Stale once another station has given an instruction since (handed on, cleared by someone else).
+        since = any(entry[2] > given for key, entry in flight.last_instruction.items() if key != station.key)
+        if not text or flight.last_said.get(station.key) != text or since:
+            text, expect = "", {}
+    else:
+        text, expect = pending.text, pending.expect
+        flight.pending = None
+    tower = station.kind == "tower" and station.airport is not None
+    rolling = raw.get("groundspeed_ms", 0.0) >= CANCEL_BELOW_MS
+    if not _airborne(raw) and flight.phase == Phase.TAKEOFF_CLEARED and tower:
+        if rolling:
+            return _reply(engine, f"{callsign}, {hello}roger")  # on the takeoff roll: the pilot's call to stop
         flight.phase, flight.waiting_takeoff = Phase.TAXI_OUT, False
         cancel = "cancel takeoff clearance, " if faa else "cancel takeoff, "
         return _reply(engine, f"{callsign}, {hello}roger, hold position, {cancel}report ready for departure")
     if "altitude" in expect and _airborne(raw):
-        feet = int(round(ifr._feet(raw) / 100) * 100)
-        flight.cleared_ft = feet
-        level = ifr._level(engine, feet, _level_ident(engine, station), faa)
-        return _reply(engine, f"{callsign}, {hello}roger, maintain {level}, advise when able", {"altitude": feet})
-    if "heading" in expect and flight.arrival:
-        flight.arrival.heading = None  # no longer watched
+        feet = ifr._feet(raw)
+        # The nearest whole thousand feet the aircraft is moving towards: a level it can hold.
+        rising = expect["altitude"] > feet
+        level_ft = int((math.ceil if rising else math.floor)(feet / 1000) * 1000)
+        flight.cleared_ft = level_ft
+        level = ifr._level(engine, level_ft, _level_ident(engine, station), faa)
+        return _reply(engine, f"{callsign}, {hello}roger, maintain {level}, advise when able", {"altitude": level_ft})
+    if "heading" in expect and _airborne(raw):
+        flight.heading_assigned = None
+        if flight.arrival:
+            flight.arrival.heading = None  # no longer watched
         return _reply(engine, f"{callsign}, {hello}roger, continue present heading, advise when able to turn")
+    if expect.keys() & {"hold_short", "crossing"} and "cross runway" in text and flight.crossing_given:
+        if flight.crossing_given not in flight.crossings:
+            flight.crossings.insert(0, flight.crossing_given)  # not crossed after all: still to be cleared
+        # Not cleared again by itself while the aircraft waits there: the pilot asks when able.
+        flight.crossing_refused, flight.crossing_given = flight.crossing_given, None
     taxiing = not _airborne(raw) and flight.phase in (Phase.TAXI_OUT, Phase.TAXI_IN)
     if station.kind in ("ground", "tower") and (expect.keys() & {"hold_short", "crossing"} or taxiing):
         return _reply(engine, f"{callsign}, {hello}roger, hold position")
-    if "frequency" in expect:
-        flight.next_frequency = None
-        return _reply(engine, f"{callsign}, {hello}roger, remain this frequency")
-    if flight.phase == Phase.LANDING_CLEARED and _airborne(raw):
+    if "frequency" in expect and flight.next_frequency == expect["frequency"]:
+        return _unable_handoff(engine, station, callsign, hello)  # a hand-off not made yet
+    landing_here = tower and flight.runway and flight.runway in {e for rw in station.airport.runways for e, _ in rw.ends()}
+    if flight.phase == Phase.LANDING_CLEARED and _airborne(raw) and landing_here and "runway" in expect:
         flight.phase, flight.awaiting_landing = Phase.AIRBORNE, False
         return _reply(engine, f"{callsign}, {hello}roger, landing clearance cancelled, say intentions")
+    if not expect or "frequency" in expect:
+        return _reply(engine, f"{callsign}, {hello}say again")  # nothing outstanding from this controller
     return _reply(engine, f"{callsign}, {hello}roger, advise when able")
+
+
+def _unable_handoff(engine, station, callsign, hello):
+    """The pilot cannot take the hand-off: stay here, and the controller gives it again a little later."""
+    flight = engine.flight
+    flight.next_frequency = None
+    arrival = flight.arrival
+    if arrival and arrival.stage == "tower" and station.kind == "approach":
+        arrival.stage = "procedure" if arrival.via else "intercept"  # approach keeps the flight until it can go
+    if station.kind in ifr.RADAR_KINDS:
+        flight.told_sector, flight.sector_ahead = None, None
+        if not arrival:
+            flight.told_approach = False
+        flight.handoffs_held_until = engine.now() + HANDOFF_AGAIN_S
+    elif station.kind == "tower":
+        flight.told_departure = False
+    return _reply(engine, f"{callsign}, {hello}roger, remain this frequency")
 
 
 def delay(engine, station, raw, callsign, hello, faa: bool):
@@ -373,14 +468,36 @@ def delay(engine, station, raw, callsign, hello, faa: bool):
     flight = engine.flight
     if flight.phase == Phase.TAKEOFF_CLEARED and station.kind == "tower":
         return unable(engine, station, raw, callsign, hello, faa)
+    if flight.phase == Phase.TAKEOFF_CLEARED:
+        return _reply(engine, f"{callsign}, {hello}roger")  # the tower's clearance: not this controller's to cancel
     flight.waiting_takeoff = False
     return _reply(engine, f"{callsign}, {hello}roger, {'advise' if faa else 'report'} ready")
 
 
 def leave_frequency(engine, station, raw, callsign, hello, faa: bool):
-    """'Request frequency change': a visual flight is released; an instrument flight may step away and come back."""
+    """'Request frequency change': a visual flight is released; an instrument flight may step away and come back.
+    Not while this controller is working the flight: cleared for takeoff or to land, being vectored, an instruction
+    still to be read back."""
+    from .engine import Phase
+
     flight = engine.flight
+    arrival = flight.arrival
+    busy = (
+        flight.phase in (Phase.TAKEOFF_CLEARED, Phase.LANDING_CLEARED)
+        or flight.waiting_takeoff
+        or flight.awaiting_landing
+        or (flight.pending is not None and flight.pending_key == station.key)
+        or (flight.phase == Phase.TAXI_OUT and station.kind == "tower" and not _airborne(raw))
+        or (station.kind == "tower" and _airborne(raw) and flight.rules == "IFR")
+        or (
+            station.kind == "approach" and arrival is not None and station.airport is not None
+            and arrival.airport == station.airport.ident and arrival.stage in ("downwind", "base", "intercept", "procedure")
+        )
+    )  # fmt: skip
+    if busy:
+        return _reply(engine, f"{callsign}, {hello}unable, remain this frequency")
     if flight.rules == "IFR" or (flight.rules is None and flight.plan and flight.plan.destination):
+        flight.away_from = station.key  # quiet until the pilot calls back
         return _reply(engine, f"{callsign}, {hello}approved, report back on frequency")
     if flight.following:
         flight.following = False
@@ -433,8 +550,12 @@ def _owner(engine, intent, station, raw, gives_clearance: bool):
 
 def way_out(engine, intent, station, raw, callsign, hello):
     """No rule covers this call. The controller says who can help, or 'unable' and what it can do: never nothing."""
+    from .vfr import service
+
     if intent.intent in ("other", "traffic_call"):
         return None  # unforeseen speech, or a broadcast on the wrong frequency: the free-form reply handles it
+    if station.airport and service(station) == "afis":
+        return _reply(engine, f"{callsign}, {hello}roger")  # information only: it neither grants nor refuses
     words = WORDS.get(intent.intent, "")
     kinds = {freq.kind for freq in station.airport.freqs} if station.airport else set()
     owner = _owner(engine, intent, station, raw, bool(station.airport) and engine._gives_clearance(station, kinds, raw))
@@ -447,6 +568,15 @@ def way_out(engine, intent, station, raw, callsign, hello):
 
 
 # ---- runways and approaches asked for ------------------------------------------------
+
+
+def afis_runway(engine, intent, station, issue, raw, variation, callsign, hello):
+    """Asked of an information service: it gives no runway, only what it knows. The choice is the pilot's."""
+    active = engine.active_runways(station.airport, issue)
+    parts = [f"runway {say.runway(active[0])} in use"] if active else []
+    wind = engine._wind(issue, variation, False)
+    parts += [wind] if wind else []
+    return _reply(engine, f"{callsign}, {hello}{', '.join(parts) or 'roger'}, runway at your discretion")
 
 
 def runway_request(engine, intent, station, issue, raw, callsign, hello, faa: bool):
@@ -462,8 +592,13 @@ def runway_request(engine, intent, station, issue, raw, callsign, hello, faa: bo
         return _reply(engine, f"{callsign}, {hello}say the runway you request")
     here = station.airport is not None
     weather = issue.weather if issue and here else weather_at(engine, airport, raw)
-    why = acceptable_runway(airport, wanted, weather)
+    why = acceptable_runway(airport, wanted, weather, raw)
     spoken = say.runway(wanted)
+    if why == "wind not known":
+        who = None if here else _who(engine, "approach", airport) or _who(engine, "tower", airport)
+        return _reply(
+            engine, f"{callsign}, {hello}unable runway {spoken}, wind not known" + (f", {who} will advise" if who else "")
+        )
     if why:
         active = runways_at(engine, airport, issue if here else None, raw)
         in_use = f", runway {say.runway(active[0])} in use" if active else ""
@@ -473,7 +608,7 @@ def runway_request(engine, intent, station, issue, raw, callsign, hello, faa: bo
         late = arrival.hold or arrival.stage in ("base", "intercept", "procedure", "tower")
         if late or flight.phase == Phase.LANDING_CLEARED:
             return _reply(engine, f"{callsign}, {hello}unable runway {spoken}, continue {arrival.words()}")
-        flight.requested_runway = (airport.ident, wanted)
+        flight.requested_runway = (airport.ident, wanted, "arrival")
         if station.kind == "approach" and here:
             new = ifr.replan(engine, station, issue, raw)
             if new:
@@ -482,7 +617,7 @@ def runway_request(engine, intent, station, issue, raw, callsign, hello, faa: bo
     if flight.phase in (Phase.LANDING_CLEARED, Phase.TAKEOFF_CLEARED) and flight.runway:
         cleared = "cleared to land" if airborne else "cleared for takeoff"
         return _reply(engine, f"{callsign}, {hello}unable runway {spoken}, you are {cleared} runway {say.runway(flight.runway)}")
-    flight.requested_runway = (airport.ident, wanted)
+    flight.requested_runway = (airport.ident, wanted, "arrival" if airborne or flight.has_been_airborne else "departure")
     if airborne:
         if station.kind == "tower" and here and (intent.flight_rules or flight.rules) != "IFR":
             from . import vfr
@@ -495,6 +630,8 @@ def runway_request(engine, intent, station, issue, raw, callsign, hello, faa: bo
             flight.runway = wanted
         return _reply(engine, f"{callsign}, {hello}roger, expect runway {spoken}")
     flight.runway = wanted
+    # Held at the other runway for traffic: that wait is over, the flight now taxis to the new one.
+    flight.waiting_takeoff = False
     if flight.taxi_goal and flight.phase == Phase.TAXI_OUT and station.kind in ("ground", "tower"):
         return engine._taxi_out(station, issue, raw, callsign, hello, faa, "")  # a new route to the new runway
     return _reply(engine, f"{callsign}, {hello}roger, expect runway {spoken}")
@@ -511,7 +648,7 @@ def approach_preference(engine, intent, station, raw, callsign, hello):
     if not active:
         engine.flight.requested_approach = family
         return _reply(engine, f"{callsign}, {hello}roger, {words} approach requested, approach will advise")
-    runway = engine.requested_runway(airport) or split_runways(active)[0][0]
+    runway = engine.requested_runway(airport, weather=weather_at(engine, airport, raw)) or split_runways(active)[0][0]
     if not choose_approach(engine.procedures(airport.ident), runway, family):
         current = expected_approach(engine, airport, None, raw)
         return _reply(engine, f"{callsign}, {hello}unable, no {words} approach runway {say.runway(runway)}, expect {current}")

@@ -326,7 +326,8 @@ def test_a_frequency_change_is_approved_and_an_instrument_flight_comes_back(worl
 
 def test_higher_and_lower_are_answered_with_departure_approach_and_the_centre(world):
     engine, departure, raw = climbing_with_departure(world)
-    assert said(engine, Intent("request_descent"), departure, raw) == f"{CALLSIGN}, descend flight level one three zero"
+    # Still climbing (at three thousand feet): "lower" is a lower level to climb to, not a descent.
+    assert said(engine, Intent("request_descent"), departure, raw) == f"{CALLSIGN}, climb flight level one three zero"
     engine, approach, raw = vectored(world)
     assert said(engine, Intent("request_climb"), approach, raw).startswith(f"{CALLSIGN}, unable higher, maintain")
     lower = said(engine, Intent("request_descent", altitude=1000), approach, raw)
