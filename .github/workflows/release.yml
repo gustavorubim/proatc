@@ -87,14 +87,20 @@ jobs:
           - name: Windows x64
             os: windows-latest
             artifact: installer-windows-x64
+            installer: dist/ProATC-*-windows-x64-setup.exe
+            permanent: ProATC-windows-x64-setup.exe
             files: dist/*.exe dist/*.exe.blockmap dist/latest.yml
           - name: macOS arm64
             os: macos-latest
             artifact: installer-mac-arm64
+            installer: dist/ProATC-*-mac-arm64.dmg
+            permanent: ProATC-mac-arm64.dmg
             files: dist/*.dmg dist/*.zip dist/latest-mac.yml
           - name: Linux x64
             os: ubuntu-24.04
             artifact: installer-linux-x64
+            installer: dist/ProATC-*-linux-x86_64.AppImage
+            permanent: ProATC-linux-x86_64.AppImage
             files: dist/*.AppImage dist/latest-linux.yml
     permissions:
       contents: write
@@ -128,6 +134,12 @@ jobs:
           else
             npm run smoke
           fi
+
+      # A copy of the installer under a name without the version, so that a link to
+      # releases/latest/download/<name> (as in the README) always gives the newest one.
+      - name: Add the installer under its permanent name
+        shell: bash
+        run: cp ${{ matrix.installer }} dist/${{ matrix.permanent }}
 
       - name: List what will be published
         shell: bash
