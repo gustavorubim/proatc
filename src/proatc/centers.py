@@ -223,6 +223,11 @@ class CenterIndex:
         return CenterStation(best, khz) if best else None
 
     @staticmethod
+    def forget() -> None:
+        """A new flight: no centre is held on any frequency."""
+        _HELD.clear()
+
+    @staticmethod
     def expect(khz: int, center: Center) -> None:
         """A flight has been sent to this centre on this frequency: it answers from just outside its boundary too."""
         _HELD[khz] = center.name

@@ -13,14 +13,14 @@ import random
 import re
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 
 from . import chart, ifr, traffic, vfr
 from . import phraseology as say
 from .atis import Issue, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
-from .navdata import Airport, AirportDB, Station, bearing, distance_nm, expect_station, prefer_airports
+from .navdata import Airport, AirportDB, Station, bearing, distance_nm, expect_station, forget_stations, prefer_airports
 from .taxi import (
     TaxiNetwork,
     aircraft_category,
@@ -153,6 +153,11 @@ class Flight:
     route_points: list | None = None  # the filed route, waypoint by waypoint; None until worked out
 
 
+def _end(ident: str) -> str:
+    """A runway end as the scenery may write it: '07L' and '7L' are the same end."""
+    return ident.strip().upper().lstrip("0") or "0"
+
+
 def _squawk(rng: random.Random) -> str:
     while True:
         code = "".join(str(rng.randint(0, 7)) for _ in range(4))
@@ -238,6 +243,9 @@ class Engine:
             plan = self.flight.plan
             self.flight = Flight(plan=plan)
             self._traffic_seen.clear()
+            forget_stations()  # who the last flight was sent to on a shared frequency does not carry over
+            if self.centers:
+                self.centers.forget()
             self._rng = random.Random(self.seed)  # a new flight begins the same sequence again
 
     @staticmethod
@@ -286,22 +294,14 @@ class Engine:
     def _departure_runway(self, airport: Airport, issue: Issue | None, raw: dict) -> str | None:
         """The departure runway whose threshold is nearest the aircraft."""
         active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
-        # A runway the airport's taxiways do not reach (a grass strip beside the main runway, a closed one) is
-        # not given for departure while one that they reach is in use.
+        # A runway the scenery's taxi network has as a runway, with no taxiway joining it (a grass strip beside the
+        # main runway, a closed one), is not given for departure while another runway in use remains. A runway the
+        # network does not mention at all is not known to be out of reach: many sceneries leave runways untagged.
         network = self.network(airport)
-        if network.usable and issue:
+        if network.usable:
             taxi = network.taxi_nodes()
-            entered = [name for name, nodes in network.runway_nodes.items() if nodes & taxi]  # a taxiway joins it
-
-            def reached(ident: str) -> bool:
-                return any(ident in name.split("/") for name in entered)
-
-            taxied_to = [ident for ident in active if reached(ident)]
-            if not taxied_to:
-                # None of the runways in use: the best of those the taxiways do reach.
-                served = replace(airport, runways=[r for r in airport.runways if reached(r.end1) or reached(r.end2)])
-                taxied_to = runways_in_use(served, issue.weather.wind_dir_true, issue.weather.wind_kt)
-            active = taxied_to or active
+            tagged = {_end(end): bool(nodes & taxi) for name, nodes in network.runway_nodes.items() for end in name.split("/")}
+            active = [ident for ident in active if tagged.get(_end(ident), True)] or active
         active = split_runways(active)[1]
         if not active:
             return None
@@ -919,9 +919,13 @@ class Engine:
         if not active:
             return None
         arrival = self.flight.arrival
-        if arrival is not None and arrival.airport == airport.ident:
+        if (
+            arrival is not None
+            and arrival.airport == airport.ident
+            and ifr._tailwind_kt(airport, arrival.runway, issue) <= ifr.MAX_TAILWIND_KT
+        ):
             # The runway approach brought the flight to, even one not in use: straight in to the other end with
-            # little tailwind, where the runway in use has no approach.
+            # little tailwind, where the runway in use has no approach. Not once the wind has turned against it.
             return arrival.runway
         if self.flight.runway in active:
             return self.flight.runway
@@ -958,6 +962,8 @@ class Engine:
             if flight.phase != Phase.LANDING_CLEARED and flight.phase != Phase.AIRBORNE:
                 # New airborne segment: the departure runway no longer applies.
                 flight.phase, flight.runway, flight.pending = Phase.AIRBORNE, None, None
+                if flight.has_been_airborne:
+                    flight.arrival = None  # off again after landing: the last arrival is over
                 flight.crossings, flight.taxi_goal, flight.taxi_route = [], None, None
                 flight.told_leaving = False
                 flight.told_vacate = False
