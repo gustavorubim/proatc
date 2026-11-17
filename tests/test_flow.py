@@ -290,7 +290,7 @@ def test_wind_check_destination_weather_and_deviations(tmp_path):
     engine.handle(Intent("check_in"), west, None, cruising)
     assert engine.handle(Intent("request_weather"), west, None, cruising).text == (
         f"{CALLSIGN}, Eastfield weather, wind two five zero degrees two zero gusting three two knots, "
-        "visibility four thousand eight hundred metres, cloud broken one thousand two hundred feet, Q N H niner niner five"
+        "visibility four thousand eight hundred metres, cloud broken one thousand two hundred feet, Q N H niner niner five hectopascals"
     )
     assert engine.handle(Intent("request_weather"), west, None, {**cruising, "wx_source": 0}) is None  # no report to give
 

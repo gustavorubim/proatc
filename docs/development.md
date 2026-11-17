@@ -34,6 +34,10 @@ Updates: the installed app checks GitHub releases when it starts and every six h
 
 Brand assets: `uvx --with pillow python scripts/make-icons.py` redraws the app icon (`build/`) and the in-app logo.
 
+## Verifying a change
+
+See [testing.md](testing.md): unit tests, golden flights, fuzz and stress tests, the real-data sweep, log replay and the benchmarks.
+
 ## Setup
 
 ```bash

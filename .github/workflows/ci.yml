@@ -86,10 +86,11 @@ jobs:
       - name: Tests
         shell: bash
         run: |
+          # Coverage is measured everywhere and enforced: new engine code comes with tests.
           if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run -a uv run --no-sync pytest -q
+            xvfb-run -a uv run --no-sync pytest -q --cov=proatc --cov-report=term --cov-fail-under=76
           else
-            uv run --no-sync pytest -q
+            uv run --no-sync pytest -q --cov=proatc --cov-report=term --cov-fail-under=76
           fi
 
   # Builds the app the way a release does, starts it, and has it check itself: the uv it

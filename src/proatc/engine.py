@@ -144,6 +144,7 @@ class Flight:
     off_route_since: float | None = None
     off_route_called: set[str] = field(default_factory=set)
     qnh_told: bool = False  # the destination's pressure was given with a descent to an altitude
+    route_points: list | None = None  # the filed route, waypoint by waypoint; None until worked out
 
 
 def _squawk(rng: random.Random) -> str:
@@ -156,9 +157,10 @@ def _squawk(rng: random.Random) -> str:
 class Engine:
     def __init__(
         self, db: AirportDB, seed: int | None = None, procedures=None, centers=None, navaids=None, clock=None,
-        navfix=None, metars=None, holding: str = "never", traffic: bool = True, airspace=None,
+        navfix=None, metars=None, holding: str = "never", traffic: bool = True, airspace=None, airways=None,
     ):  # fmt: skip
         self.db = db
+        self.airways = airways  # airways.Airways: the waypoints along each airway
         self.airspace = airspace  # airspace.AirspaceIndex: control zones, class B/C/D, restricted areas
         self._zones: dict = {}  # airport -> its control zone
         self._patterns: dict = {}  # airport -> {runway: "left" | "right"}
@@ -176,7 +178,10 @@ class Engine:
         self.last_raw: dict = {}  # the latest sim snapshot the engine was shown
         self.lock = threading.RLock()
         self._networks: dict[str, TaxiNetwork] = {}
-        self._rng = random.Random(seed)
+        # The seed is kept, and saved with the flight log, so that a log can be replayed with the same
+        # squawk codes, stands and delays.
+        self.seed = seed if seed is not None else random.SystemRandom().randrange(2**31)
+        self._rng = random.Random(self.seed)
 
     # ---- helpers ------------------------------------------------------------
 
@@ -199,6 +204,18 @@ class Engine:
             if parked and (flight.has_been_airborne or flight.squawk or flight.contacted):
                 self.reset()
             self.flight.plan = plan
+            self.flight.route_points = None
+
+    def route(self) -> list[tuple[str, float, float]]:
+        """The filed route as every waypoint it passes, with positions. Worked out once per plan."""
+        from .airways import expand
+
+        flight, plan = self.flight, self.flight.plan
+        if flight.route_points is None:
+            origin = self.db.airport(plan.origin) if plan and plan.origin else None
+            start = (origin.lat, origin.lon) if origin else (self.last_raw.get("lat", 0.0), self.last_raw.get("lon", 0.0))
+            flight.route_points = expand(plan.route, self.airways, self.navfix, start) if plan else []
+        return flight.route_points
 
     def reset(self) -> None:
         """Start a new flight: every clearance, contact and counter is forgotten. The plan is kept."""
@@ -206,6 +223,7 @@ class Engine:
             plan = self.flight.plan
             self.flight = Flight(plan=plan)
             self._traffic_seen.clear()
+            self._rng = random.Random(self.seed)  # a new flight begins the same sequence again
 
     @staticmethod
     def active_runways(airport: Airport, issue: Issue | None) -> list[str]:
@@ -248,7 +266,7 @@ class Engine:
         if faa:
             inches = round(issue.weather.qnh_hpa * 0.02953, 2)
             return f"altimeter {say.digits(f'{round(inches * 100):04d}')}", inches
-        return f"Q N H {say.digits(int(issue.weather.qnh_hpa))}", float(int(issue.weather.qnh_hpa))
+        return say.qnh(issue.weather.qnh_hpa), float(int(issue.weather.qnh_hpa))
 
     def _departure_runway(self, airport: Airport, issue: Issue | None, raw: dict) -> str | None:
         """The departure runway whose threshold is nearest the aircraft."""

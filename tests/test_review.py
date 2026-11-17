@@ -212,7 +212,8 @@ def test_a_clicked_call_reaches_the_rules_engine_without_any_language_model(tmp_
         "request taxi", Intent("request_taxi"), {}, ground.key, ground, ISSUE, parked, None, engine, None, events.append
     )
     assert said.startswith(f"{CALLSIGN}, Testfield Ground, taxi to holding point runway two seven right")
-    assert events == [{"type": "understood", "intent": "request_taxi"}] and engine.flight.pending is not None
+    assert events == [{"type": "understood", "intent": "request_taxi", "fields": {"intent": "request_taxi"}}]
+    assert engine.flight.pending is not None
     # Speech with no model still has nobody to interpret it: the audio chain echoes, as before.
     assert voice_loop._answer("request taxi", None, {}, ground.key, ground, ISSUE, parked, None, engine, None, events.append) == (
         "Readback check. request taxi"

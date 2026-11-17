@@ -95,7 +95,7 @@ def _clouds(weather: Weather, faa: bool) -> str:
 def _pressure(weather: Weather, faa: bool) -> str:
     if faa:
         return f"Altimeter {say.digits(f'{round(weather.qnh_hpa * 2.953):04d}')}."
-    return f"Q N H {say.digits(int(weather.qnh_hpa))}."
+    return f"{say.qnh(weather.qnh_hpa)}."
 
 
 def low_visibility(weather: Weather) -> bool:

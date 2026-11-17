@@ -189,52 +189,55 @@ def parse_cifp(lines) -> Procedures:
     finals: dict[str, list[int]] = {}
     past_runway: set[str] = set()  # approaches whose final segment has reached the runway: the rest is the missed approach
     for line in lines:
-        kind, _, rest = line.partition(":")
-        if kind not in ("SID", "STAR", "APPCH"):
-            continue
-        f = [part.strip() for part in rest.rstrip(";\r\n").split(",")]
-        if len(f) <= TRANS_ALT:
-            continue
-        altitude = _altitude(f[ALT1])
-        speed = f[SPEED] if len(f) > SPEED else ""
-        leg = Leg(
-            f[FIX], f[ALT_DESCR], altitude, _altitude(f[ALT2]), int(speed) if speed.isdigit() else None,
-            f[DESCRIPTION][3:4].strip() if len(f[DESCRIPTION]) >= 4 else "", f[PATH],
-        )  # fmt: skip
-        if kind == "APPCH":
-            match = APPROACH_IDENT.fullmatch(f[NAME])
-            if not match:
+        try:
+            kind, _, rest = line.partition(":")
+            if kind not in ("SID", "STAR", "APPCH"):
                 continue
-            approach = found.approaches.setdefault(f[NAME], Approach(f[NAME], match.group(1), match.group(2)))
-            if f[ROUTE_TYPE] == "A":
-                approach.transitions.setdefault(f[TRANSITION] or f[FIX], []).append(leg)
-            elif f[NAME] not in past_runway:
-                approach.final.append(leg)
-                if leg.role == FAF_ROLE and leg.fix:
-                    approach.faf = leg.fix
-            if f[ROUTE_TYPE] != "A":
-                if f[NAME] in past_runway:
-                    if altitude:
-                        approach.missed_ft = max(approach.missed_ft or 0, altitude)
-                    if f[FIX] and not f[FIX].startswith("RW"):
-                        approach.missed_fix = f[FIX]
+            f = [part.strip() for part in rest.rstrip(";\r\n").split(",")]
+            if len(f) <= TRANS_ALT:
+                continue
+            altitude = _altitude(f[ALT1])
+            speed = f[SPEED] if len(f) > SPEED else ""
+            leg = Leg(
+                f[FIX], f[ALT_DESCR], altitude, _altitude(f[ALT2]), int(speed) if speed.isdigit() else None,
+                f[DESCRIPTION][3:4].strip() if len(f[DESCRIPTION]) >= 4 else "", f[PATH],
+            )  # fmt: skip
+            if kind == "APPCH":
+                match = APPROACH_IDENT.fullmatch(f[NAME])
+                if not match:
                     continue
-                if f[FIX].startswith("RW"):
-                    past_runway.add(f[NAME])
-            # The final segment (route type = approach type) and the last leg of each transition
-            # carry the altitude the approach is joined at.
-            if altitude and f[ROUTE_TYPE] != "A" and not f[FIX].startswith("RW"):
-                finals.setdefault(f[NAME], []).append(altitude)
-            elif altitude and f[FIX][:2] in ("CF", "FF", "CI", "FI"):
-                finals.setdefault(f[NAME], []).append(altitude)
-            del approach
-            continue
-        table = found.sids if kind == "SID" else found.stars
-        procedure = table.setdefault(f[NAME], Procedure(f[NAME]))
-        procedure.transitions.setdefault(f[TRANSITION] or "ALL", []).append(leg)
-        transition = _altitude(f[TRANS_ALT])
-        if kind == "SID" and transition:
-            found.transition_altitude_ft = transition
+                approach = found.approaches.setdefault(f[NAME], Approach(f[NAME], match.group(1), match.group(2)))
+                if f[ROUTE_TYPE] == "A":
+                    approach.transitions.setdefault(f[TRANSITION] or f[FIX], []).append(leg)
+                elif f[NAME] not in past_runway:
+                    approach.final.append(leg)
+                    if leg.role == FAF_ROLE and leg.fix:
+                        approach.faf = leg.fix
+                if f[ROUTE_TYPE] != "A":
+                    if f[NAME] in past_runway:
+                        if altitude:
+                            approach.missed_ft = max(approach.missed_ft or 0, altitude)
+                        if f[FIX] and not f[FIX].startswith("RW"):
+                            approach.missed_fix = f[FIX]
+                        continue
+                    if f[FIX].startswith("RW"):
+                        past_runway.add(f[NAME])
+                # The final segment (route type = approach type) and the last leg of each transition
+                # carry the altitude the approach is joined at.
+                if altitude and f[ROUTE_TYPE] != "A" and not f[FIX].startswith("RW"):
+                    finals.setdefault(f[NAME], []).append(altitude)
+                elif altitude and f[FIX][:2] in ("CF", "FF", "CI", "FI"):
+                    finals.setdefault(f[NAME], []).append(altitude)
+                del approach
+                continue
+            table = found.sids if kind == "SID" else found.stars
+            procedure = table.setdefault(f[NAME], Procedure(f[NAME]))
+            procedure.transitions.setdefault(f[TRANSITION] or "ALL", []).append(leg)
+            transition = _altitude(f[TRANS_ALT])
+            if kind == "SID" and transition:
+                found.transition_altitude_ft = transition
+        except (ValueError, IndexError, KeyError, OverflowError):
+            continue  # a malformed row is skipped, not fatal
     for ident, altitudes in finals.items():
         found.approaches[ident].platform_ft = max(altitudes)
     return found

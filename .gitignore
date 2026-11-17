@@ -16,3 +16,4 @@ vendor/
 docs/branding/
 docs/plan*.md
 *.bundle
+.coverage
