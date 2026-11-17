@@ -56,6 +56,8 @@ STATION_WORD = {
     "departure": "Departure",
 }
 FREQ_TOLERANCE_KHZ = 5
+GROUND_SIDE = ("delivery", "ground", "tower")  # who an aircraft on the ground talks to
+INFORMATION_LABEL = re.compile(r"\bAFIS\b|\bInfo(rmation)?\b|\bRadio\b|\bFISO?\b", re.I)  # information, not control
 SECTOR = re.compile(r"\((\d{3})\s*-\s*(\d{3})\)")  # "APP (091-240)": the bearings from the airport a sector works
 
 # Around a large city one approach frequency is listed at several airports. Two things decide which of them
@@ -150,7 +152,7 @@ class Station:
     def callsign(self) -> str:
         """The name in the sim's data when it is a real callsign ('Luton Tower'), else built from the airport name."""
         match = SPOKEN_LABEL.fullmatch(self.label.strip())
-        if not match and self.kind in ("tower", "unicom") and re.search(r"\bAFIS\b|\bFISO?\b", self.label, re.I):
+        if not match and self.kind in ("tower", "unicom") and re.search(r"\bAFIS\b|\bFISO?\b|\bInfo\b", self.label, re.I):
             return f"{self.airport.spoken_name} Information"
         if match:
             role = match.group(2).title()
@@ -453,6 +455,9 @@ class AirportDB:
         """The airport's own station of this kind, for hand-offs: the sector that works the bearing the
         aircraft is on when the frequencies are labelled by sector, otherwise the first listed."""
         listed = [f for f in airport.freqs if f.kind == kind]
+        # An airport can list an information service as a tower ("BREMEN INFO") beside its real tower: the
+        # flight is sent to the one that controls traffic.
+        listed.sort(key=lambda f: bool(INFORMATION_LABEL.search(f.label or "")))
         freq = listed[0] if listed else None
         if bearing_from is not None:
             for candidate in listed:
@@ -495,10 +500,17 @@ class AirportDB:
             _HELD.pop(khz, None)
             return None
         held = _HELD.get(khz)
+        sent_to = [found for found in in_range if f"{found[1]}:{found[3]}" == TALKING_TO.get(khz)]
         planned = [found for found in in_range if found[1] in _PREFERRED]
         kept = [found for found in in_range if held == (found[1], found[3])]
-        # The flight's own airport, else the station already being talked to, else the nearest.
-        best = min(planned or kept or in_range)
+        # The station the flight was sent to, else the flight's own airport, else the station already being talked
+        # to, else the nearest. One airport can list a frequency twice (tower and departure): on the ground it is
+        # the tower, ground or delivery that answers.
+        ground_side = feet is None
+        best = min(
+            sent_to or planned or kept or in_range,
+            key=lambda found: (found[0], found[1], ground_side and found[3] not in GROUND_SIDE, found[2:]),
+        )
         _HELD[khz] = (best[1], best[3])
         dist, ident, f_khz, kind, label = best
         return Station(self.airport(ident), kind, f_khz, label, dist)
