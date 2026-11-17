@@ -168,6 +168,7 @@ class SecondRadio(threading.Thread):
         self.bridge, self.db, self.tts, self.player, self.book, self.config = bridge, db, tts, player, book, config
         self.emit = emit
         self._halt = threading.Event()
+        self.hold = threading.Event()  # set while the sound check uses the second radio itself
         self._text = ""
         self._audio = None
         self._again_at = 0.0
@@ -175,6 +176,10 @@ class SecondRadio(threading.Thread):
     def stop(self) -> None:
         self._halt.set()
         self.player.stop()
+
+    def broadcast(self, samples, rate: int, gain: float) -> int:
+        """Play a recording on this radio, under whatever the first radio is saying. Returns the player's ticket."""
+        return self.player.play_stream(iter([samples * gain]), rate)
 
     def run(self) -> None:
         while not self._halt.wait(0.5):
@@ -194,6 +199,8 @@ class SecondRadio(threading.Thread):
         return other["khz"], station, SECOND_RADIO_GAIN * min(1.0, other["volume"] / 0.55)
 
     def tick(self) -> None:
+        if self.hold.is_set():
+            return  # the sound check is playing its own recording on this radio: leave it alone
         state = self.bridge.snapshot() if self.bridge.connected else {}
         heard = self.heard(state)
         if heard is None:
@@ -219,7 +226,7 @@ class SecondRadio(threading.Thread):
                 {"type": "atis", "airport": station.airport.ident, "mhz": f"{khz / 1000:.3f}", "text": text, "radio": radio}
             )
         samples, rate = self._audio
-        self.player.play_stream(iter([samples * gain]), rate)
+        self.broadcast(samples, rate, gain)
         self._again_at = time.monotonic() + len(samples) / rate + 2  # a pause between repeats
 
 

@@ -44,6 +44,38 @@ export interface TaxiView {
   }
 }
 
+/** One thing checked about this computer without the person (system_check.py). ok null: could not be told. */
+export interface ComputerCheck {
+  id: string
+  label: string
+  ok: boolean | null
+  text: string
+  /** What to do about it, when it failed. */
+  fix: string
+}
+
+/** One step of a finished sound check, as the window lists it. */
+export interface SoundCheckStep {
+  title: string
+  text: string
+  answer: boolean | null
+  problems: string[]
+}
+
+/** The sound check as it goes (soundcheck.py): "question" waits for a yes or a no. */
+export interface SoundCheckEvent {
+  type: 'sound_check'
+  state: 'running' | 'question' | 'done' | 'refused'
+  step?: number
+  total?: number
+  title?: string
+  /** What is happening, or what was measured. */
+  text?: string
+  question?: string
+  verdict?: string
+  steps?: SoundCheckStep[]
+}
+
 export interface EngineState {
   type: 'state'
   ready: boolean
@@ -141,6 +173,9 @@ export interface EngineState {
     capturing: boolean
   }
   cost: { calls: number; prompt_tokens: number; completion_tokens: number; cost: number }
+  /** "This computer" in the settings. */
+  computer?: ComputerCheck[]
+  sound_check?: { running: boolean; last: string }
   /** The app's screen in a browser on another device. */
   remote?: { available: boolean; enabled: boolean; running: boolean; url: string; code: string }
   suggestions: Suggestion[]
@@ -186,6 +221,8 @@ export type EngineEvent =
   | { type: 'chatter'; station: string; callsign: string; said: string; answered: string }
   | Debrief
   | ({ type: 'chart' } & Chart)
+  | SoundCheckEvent
+  | { type: 'report_saved'; path: string; issue: string }
 
 export type EngineMessage = EngineState | EngineEvent
 
@@ -209,6 +246,10 @@ export type Command =
   | { cmd: 'debrief' }
   | { cmd: 'new_flight' }
   | { cmd: 'chart'; ident: string }
+  | { cmd: 'sound_check' }
+  /** null stops the check. */
+  | { cmd: 'sound_check_answer'; heard: boolean | null }
+  | { cmd: 'report'; hide: boolean }
 
 export interface UpdateState {
   state: 'none' | 'checking' | 'downloading' | 'ready' | 'error' | 'available'

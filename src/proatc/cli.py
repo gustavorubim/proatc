@@ -151,6 +151,26 @@ def cmd_keytest(config) -> int:
     return 0
 
 
+def cmd_sound_check(config) -> int:
+    from .soundcheck import run_in_terminal
+
+    return run_in_terminal(config, _live_state(config))
+
+
+def cmd_report(config, hide: bool) -> int:
+    from .config import PROJECT_DIR
+    from .report import ISSUE_URL, write
+    from .system_check import this_computer
+
+    computer = this_computer()
+    for check in computer:
+        mark = {True: "ok ", False: "NO ", None: "?  "}[check["ok"]]
+        print(f"  {mark} {check['label']}: {check['text']} {check['fix']}".rstrip())
+    path = write(PROJECT_DIR, config, hide, computer)
+    print(f"\nProblem report saved to {path}\nAttach it to an issue: {ISSUE_URL}")
+    return 0
+
+
 def cmd_run(config) -> int:
     from .voice_loop import run
 
@@ -353,6 +373,9 @@ def main() -> int:
     atis.add_argument("--say", action="store_true")
     sub.add_parser("keytest", help="show the name of each key you press, to pick a push-to-talk key")
     sub.add_parser("run", help="start the push-to-talk voice loop")
+    sub.add_parser("sound-check", help="play each sound in turn and ask whether you heard it; records the result")
+    report = sub.add_parser("report", help="write a zip to attach to a bug report (no key, no SimBrief ID)")
+    report.add_argument("--hide", action="store_true", help="mask the callsign and round positions in the copy")
     replay = sub.add_parser("replay", help="run a saved flight log (.json) through the engine again and show what differs")
     replay.add_argument("log")
     kept = sub.add_parser("journals", help="keep real flights' journals as regression tests and check them (private)")
@@ -396,6 +419,8 @@ def main() -> int:
 
             serve_app(config, args.port)
             return 0
+        if args.command == "report":
+            return cmd_report(config, args.hide)
         if args.command == "replay":
             return cmd_replay(config, args.log)
         if args.command == "journals":
@@ -436,6 +461,7 @@ def main() -> int:
             "setup-models": cmd_setup_models,
             "keytest": cmd_keytest,
             "run": cmd_run,
+            "sound-check": cmd_sound_check,
         }[args.command](config)
     except ModelsMissing as error:
         print(error)

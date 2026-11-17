@@ -117,7 +117,90 @@ function useEngine() {
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(command))
   }, [])
 
-  return { store, send, pair, closeDebrief: () => dispatch({ type: 'close_debrief' }) }
+  const answerSoundCheck = useCallback(
+    (heard: boolean | null) => {
+      dispatch({ type: 'sound_check_answered' })
+      send({ cmd: 'sound_check_answer', heard })
+    },
+    [send]
+  )
+
+  return {
+    store,
+    send,
+    pair,
+    answerSoundCheck,
+    closeDebrief: () => dispatch({ type: 'close_debrief' }),
+    closeSoundCheck: () => dispatch({ type: 'close_sound_check' }),
+    closeReport: () => dispatch({ type: 'close_report' })
+  }
+}
+
+/** "Report a problem": one file to attach to an issue, optionally without the callsign and positions. */
+function ReportDialog({
+  report,
+  onWrite,
+  onClose
+}: {
+  report: { path: string; issue: string } | null
+  onWrite: (hide: boolean) => void
+  onClose: () => void
+}) {
+  const [hide, setHide] = useState(false)
+  const [writing, setWriting] = useState(false)
+  return (
+    <div className="scrim" onClick={onClose}>
+      <div className="dialog" onClick={(event) => event.stopPropagation()}>
+        <h2>Report a problem</h2>
+        {report ? (
+          <>
+            <p>The report is saved. Its folder is open:</p>
+            <p className="mono report-path">{report.path}</p>
+            <p>Open an issue, say what happened and what you expected, and attach this file.</p>
+            <div className="row">
+              <button className="ghost" onClick={onClose}>
+                Done
+              </button>
+              <a className="button" href={report.issue} target="_blank" rel="noreferrer">
+                Open an issue
+              </a>
+            </div>
+          </>
+        ) : (
+          <>
+            <p>
+              Pro ATC writes one file to attach to an issue: the record of this run of the app (and of the one before,
+              if you have just restarted it), the version, your settings, the last sound check and the checks of this
+              computer.
+            </p>
+            <p>
+              It holds the flight's callsign, its positions and what was said on the radio. It never holds your
+              OpenRouter key, your SimBrief ID or the pairing code.
+            </p>
+            <label className="check-row">
+              <input type="checkbox" checked={hide} onChange={(event) => setHide(event.target.checked)} />
+              Hide my callsign and positions
+            </label>
+            <div className="row">
+              <button className="ghost" onClick={onClose}>
+                Cancel
+              </button>
+              <button
+                className="primary"
+                disabled={writing}
+                onClick={() => {
+                  setWriting(true)
+                  onWrite(hide)
+                }}
+              >
+                {writing ? 'Writing…' : 'Write the report'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
 }
 
 function PairDialog({ wrong, onPair }: { wrong: boolean; onPair: (code: string) => void }) {
@@ -602,13 +685,14 @@ function savedMapChoice(): boolean {
 }
 
 export function App() {
-  const { store, send, pair, closeDebrief } = useEngine()
+  const { store, send, pair, answerSoundCheck, closeDebrief, closeSoundCheck, closeReport } = useEngine()
   const engine = store.engine
   const [draft, setDraft] = useState('')
   const [asking, setAsking] = useState<Suggestion | null>(null)
   const [destination, setDestination] = useState('')
   const [keyOpen, setKeyOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [reportOpen, setReportOpen] = useState(false)
   const [mapOpen, setMapOpen] = useState(savedMapChoice)
   const [wording, setWording] = useState(false)
   // The proper call the engine worded: sent with its intent while the box still holds it unchanged.
@@ -665,6 +749,11 @@ export function App() {
   useEffect(() => {
     if (store.savedLog) void window.proatc?.reveal(store.savedLog)
   }, [store.savedLog])
+
+  const reportPath = store.report?.path
+  useEffect(() => {
+    if (reportPath) void window.proatc?.reveal(reportPath)
+  }, [reportPath])
 
   const ready = Boolean(engine?.ready) && store.link === 'open'
   const click = (suggestion: Suggestion): void => {
@@ -738,6 +827,19 @@ export function App() {
           <button className="quiet" disabled={!engine} onClick={() => setSettingsOpen(true)}>
             Settings
           </button>
+          {inApp && (
+            <button
+              className="quiet"
+              disabled={store.link !== 'open'}
+              title="Write one file to attach to a bug report"
+              onClick={() => {
+                closeReport()
+                setReportOpen(true)
+              }}
+            >
+              Report a problem
+            </button>
+          )}
           <Pill ok={ready ? true : store.fatal ? false : 'wait'} label={ready ? 'Engine ready' : 'Engine starting'} />
           <Pill
             ok={Boolean(engine?.status.sim)}
@@ -900,6 +1002,16 @@ export function App() {
           onClose={() => setSettingsOpen(false)}
           onKey={() => setKeyOpen(true)}
           inApp={inApp}
+          soundCheck={store.soundCheck}
+          onAnswer={answerSoundCheck}
+          onCloseCheck={closeSoundCheck}
+        />
+      )}
+      {reportOpen && (
+        <ReportDialog
+          report={store.report}
+          onWrite={(hide) => send({ cmd: 'report', hide })}
+          onClose={() => setReportOpen(false)}
         />
       )}
       {store.debrief && <DebriefDialog debrief={store.debrief} onClose={closeDebrief} />}

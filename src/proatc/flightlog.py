@@ -23,7 +23,9 @@ KEPT = 5000
 JOURNALS_KEPT = 40  # runs of the app whose journal is kept
 JOURNAL_NAME = "session-{:%Y%m%d-%H%M%S}.jsonl"
 WITH_CONTEXT = ("pilot", "atc", "atis", "understood", "silent", "info", "error", "coach")
-SKIPPED = ("tx", "timings", "status", "settings", "log_saved", "chatter", "debrief", "capture", "phrase")
+# The sound check's prompts are not kept: its outcome is written once, as a `sound_check` note.
+SKIPPED = ("tx", "timings", "status", "settings", "log_saved", "chatter", "debrief", "capture", "phrase", "sound_check",
+           "report_saved")  # fmt: skip
 
 
 class FlightLog:

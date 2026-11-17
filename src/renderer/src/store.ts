@@ -1,6 +1,6 @@
 // What the window shows, as a pure function of the messages received from the engine.
 
-import type { Chart, Debrief, EngineMessage, EngineState } from '../../shared/protocol'
+import type { Chart, Debrief, EngineMessage, EngineState, SoundCheckEvent } from '../../shared/protocol'
 
 export type LineKind = 'pilot' | 'atc' | 'atis' | 'note' | 'error' | 'coach' | 'chatter'
 
@@ -28,6 +28,10 @@ export interface Store {
   chart: Chart | null
   /** A browser on another device: 'ask' for the pairing code, 'wrong' when the engine refused it. */
   pairing: 'no' | 'ask' | 'wrong'
+  /** The sound check while it runs, and its outcome until it is closed. */
+  soundCheck: SoundCheckEvent | null
+  /** The problem report just written: where it is, and where to open an issue. */
+  report: { path: string; issue: string } | null
   nextId: number
 }
 
@@ -46,6 +50,8 @@ export const initialStore: Store = {
   chart: null,
   phrase: null,
   pairing: 'no',
+  soundCheck: null,
+  report: null,
   nextId: 1
 }
 
@@ -55,6 +61,9 @@ export type Action =
   | { type: 'message'; message: EngineMessage }
   | { type: 'pair'; pairing: Store['pairing'] }
   | { type: 'close_debrief' }
+  | { type: 'sound_check_answered' }
+  | { type: 'close_sound_check' }
+  | { type: 'close_report' }
 
 function push(store: Store, kind: LineKind, who: string, text: string, meta?: string): Store {
   const line: Line = { id: store.nextId, kind, who, text, meta }
@@ -80,6 +89,18 @@ export function reduce(store: Store, action: Action): Store {
   if (action.type === 'fatal') return { ...store, fatal: action.text }
   if (action.type === 'pair') return { ...store, pairing: action.pairing }
   if (action.type === 'close_debrief') return { ...store, debrief: null }
+  if (action.type === 'close_report') return { ...store, report: null }
+  if (action.type === 'close_sound_check') {
+    return store.soundCheck?.state === 'done' || store.soundCheck?.state === 'refused'
+      ? { ...store, soundCheck: null }
+      : store
+  }
+  if (action.type === 'sound_check_answered') {
+    // One answer per question: the buttons go until the engine asks the next one.
+    return store.soundCheck?.state === 'question'
+      ? { ...store, soundCheck: { ...store.soundCheck, state: 'running', question: undefined } }
+      : store
+  }
 
   const message = action.message
   switch (message.type) {
@@ -130,6 +151,16 @@ export function reduce(store: Store, action: Action): Store {
       return { ...store, chart: message }
     case 'capture':
       return store
+    case 'sound_check':
+      if (message.state === 'done' && message.verdict) {
+        return { ...push(store, 'note', '', message.verdict), soundCheck: message }
+      }
+      return { ...store, soundCheck: message }
+    case 'report_saved':
+      return {
+        ...push(store, 'note', '', `Problem report saved: ${message.path}`),
+        report: { path: message.path, issue: message.issue }
+      }
     default:
       return store
   }

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Command, EngineState } from '../../shared/protocol'
+import type { Command, ComputerCheck, EngineState, SoundCheckEvent } from '../../shared/protocol'
 
 type Send = (command: Command) => void
 
@@ -37,12 +37,101 @@ function voiceName(voice: string): string {
   return `${name[0].toUpperCase()}${name.slice(1)} (${VOICE_REGION[code[0]] ?? code[0]} ${who})`
 }
 
+const MARK = { ok: '✓', bad: '✗', unknown: '?' } as const
+
+function mark(check: ComputerCheck): keyof typeof MARK {
+  return check.ok === true ? 'ok' : check.ok === false ? 'bad' : 'unknown'
+}
+
+/** What could be checked about this computer without anyone: a sentence each, and the fix when it failed. */
+function ComputerChecklist({ checks }: { checks: ComputerCheck[] }) {
+  return (
+    <ul className="checklist">
+      {checks.map((check) => (
+        <li key={check.id} className={`check check-${mark(check)}`}>
+          <span className="check-mark" aria-hidden>
+            {MARK[mark(check)]}
+          </span>
+          <div>
+            <div className="setting-label">{check.label}</div>
+            <div className="setting-hint">{check.text}</div>
+            {check.fix && <div className="check-fix">{check.fix}</div>}
+          </div>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/** The sound check as it goes: what is playing, the question to answer, and at the end the verdict. */
+function SoundCheckPanel({
+  check,
+  onAnswer,
+  onClose
+}: {
+  check: SoundCheckEvent
+  onAnswer: (heard: boolean | null) => void
+  onClose: () => void
+}) {
+  if (check.state === 'refused' || check.state === 'done') {
+    return (
+      <div className="sound-check">
+        <div className="verdict">{check.state === 'refused' ? check.text : check.verdict}</div>
+        {check.steps && (
+          <ul className="findings">
+            {check.steps.map((step, index) => (
+              <li key={index} className={step.problems.length ? 'finding finding-runway' : 'finding'}>
+                <span className="mono">{step.answer === null ? '–' : step.answer ? 'yes' : 'no'}</span>
+                <div>
+                  <div className="setting-label">{step.title}</div>
+                  <div className="setting-hint">{step.text}</div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="row">
+          <button className="ghost" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    )
+  }
+  return (
+    <div className="sound-check" aria-live="polite">
+      <div className="eyebrow">
+        {check.step ? `Step ${check.step} of ${check.total} · ` : ''}
+        {check.title}
+      </div>
+      <p>{check.text}</p>
+      {check.question && <div className="setting-label">{check.question}</div>}
+      <div className="row">
+        <button className="ghost" onClick={() => onAnswer(null)}>
+          Stop
+        </button>
+        {check.question && (
+          <>
+            <button onClick={() => onAnswer(false)}>No</button>
+            <button className="primary" onClick={() => onAnswer(true)}>
+              Yes
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function SettingsDialog({
   engine,
   send,
   onClose,
   onKey,
-  inApp
+  inApp,
+  soundCheck,
+  onAnswer,
+  onCloseCheck
 }: {
   engine: EngineState
   send: Send
@@ -50,6 +139,9 @@ export function SettingsDialog({
   onKey: () => void
   /** False in a browser on another device, where the key and the model cannot be changed. */
   inApp: boolean
+  soundCheck: SoundCheckEvent | null
+  onAnswer: (heard: boolean | null) => void
+  onCloseCheck: () => void
 }) {
   const { values, options, capturing } = engine.settings
   const [model, setModel] = useState(values.llm.model)
@@ -61,6 +153,7 @@ export function SettingsDialog({
     send({ cmd: 'settings', changes: { [section]: { [key]: value } } })
   const device = (value: string): number | null => (value === '' ? null : Number(value))
   const cost = engine.cost
+  const checking = soundCheck?.state === 'running' || soundCheck?.state === 'question'
 
   return (
     <div className="scrim" onClick={onClose}>
@@ -103,6 +196,21 @@ export function SettingsDialog({
           <Row label="Radio effect" hint="Makes controllers sound like a VHF radio">
             <Toggle on={values.radio.enabled} onChange={(on) => change('radio', 'enabled', on)} />
           </Row>
+          <Row
+            label="Sound check"
+            hint={
+              engine.sound_check?.last ||
+              'Plays each sound in turn and asks whether you heard it. Parked on the ground, or with X-Plane closed'
+            }
+          >
+            <button
+              disabled={Boolean(engine.sound_check?.running) || checking}
+              onClick={() => send({ cmd: 'sound_check' })}
+            >
+              {checking ? 'Checking…' : 'Sound check'}
+            </button>
+          </Row>
+          {soundCheck && <SoundCheckPanel check={soundCheck} onAnswer={onAnswer} onClose={onCloseCheck} />}
 
           <h3>Push-to-talk</h3>
           <Row
@@ -318,6 +426,13 @@ export function SettingsDialog({
                   <span className="mono remote-code">{remote.code}</span>
                 </Row>
               )}
+            </>
+          )}
+
+          {engine.computer && engine.computer.length > 0 && (
+            <>
+              <h3>This computer</h3>
+              <ComputerChecklist checks={engine.computer} />
             </>
           )}
         </div>

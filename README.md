@@ -41,7 +41,7 @@ Windows is the system Pro ATC is developed and flown on. The Mac and Linux versi
 
 ## Help and details
 
-- Something wrong? Click **Save log** in the app and [open an issue](https://github.com/gustavorubim/proatc/issues/new/choose) with the two files.
+- Something wrong? Click **Report a problem** in the app and [open an issue](https://github.com/gustavorubim/proatc/issues/new/choose) with the file it writes.
 - [Installing on each system](docs/install.md): the first-run warnings, and what macOS and Linux need.
 - [How it works](docs/how-it-works.md): everything the controllers do.
 - [Development](docs/development.md): build from source, releases.
