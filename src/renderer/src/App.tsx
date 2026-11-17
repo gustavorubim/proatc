@@ -410,6 +410,25 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
 
       <PlanCard engine={engine} send={send} />
 
+      {engine?.centre && (
+        <section className="card">
+          <div className="eyebrow">En-route centre here</div>
+          <ul className="freqs">
+            <li
+              className={engine.centre.tuned ? 'on' : ''}
+              title={canTune ? 'Click to tune this frequency on your COM radio' : 'Click to copy'}
+              onClick={() =>
+                canTune
+                  ? send({ cmd: 'tune', mhz: engine.centre!.mhz })
+                  : void navigator.clipboard.writeText(engine.centre!.mhz)
+              }
+            >
+              <span className="mono">{engine.centre.mhz}</span>
+              <span className="name">{engine.centre.callsign}</span>
+            </li>
+          </ul>
+        </section>
+      )}
       {airport && (
         <section className="card grow">
           <div className="eyebrow">

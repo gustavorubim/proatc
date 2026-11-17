@@ -41,6 +41,9 @@ DEPARTURE_TOP_FT = 24000  # the departure controller's highest level
 DEPARTURE_HANDOFF_NM = 30
 APPROACH_HANDOFF_NM = 45
 STEP_FT = 10000  # the size of one climb or descent clearance
+STEP_LEAD_NM = 5  # the next step down comes this far before a three degree path leaves the cleared level
+BOUNDARY_AHEAD_S = 90  # a centre hands the flight on this long before it leaves the sector
+BOUNDARY_AHEAD_NM = 8  # and never closer to the boundary than this
 NEXT_STEP_WITHIN_FT = 2000  # the next step is given this close to the cleared level
 LOW_AGL_FT = 1000  # descending below this height above the ground, away from the approach, draws an alert
 BUST_FT = 400  # how far through a cleared level before the controller says something
@@ -863,6 +866,7 @@ def _divert(engine, intent, station, raw, variation, callsign, hello):
     flight.rules, flight.destination = "IFR", target.spoken_name
     flight.arrival, flight.star, flight.star_procedure, flight.constraints = None, None, None, None
     flight.told_approach, flight.told_sector, flight.descent_given, flight.direct_to = False, None, False, None
+    flight.sector_ahead = None
     flight.runway, flight.awaiting_landing, flight.diverting = None, False, True
     if station.airport:
         flight.origin_ident = station.airport.ident
@@ -938,13 +942,25 @@ def after_takeoff(engine, airport: Airport, raw: dict):
     return None
 
 
-def _centre_handoff(engine, raw, callsign, exclude=None):
+def _ahead(raw: dict) -> tuple[float, float]:
+    """Where the aircraft will be in a minute and a half, on its present heading."""
+    miles = max(BOUNDARY_AHEAD_NM, raw.get("groundspeed_ms", 0.0) * 1.944 * BOUNDARY_AHEAD_S / 3600)
+    track = math.radians(raw.get("heading_true", 0.0))
+    lat = raw["lat"] + miles / 60 * math.cos(track)
+    lon = raw["lon"] + miles / 60 * math.sin(track) / max(math.cos(math.radians(raw["lat"])), 0.05)
+    return lat, lon
+
+
+def _centre_handoff(engine, raw, callsign, exclude=None, where=None):
+    """'Contact the next centre': the one at `where`, or where the aircraft is."""
     if not engine.centers:
         return None
-    center = engine.centers.at(raw["lat"], raw["lon"], _feet(raw))
+    lat, lon = where or (raw["lat"], raw["lon"])
+    center = engine.centers.at(lat, lon, _feet(raw))
     if center is None or center is exclude or engine.flight.told_sector == center.name:
         return None
     engine.flight.told_sector = center.name
+    engine.flight.sector_ahead = center.name if where else None
     station = engine.centers.station_for(center)
     text = f"{callsign}, contact {station.callsign} {say.frequency(station.khz)}"
     return _reply(engine, text, {"frequency": f"{station.khz / 1000:.3f}"})
@@ -1095,9 +1111,20 @@ def tick(engine, station, issue, raw, variation, callsign):
                 return _reply(engine, f"{callsign}, contact {target[0]} {target[1]}", {"frequency": target[2]})
         if flight.told_approach:
             return None  # handed to approach: the flight is no longer this controller's to descend
-        # An aircraft that has left the sector is the next controller's to climb or descend.
-        if not station.center.contains(raw["lat"], raw["lon"]):
-            return _centre_handoff(engine, raw, callsign, exclude=station.center)
+        # The next centre is given a little before the boundary: once across it, this controller's frequency
+        # is out of range. An aircraft that has left the sector is the next controller's to climb or descend.
+        if flight.sector_ahead and flight.sector_ahead != station.center.name:
+            return None  # sent on to the next centre: this controller has nothing more to say
+        inside = station.center.contains(raw["lat"], raw["lon"])
+        if inside and flight.sector_ahead == station.center.name:
+            flight.sector_ahead = None  # arrived in the sector it was sent to
+        # Sent here before the boundary and not across it yet: this controller keeps the flight.
+        inside = inside or flight.sector_ahead == station.center.name
+        ahead = _ahead(raw)
+        if not inside or not station.center.contains(*ahead):
+            handed = _centre_handoff(engine, raw, callsign, exclude=station.center, where=ahead if inside else None)
+            if handed or not inside:
+                return handed
         cruise = plan.cruise_ft if plan else None
         cleared = flight.cleared_ft or 0
         if not flight.descent_given and cruise and cleared < cruise and _near_cleared(engine, raw):
@@ -1150,7 +1177,10 @@ def tick(engine, station, issue, raw, variation, callsign):
                 if remaining <= start_nm:
                     return _descent(engine, station, raw, callsign, "", faa)
             elif cleared > goal and _near_cleared(engine, raw):
-                return _descend(engine, _next_level(cleared, _feet(raw), goal), destination.ident, faa, callsign, "")
+                # The next step waits for the distance too: an aircraft that came down quickly is held at its
+                # level until a three degree path needs the next one, not sent lower a hundred miles out.
+                if remaining <= (cleared - goal) / 300 + APPROACH_HANDOFF_NM + 10 + STEP_LEAD_NM:
+                    return _descend(engine, _next_level(cleared, _feet(raw), goal), destination.ident, faa, callsign, "")
         return None
 
     arrival = flight.arrival

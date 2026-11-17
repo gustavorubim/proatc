@@ -104,6 +104,8 @@ export interface EngineState {
   } | null
   /** Controlled or restricted airspace the aircraft is inside, smallest first. */
   airspace?: { kind: string; name: string; floor_ft: number; ceiling_ft: number | null }[]
+  /** In the air: the en-route centre for where the aircraft is. */
+  centre?: { mhz: string; callsign: string; tuned: boolean } | null
   /** On the ground at an airport: the aircraft on its map. */
   map?: TaxiView | null
   simbrief_user: string
