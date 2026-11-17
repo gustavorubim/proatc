@@ -73,6 +73,8 @@ export interface EngineState {
     wind?: string
     pressure?: string
     temperature?: string
+    /** The current ATIS, written down: what the recording says, row by row. */
+    atis?: { label: string; value: string; alert?: boolean }[]
   } | null
   flight: {
     phase?: string
