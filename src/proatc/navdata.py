@@ -45,6 +45,22 @@ STATION_WORD = {
     "departure": "Departure",
 }
 FREQ_TOLERANCE_KHZ = 5
+SECTOR = re.compile(r"\((\d{3})\s*-\s*(\d{3})\)")  # "APP (091-240)": the bearings from the airport a sector works
+
+# Around a large city one approach frequency is listed at several airports. Two things decide which of them
+# the pilot is talking to, ahead of mere distance: the airports of the flight's own plan, and the station
+# already found on that frequency. Shared by every connection to the index in this process.
+_PREFERRED: tuple[str, ...] = ()
+_HELD: dict[int, tuple[str, str]] = {}
+
+
+def prefer_airports(idents) -> None:
+    """The airports of the flight's plan: on a frequency several airports share, theirs is the station meant."""
+    global _PREFERRED
+    _PREFERRED = tuple(ident.upper() for ident in idents if ident)
+    _HELD.clear()
+
+
 SPOKEN_LABEL = re.compile(
     r"([A-Za-z][A-Za-z' ]*?) "
     r"(Tower|Twr|Ground|Gnd|Approach|App|Departure|Dep|Delivery|Del|Clearance|Information|ATIS|Control|Radar|Director|Arrival|Radio)"
@@ -387,7 +403,8 @@ class AirportDB:
             )
         ]
         airport.freqs = [
-            Freq(*f) for f in self.db.execute("SELECT khz, kind, label FROM freqs WHERE ident = ?", (airport.ident,))
+            Freq(*f)
+            for f in self.db.execute("SELECT khz, kind, label FROM freqs WHERE ident = ? ORDER BY rowid", (airport.ident,))
         ]
         return airport
 
@@ -406,9 +423,20 @@ class AirportDB:
         source = self.db.execute("SELECT value FROM meta WHERE key='source'").fetchone()[0]
         return Path(source).parents[3]
 
-    def station_of(self, airport: Airport, kind: str) -> Station | None:
-        """The airport's own station of this kind (first listed), for hand-offs."""
-        freq = next((f for f in airport.freqs if f.kind == kind), None)
+    def station_of(self, airport: Airport, kind: str, bearing_from: float | None = None) -> Station | None:
+        """The airport's own station of this kind, for hand-offs: the sector that works the bearing the
+        aircraft is on when the frequencies are labelled by sector, otherwise the first listed."""
+        listed = [f for f in airport.freqs if f.kind == kind]
+        freq = listed[0] if listed else None
+        if bearing_from is not None:
+            for candidate in listed:
+                sector = SECTOR.search(candidate.label or "")
+                if sector:
+                    start, end = int(sector.group(1)), int(sector.group(2))
+                    inside = start <= bearing_from <= end if start <= end else bearing_from >= start or bearing_from <= end
+                    if inside:
+                        freq = candidate
+                        break
         return Station(airport, kind, freq.khz, freq.label, 0.0) if freq else None
 
     def nearest(self, lat: float, lon: float, radius_nm: float = 30, limit: int = 5) -> list[tuple[float, Airport]]:
@@ -430,12 +458,19 @@ class AirportDB:
             "WHERE f.khz BETWEEN ? AND ? AND a.lat BETWEEN ? AND ? AND a.lon BETWEEN ? AND ?",
             (khz - FREQ_TOLERANCE_KHZ, khz + FREQ_TOLERANCE_KHZ, lat - dlat, lat + dlat, lon - dlon, lon + dlon),
         ).fetchall()
-        best = None
+        in_range = []
         for ident, a_lat, a_lon, f_khz, kind, label in rows:
             dist = distance_nm(lat, lon, a_lat, a_lon)
-            if dist <= RANGE_NM[kind] and (best is None or dist < best[0]):
-                best = (dist, ident, f_khz, kind, label)
-        if not best:
+            if dist <= RANGE_NM[kind]:
+                in_range.append((dist, ident, f_khz, kind, label))
+        if not in_range:
+            _HELD.pop(khz, None)
             return None
+        held = _HELD.get(khz)
+        planned = [found for found in in_range if found[1] in _PREFERRED]
+        kept = [found for found in in_range if held == (found[1], found[3])]
+        # The flight's own airport, else the station already being talked to, else the nearest.
+        best = min(planned or kept or in_range)
+        _HELD[khz] = (best[1], best[3])
         dist, ident, f_khz, kind, label = best
         return Station(self.airport(ident), kind, f_khz, label, dist)

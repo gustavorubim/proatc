@@ -37,6 +37,8 @@ from .vectors import CLOSE_NM, FINAL_NM, established, locate, next_vector, turn_
 
 RADAR_KINDS = ("departure", "approach", "center")
 CHECK_IN = ("check_in", "initial_call", "position_report", "inbound")
+# What a centre answers with "contact approach" once the flight is close in and should be with approach.
+TO_APPROACH = (*CHECK_IN, "request_descent", "request_approach", "request_visual", "request_vectors", "other", "unknown")
 DEPARTURE_TOP_FT = 24000  # the departure controller's highest level
 DEPARTURE_HANDOFF_NM = 30
 APPROACH_HANDOFF_NM = 45
@@ -44,6 +46,7 @@ STEP_FT = 10000  # the size of one climb or descent clearance
 STEP_LEAD_NM = 5  # the next step down comes this far before a three degree path leaves the cleared level
 BOUNDARY_AHEAD_S = 90  # a centre hands the flight on this long before it leaves the sector
 BOUNDARY_AHEAD_NM = 8  # and never closer to the boundary than this
+APPROACH_SOON_NM = 25  # this close to the hand-off to approach, a centre does not send the flight to another centre
 NEXT_STEP_WITHIN_FT = 2000  # the next step is given this close to the cleared level
 LOW_AGL_FT = 1000  # descending below this height above the ground, away from the approach, draws an alert
 BUST_FT = 400  # how far through a cleared level before the controller says something
@@ -417,6 +420,15 @@ def _center(engine, intent, station, raw, callsign, hello):
     faa = _centre_faa(station)
     cruise = plan.cruise_ft if plan else None
     lead = f"{hello}{_contact_word(faa)}, " if hello else ""
+    destination = engine.db.airport(plan.destination) if plan and plan.destination else None
+    near = (
+        destination
+        and "lat" in raw
+        and distance_nm(raw["lat"], raw["lon"], destination.lat, destination.lon) <= APPROACH_HANDOFF_NM
+    )
+    if near and flight.arrival is None and (flight.told_approach or intent.intent in CHECK_IN) and intent.intent in TO_APPROACH:
+        # Close in and still on a centre: whatever is asked, the answer is approach's to give.
+        return _to_approach(engine, station, destination, raw, callsign, lead)
     if intent.intent == "request_descent":
         if intent.altitude and intent.altitude < _feet(raw) - 500:
             # A level the pilot asks for is checked against the terrain like any other.
@@ -438,7 +450,8 @@ def _center(engine, intent, station, raw, callsign, hello):
         return None
     if not flight.descent_given and cruise and (flight.cleared_ft or 0) < cruise:
         return _climb(engine, _next_level(flight.cleared_ft or 0, _feet(raw), cruise), None, faa, callsign, lead)
-    return _reply(engine, f"{callsign}, {hello}{_contact_word(faa)}") if hello else None
+    # A check-in with nothing new to give is still answered: silence here went to the free-form fallback.
+    return _reply(engine, f"{callsign}, {hello}{_contact_word(faa)}" if hello else f"{callsign}, roger")
 
 
 def _direct(engine, intent, station, raw, callsign, part: str):
@@ -951,6 +964,23 @@ def _ahead(raw: dict) -> tuple[float, float]:
     return lat, lon
 
 
+def _to_approach(engine, station, destination, raw, callsign, lead: str = ""):
+    """'Contact approach', from a centre. Said once by each centre: if the pilot turns up on another centre
+    without having reached approach, that one says it too."""
+    flight = engine.flight
+    target = engine._handoff(destination, "approach", raw) or engine._handoff(destination, "tower", raw)
+    flight.told_approach, flight.approach_told_by, flight.sector_ahead = True, station.key, None
+    if not target:
+        return None
+    return _reply(engine, f"{callsign}, {lead}contact {target[0]} {target[1]}", {"frequency": target[2]})
+
+
+def _approach_missed(engine, station) -> bool:
+    """Told to contact approach, not with approach yet, and now talking to a centre that did not say it."""
+    flight = engine.flight
+    return flight.told_approach and flight.arrival is None and flight.approach_told_by != station.key
+
+
 def _centre_handoff(engine, raw, callsign, exclude=None, where=None):
     """'Contact the next centre': the one at `where`, or where the aircraft is."""
     if not engine.centers:
@@ -1088,7 +1118,7 @@ def tick(engine, station, issue, raw, variation, callsign):
             # A short diversion never reaches a centre: straight to the other airport's approach.
             other = engine.db.airport(plan.destination)
             if other and distance_nm(raw["lat"], raw["lon"], other.lat, other.lon) <= APPROACH_HANDOFF_NM + 10:
-                target = engine._handoff(other, "approach") or engine._handoff(other, "tower")
+                target = engine._handoff(other, "approach", raw) or engine._handoff(other, "tower")
                 if target and distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon) > 8:
                     flight.told_approach = True
                     return _reply(engine, f"{callsign}, contact {target[0]} {target[1]}", {"frequency": target[2]})
@@ -1104,11 +1134,8 @@ def tick(engine, station, issue, raw, variation, callsign):
     if part == "center":
         destination = engine.db.airport(plan.destination) if plan and plan.destination else None
         remaining = distance_nm(raw["lat"], raw["lon"], destination.lat, destination.lon) if destination else None
-        if destination and remaining <= APPROACH_HANDOFF_NM and not flight.told_approach:
-            flight.told_approach = True
-            target = engine._handoff(destination, "approach") or engine._handoff(destination, "tower")
-            if target:
-                return _reply(engine, f"{callsign}, contact {target[0]} {target[1]}", {"frequency": target[2]})
+        if destination and remaining <= APPROACH_HANDOFF_NM and (not flight.told_approach or _approach_missed(engine, station)):
+            return _to_approach(engine, station, destination, raw, callsign)
         if flight.told_approach:
             return None  # handed to approach: the flight is no longer this controller's to descend
         # The next centre is given a little before the boundary: once across it, this controller's frequency
@@ -1121,7 +1148,10 @@ def tick(engine, station, issue, raw, variation, callsign):
         # Sent here before the boundary and not across it yet: this controller keeps the flight.
         inside = inside or flight.sector_ahead == station.center.name
         ahead = _ahead(raw)
-        if not inside or not station.center.contains(*ahead):
+        # About to be handed to approach: not sent to another centre for the last few miles. Two hand-offs
+        # seconds apart leave the pilot on the wrong one.
+        soon = bool(destination) and remaining <= APPROACH_HANDOFF_NM + APPROACH_SOON_NM
+        if not soon and (not inside or not station.center.contains(*ahead)):
             handed = _centre_handoff(engine, raw, callsign, exclude=station.center, where=ahead if inside else None)
             if handed or not inside:
                 return handed

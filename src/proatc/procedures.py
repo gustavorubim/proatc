@@ -177,6 +177,36 @@ class Procedures:
     transition_altitude_ft: int | None = None
 
 
+def _padded(runway: str) -> str:
+    """A runway as the procedure data writes it: '1C' is '01C'."""
+    digits = len(runway) - len(runway.lstrip("0123456789"))
+    return f"0{runway}" if digits == 1 else runway
+
+
+def use_airport_runway_names(procedures: Procedures, idents: list[str]) -> Procedures:
+    """Rename the runways in an airport's procedures to the names its airport data uses.
+
+    In the United States the sim's airports call a runway '1C' or '4R' while the procedure data says
+    '01C' and '04R'. Left as they are, no approach, SID or STAR is ever found for runways 1 to 9."""
+    names = {_padded(ident): ident for ident in idents if _padded(ident) != ident}
+    if not names:
+        return procedures
+    for approach in procedures.approaches.values():
+        approach.runway = names.get(approach.runway, approach.runway)
+
+    def renamed(transition: str) -> str:
+        if not transition.startswith("RW"):
+            return transition
+        ident = transition[2:]
+        if ident.endswith("B") and f"{ident[:-1]}L" in names:  # 'RW04B': both 4L and 4R
+            return f"RW{names[f'{ident[:-1]}L'][:-1]}B"
+        return f"RW{names.get(ident, ident)}"
+
+    for procedure in (*procedures.sids.values(), *procedures.stars.values()):
+        procedure.transitions = {renamed(name): legs for name, legs in procedure.transitions.items()}
+    return procedures
+
+
 def _altitude(text: str) -> int | None:
     text = text.strip()
     if text.startswith("FL") and text[2:].isdigit():

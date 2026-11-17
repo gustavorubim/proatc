@@ -294,7 +294,7 @@ def test_departure_centres_descent_and_handoff_to_approach(world):
     )
     cruising = at(51.0, 1.0, feet=36000, heading=90)
     assert engine.tick(west, None, cruising) is None  # inside the sector, far from the descent point
-    assert engine.handle(Intent("check_in"), west, None, cruising) is None  # nothing new to say
+    assert engine.handle(Intent("check_in"), west, None, cruising).text == f"{CALLSIGN}, roger"  # nothing new to say
 
     crossed = at(51.0, 2.3, feet=36000, heading=90)
     assert engine.tick(west, None, crossed).text == f"{CALLSIGN}, contact Eastland Control one three two decimal one"
