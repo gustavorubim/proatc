@@ -11,6 +11,7 @@ The essentials:
 - **Whole flights are the test that matters.** `tests/test_world.py` flies flights across a made-up world on every change. With X-Plane installed, `uv run proatc verify-flights --flights 300` flies real ones; run 1,000 before a release. Faults found in flight have all been in how the station is found from the tuned frequency, which unit tests that pass the station in cannot see.
 - **With X-Plane installed,** `uv run proatc verify-data` runs the engine over hundreds of real airports.
 - **Nothing in the test suite flies the sim.** Say in the pull request what was and was not tried in a real flight.
+- **Kept flights:** `uv run proatc journals keep` turns the newest journal into a regression test (private, in `logs/regression/`, never in the repo); `uv run proatc journals check` replays them all and shows every answer that changed since a person accepted it. Run it before a release; `journals accept` once the changes are read.
 - **Releases:** publish the draft only after every build job has finished and its files are attached.
 - **The repository is public:** no keys, no personal identifiers, no planning notes. Stage files by name.
 - **The architecture rule:** the language model turns speech into an intent (`intents.py`). The rules engine (`engine.py`, `ifr.py`, `vfr.py`) decides every reply from X-Plane's own data. Do not let the model issue a clearance.
