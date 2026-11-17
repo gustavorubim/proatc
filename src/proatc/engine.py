@@ -20,7 +20,7 @@ from . import chart, ifr, traffic, vfr
 from . import phraseology as say
 from .atis import Issue, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
-from .navdata import Airport, AirportDB, Station, bearing, distance_nm, prefer_airports
+from .navdata import Airport, AirportDB, Station, bearing, distance_nm, expect_station, prefer_airports
 from .taxi import (
     TaxiNetwork,
     aircraft_category,
@@ -102,6 +102,7 @@ class Flight:
     told_approach: bool = False
     told_sector: str | None = None  # last centre the flight was sent to
     approach_told_by: str | None = None  # the station that last said "contact approach"
+    left_sector: tuple | None = None  # (centre, lat, lon): the centre that handed the flight on, and where
     sector_ahead: str | None = None  # the centre the flight was sent to before reaching its boundary
     direct_to: str | None = None
     next_frequency: str | None = None  # the frequency of the last hand-off, until it is tuned
@@ -310,6 +311,10 @@ class Engine:
         station = self.db.station_of(airport, kind, bearing_from)
         if not station:
             return None
+        if raw is not None:
+            # Said to an aircraft in flight: on that frequency it is this station that answers, even where
+            # a centre or another airport shares it.
+            expect_station(station.khz, station.key)
         return station.callsign, say.frequency(station.khz), f"{station.khz / 1000:.3f}"
 
     def _greeting(self, station: Station) -> str:

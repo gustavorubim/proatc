@@ -198,6 +198,21 @@ def cmd_verify_data(config, count: int) -> int:
     return 1 if report.failures else 0
 
 
+def cmd_verify_flights(config, count: int, show: str | None) -> int:
+    from .flights import fly, pick_flights, shared_data, sweep_flights
+    from .navdata import AirportDB
+
+    db = AirportDB.open(config.sim.xplane_path)
+    if show:
+        problems, said = fly(db, shared_data(db), *show.upper().split("-")[:2])
+        print("\n".join(said))
+        print("problems:", problems or "none")
+        return 1 if problems else 0
+    report = sweep_flights(db, pick_flights(db, count), progress=print)
+    print(report.summary().replace(" airports,", " flights,", 1))
+    return 1 if report.failures else 0
+
+
 def main() -> int:
     from .config import load_config
     from .tts import ModelsMissing
@@ -224,6 +239,9 @@ def main() -> int:
     sub.add_parser("bench-intents", help="measure how well the language model understands a fixed set of calls (uses the model)")
     verify = sub.add_parser("verify-data", help="run the engine over many real airports of this X-Plane and report problems")
     verify.add_argument("--airports", type=int, default=300)
+    flights = sub.add_parser("verify-flights", help="fly whole flights between real airports worldwide and report what broke")
+    flights.add_argument("--flights", type=int, default=300)
+    flights.add_argument("--show", help="print one flight's radio work, e.g. KBOS-KIAD")
     server = sub.add_parser("serve", help="run the engine for the desktop app (started by the app itself)")
     server.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
@@ -259,6 +277,8 @@ def main() -> int:
                 return 1
             right, total, _ = bench_intents(Controller(config.llm, key))
             return 0 if right >= total * 0.9 else 1
+        if args.command == "verify-flights":
+            return cmd_verify_flights(config, args.flights, args.show)
         if args.command == "verify-data":
             return cmd_verify_data(config, args.airports)
         if args.command == "airport":
