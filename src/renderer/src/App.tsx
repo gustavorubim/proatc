@@ -533,6 +533,28 @@ export function App() {
   const [keyOpen, setKeyOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [mapOpen, setMapOpen] = useState(savedMapChoice)
+  const [wording, setWording] = useState(false)
+  // The proper call the engine worded: sent with its intent while the box still holds it unchanged.
+  const [worded, setWorded] = useState<{ text: string; intent: Record<string, unknown> | null } | null>(null)
+  const phrase = store.phrase
+  useEffect(() => {
+    if (!phrase) return
+    setWording(false)
+    if (phrase.text) {
+      setDraft(phrase.text)
+      setWorded({ text: phrase.text, intent: phrase.intent })
+    }
+  }, [phrase])
+  useEffect(() => {
+    if (!wording) return
+    const giveUp = setTimeout(() => setWording(false), 20000)
+    return () => clearTimeout(giveUp)
+  }, [wording])
+  const askWording = (): void => {
+    if (!draft.trim()) return
+    setWording(true)
+    send({ cmd: 'phrase', text: draft.trim() })
+  }
   const askedChart = useRef('')
   const logEnd = useRef<HTMLDivElement | null>(null)
 
@@ -589,7 +611,9 @@ export function App() {
   const submitDraft = (event: FormEvent): void => {
     event.preventDefault()
     if (!draft.trim()) return
-    send({ cmd: 'say', text: draft.trim() })
+    if (worded?.intent && draft.trim() === worded.text) send({ cmd: 'click', text: worded.text, intent: worded.intent })
+    else send({ cmd: 'say', text: draft.trim() })
+    setWorded(null)
     setDraft('')
   }
 
@@ -770,11 +794,20 @@ export function App() {
                 {store.transmitting ? 'Transmitting' : 'Hold to talk'}
               </button>
               <input
-                placeholder="Type a transmission and press Enter"
+                placeholder="Type a call, or what you want in your own words"
                 value={draft}
                 disabled={!ready}
                 onChange={(event) => setDraft(event.target.value)}
               />
+              <button
+                type="button"
+                className="word"
+                disabled={!ready || !draft.trim() || wording || draft.trim() === worded?.text}
+                title="Turn what you typed into the proper radio call. Nothing is sent until you press Send or say it"
+                onClick={askWording}
+              >
+                {wording ? 'Wording…' : 'Phraseology'}
+              </button>
               <button type="submit" className="primary" disabled={!ready || !draft.trim()}>
                 Send
               </button>

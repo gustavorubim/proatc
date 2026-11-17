@@ -159,6 +159,7 @@ export type EngineEvent =
   | { type: 'tx'; on: boolean }
   | { type: 'pilot'; text: string; source: 'voice' | 'typed' | 'clicked' | 'copilot' }
   | { type: 'coach'; text: string }
+  | { type: 'phrase'; said: string; text: string; intent: Record<string, unknown> | null; note: string }
   | { type: 'capture'; active: boolean }
   | { type: 'log_saved'; path: string }
   | { type: 'understood'; intent: string }
@@ -175,6 +176,7 @@ export type EngineMessage = EngineState | EngineEvent
 export type Command =
   | { cmd: 'ptt'; down: boolean }
   | { cmd: 'say'; text: string }
+  | { cmd: 'phrase'; text: string }
   | { cmd: 'click'; text: string; intent: Record<string, unknown> }
   | { cmd: 'set_key'; key: string }
   | { cmd: 'simbrief'; user: string }

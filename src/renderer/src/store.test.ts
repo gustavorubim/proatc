@@ -134,6 +134,33 @@ describe('store', () => {
     ])
   })
 
+  it('shows the proper call for what was typed, and keeps it for the entry box', () => {
+    const worded = feed([
+      {
+        type: 'phrase',
+        said: 'i want to go to the runway',
+        text: 'Luton Ground, Golf Alfa Bravo, request taxi',
+        intent: { intent: 'request_taxi' },
+        note: ''
+      }
+    ])
+    expect(worded.log.map((line) => [line.kind, line.text])).toEqual([
+      ['coach', 'Say: “Luton Ground, Golf Alfa Bravo, request taxi”']
+    ])
+    expect(worded.phrase).toEqual({
+      id: 1,
+      text: 'Luton Ground, Golf Alfa Bravo, request taxi',
+      intent: { intent: 'request_taxi' }
+    })
+    expect(worded.lastInstruction).toBeNull()
+    const refused = feed(
+      [{ type: 'phrase', said: 'pizza', text: '', intent: null, note: 'Ask the cabin crew.' }],
+      worded
+    )
+    expect(refused.log[1].text).toBe('Ask the cabin crew.')
+    expect(refused.phrase).toEqual({ id: 2, text: '', intent: null })
+  })
+
   it('fills the destination into a suggested call', () => {
     expect(fillDestination('Delivery, request I F R clearance to {destination}', ' Paris ')).toBe(
       'Delivery, request I F R clearance to Paris'

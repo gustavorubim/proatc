@@ -19,7 +19,7 @@ These links always give the newest version. [All releases](https://github.com/gu
 - **Real ATC, not a script.** Controllers use the sim's real frequencies, taxiways, SIDs, STARs, approaches and airspace. Nothing is made up.
 - **Airport map.** Your taxi route is highlighted on a map of the airport, with the runway to hold short of.
 - **Speak, click or type.** Every call you can make is also a button, so you never get stuck.
-- **Help when you need it.** "What do I say?" gives you the next call, and a copilot can do the radio for you.
+- **Help when you need it.** "What do I say?" gives you the next call, "Phraseology" turns what you type in your own words into the proper call, and a copilot can do the radio for you.
 - **Free.** Voices and speech recognition run on your computer. Understanding what you said uses your own [OpenRouter](https://openrouter.ai) key (about a cent per flight) or a free local model.
 
 ## Get started

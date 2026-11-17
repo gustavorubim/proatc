@@ -17,6 +17,7 @@ import threading
 import time
 from dataclasses import asdict
 
+from . import phrasing
 from .airspace import open_airspace
 from .airways import open_airways
 from .atis import AtisBook
@@ -313,6 +314,28 @@ class Session:
     def ask(self, what: str) -> None:
         """Queue a question for the instructor: 'explain' the last instruction, or 'what_next'."""
         self.jobs.put((what, None, None))
+
+    def phrase(self, wanted: str) -> None:
+        """Word what the pilot typed as the proper call. Answered with a "phrase" event; nothing is transmitted."""
+        threading.Thread(target=self._phrase, args=(wanted,), name="phrase", daemon=True).start()
+
+    def _phrase(self, wanted: str) -> None:
+        result: dict = {"note": "Tune a controller's frequency first; then I can word your call."}
+        try:
+            if self.bridge.connected:
+                raw, station, issue = self._station_and_issue()
+                if station is not None and station.kind != "atis":
+                    calls = self.engine.suggestions(station, issue, raw)
+                    ask = None
+                    if self.controller:
+                        ask = lambda system, user: self.controller.complete(system, user, max_tokens=160, temperature=0.0)  # noqa: E731
+                    result = phrasing.phrase(wanted, station.callsign, self.engine.opening(station, raw), calls, ask)
+        except LlmError as error:
+            result = {"note": str(error)}
+        except Exception as error:
+            result = {"note": f"That could not be worded: {type(error).__name__}: {error}"}
+        self.emit({"type": "phrase", "said": wanted.strip()[:500], "text": result.get("text", ""),
+                   "intent": result.get("intent"), "note": result.get("note", "")})  # fmt: skip
 
     def debrief(self) -> dict:
         """Review the radio work so far; with a language model, add the instructor's remarks."""

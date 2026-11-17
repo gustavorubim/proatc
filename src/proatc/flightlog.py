@@ -14,7 +14,7 @@ from pathlib import Path
 
 KEPT = 5000
 WITH_CONTEXT = ("pilot", "atc", "atis", "understood", "silent", "info", "error", "coach")
-SKIPPED = ("tx", "timings", "status", "settings", "log_saved", "chatter", "debrief", "capture")
+SKIPPED = ("tx", "timings", "status", "settings", "log_saved", "chatter", "debrief", "capture", "phrase")
 
 
 class FlightLog:

@@ -1037,6 +1037,12 @@ class Engine:
                     self._await_readback(reply, key)
             return reply
 
+    def opening(self, station: Station, raw: dict) -> str:
+        """How a call to this station begins: its name on first contact, then the callsign alone."""
+        with self.lock:
+            callsign = self._callsign(raw)
+            return f"{callsign}, " if station.key in self.flight.contacted else f"{station.callsign}, {callsign}, "
+
     def suggestions(self, station: Station, issue: Issue | None, raw: dict) -> list[dict]:
         """Calls the pilot could make right now, for the app's click-to-transmit buttons.
 
