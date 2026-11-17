@@ -113,6 +113,28 @@ def parse_taxi(lines: list[str]) -> TaxiNetwork:
     return net
 
 
+def use_airport_runway_names(net: TaxiNetwork, idents: list[str]) -> TaxiNetwork:
+    """Name the runways in a taxi network the way the airport does.
+
+    In the United States the airport calls a runway '4R' or '9' while its taxi network may say '04R/22L' or
+    '09/27'. Left as they are, no taxi route is ever found to such a runway, and a runway crossed on the way is
+    not recognised as one."""
+    names = {f"0{ident}": ident for ident in idents if len(ident) - len(ident.lstrip("0123456789")) == 1}
+    if not names:
+        return net
+
+    def renamed(name: str) -> str:
+        return "/".join(names.get(part, part) for part in name.split("/"))
+
+    net.runway_nodes = {renamed(name): nodes for name, nodes in net.runway_nodes.items()}
+    for graph in (net.edges, net.both_ways):
+        for edges in graph.values():
+            for edge in edges:
+                if edge.runway:
+                    edge.name = renamed(edge.name)
+    return net
+
+
 def _shortest(net: TaxiNetwork, graph: dict[int, list[Edge]], start: int, target_runway: str | None):
     """Dijkstra over taxiways only. Returns (cost, previous-step) maps."""
     cost = {start: 0.0}

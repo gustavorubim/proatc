@@ -609,3 +609,28 @@ def test_another_device_gets_the_page_and_pairs_with_the_code(tmp_path, monkeypa
 
 def test_spoken_helpers_used_by_the_new_calls():
     assert say.runway("09R") == "zero niner right" and say.taxiway("B1") == "Bravo one"
+
+
+def test_a_runway_the_airport_calls_9r_is_found_in_a_taxi_network_that_calls_it_09r(tmp_path):
+    # Found machine-flying gate to gate: at Boston, Dulles and JFK the airport calls a runway "4R" or "1C" while
+    # its taxi network says "04R/22L", and no taxi route was ever found to it.
+    from proatc.taxi import use_airport_runway_names
+
+    american = [line.replace(" 09R ", " 9R ").replace(" 09L ", " 9L ") if line.startswith("100 ") else line for line in CROSSING]
+    apt = tmp_path / "american.dat"
+    apt.write_text("\n".join(american), encoding="utf-8")
+    build_index(apt, tmp_path / "american.sqlite")
+    db = AirportDB(tmp_path / "american.sqlite")
+    airport = db.airport("EGXX")
+    assert [runway.end1 for runway in airport.runways] == ["9R", "9L"]
+    as_written = parse_taxi(db.record_lines(airport))
+    assert sorted(as_written.runway_nodes) == ["09L/27R", "09R/27L"]
+    assert route_to_runway(as_written, *APRON, "9L", (51.004, -1.02)) is None  # as it was
+
+    engine = Engine(db, seed=1, procedures=lambda ident: parse_cifp([]))
+    net = engine.network(airport)
+    assert sorted(net.runway_nodes) == ["9L/27R", "9R/27L"]
+    assert route_to_runway(net, *APRON, "9L", (51.004, -1.02)) is not None
+    to_27r = route_to_runway(net, *APRON, "27R", (51.004, -0.98))
+    assert to_27r.crossings == ["9R/27L"]  # the runway crossed on the way is still known as one
+    assert use_airport_runway_names(as_written, ["09L", "27R"]) is as_written  # nothing to rename: untouched
