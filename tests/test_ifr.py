@@ -282,6 +282,7 @@ def test_departure_centres_descent_and_handoff_to_approach(world):
     assert engine.tick(departure, ISSUE, at(51.0, -1.3, feet=9000)) is None  # well below the cleared level
     step = engine.tick(departure, ISSUE, at(51.0, -1.2, feet=13500))
     assert step.text == f"{CALLSIGN}, climb flight level two four zero" and step.expect == {"altitude": 24000}
+    engine.flight.pending = None  # read back: the next instruction waits for it
 
     passing = at(51.0, -0.2, feet=18000, heading=90)
     handoff = engine.tick(departure, ISSUE, passing)
@@ -292,6 +293,7 @@ def test_departure_centres_descent_and_handoff_to_approach(world):
     assert engine.handle(Intent("check_in"), west, None, passing).text == (
         f"{CALLSIGN}, Westland Control, identified, climb flight level three six zero"
     )
+    engine.flight.pending = None  # read back: the next instruction waits for it
     cruising = at(51.0, 1.0, feet=36000, heading=90)
     assert engine.tick(west, None, cruising) is None  # inside the sector, far from the descent point
     assert engine.handle(Intent("check_in"), west, None, cruising).text == f"{CALLSIGN}, roger"  # nothing new to say
@@ -305,11 +307,14 @@ def test_departure_centres_descent_and_handoff_to_approach(world):
     descent = engine.tick(east, None, at(51.0, 2.2, feet=36000, heading=90))
     assert descent.text == f"{CALLSIGN}, descend flight level two six zero, Delta one Echo arrival"
     assert descent.expect == {"altitude": 26000} and engine.flight.star == "DELT1E"
+    engine.flight.pending = None  # read back: the next instruction waits for it
     assert engine.tick(east, None, at(51.0, 3.0, feet=30000, heading=90)) is None
     assert engine.tick(east, None, at(51.0, 3.2, feet=27500, heading=90)).text == f"{CALLSIGN}, descend flight level one six zero"
+    engine.flight.pending = None  # read back: the next instruction waits for it
     assert (
         engine.tick(east, None, at(51.0, 3.6, feet=17000, heading=90)).text == f"{CALLSIGN}, descend flight level one three zero"
     )
+    engine.flight.pending = None  # read back: the next instruction waits for it
     assert engine.tick(east, None, at(51.0, 3.9, feet=13200, heading=90)) is None  # at the hand-off level
 
     near = at(51.0, 4.3, feet=13000, heading=90)
@@ -328,6 +333,7 @@ def test_vectors_to_the_ils_and_handoff_to_tower(world):
     assert first.text == (
         f"{CALLSIGN}, Eastfield Approach, identified, descend flight level one one zero, expect I L S approach runway two seven"
     )
+    engine.flight.pending = None  # read back: the next instruction waits for it
     assert engine.tick(approach, ISSUE, at(51.1, 4.5, feet=11000, heading=90)) is None  # still outside vectoring range
 
     abeam = at(51.1, 5.0, feet=7000, heading=90)
@@ -348,6 +354,7 @@ def test_vectors_to_the_ils_and_handoff_to_tower(world):
     assert base.text == (
         f"{CALLSIGN}, turn right heading one eight zero, descend altitude two thousand five hundred feet, reduce speed one eight zero knots"
     )
+    engine.flight.pending = None  # read back: the next instruction waits for it
     final = engine.tick(approach, ISSUE, at(51.05, 5.75, feet=2500, heading=180))
     assert final.text == (
         f"{CALLSIGN}, turn right heading two four zero, one five miles from touchdown, cleared I L S approach runway two seven, "
@@ -355,8 +362,11 @@ def test_vectors_to_the_ils_and_handoff_to_tower(world):
     )
     assert final.expect == {"heading": 240, "runway": "27"}
     assert engine.summary()["approach"] == "I L S runway 27"
-    assert [item["label"] for item in engine.suggestions(approach, ISSUE, at(51.03, 5.72, feet=2500, heading=240))][:3] == [
-        "Read back", "Check in", "Established"]  # fmt: skip
+    # "Report established" is asked: its answer comes next to the readback, which stays the call to make first.
+    offered = engine.suggestions(approach, ISSUE, at(51.03, 5.72, feet=2500, heading=240))
+    assert [item["label"] for item in offered][:3] == ["Read back", "Established", "Request vectors"]
+    assert [item["label"] for item in offered if item.get("primary")] == ["Read back"]
+    engine.flight.pending = None  # read back: the next instruction waits for it
 
     assert engine.tick(approach, ISSUE, at(51.03, 5.72, feet=2500, heading=240)) is None  # not on the localiser yet
     on_ils = at(51.0, 5.62, feet=2500, heading=270)
@@ -488,7 +498,7 @@ def test_direct_to_a_filed_waypoint(world):
     assert engine.handle(Intent("request_direct", fix="delta"), west, None, cruising).text == f"{CALLSIGN}, route direct Delta"
     assert engine.summary()["direct_to"] == "DELTA"
     assert "Request direct DELTA" not in [item["label"] for item in engine.suggestions(west, None, cruising)]
-    assert engine.handle(Intent("request_direct", fix="NOWHR"), west, None, cruising) is None  # not on the route
+    assert engine.handle(Intent("request_direct", fix="NOWHR"), west, None, cruising).text == f"{CALLSIGN}, unable direct"
 
 
 def test_airline_callsign_from_the_filed_plan(world):
@@ -523,7 +533,8 @@ def test_without_a_plan_the_centre_still_answers_and_grants_requests(world):
         == f"{CALLSIGN}, descend flight level one zero zero"
     )
     assert engine.handle(Intent("other"), west, None, cruising) is None
-    assert engine.handle(Intent("check_in"), west, None, at(51.0, 0.0, on_ground=True)) is None  # centres do not work the ground
+    # Centres do not work the ground: a call from there is acknowledged and nothing more.
+    assert engine.handle(Intent("check_in"), west, None, at(51.0, 0.0, on_ground=True)).text == f"{CALLSIGN}, roger"
 
 
 def test_simbrief_user_defaults_to_the_env_file(tmp_path, monkeypatch):

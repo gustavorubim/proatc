@@ -196,7 +196,7 @@ def test_approach_holds_an_arrival_then_vectors_it(tmp_path):
         f"{CALLSIGN}, leave the hold, turn right heading zero seven zero, descend altitude four thousand two hundred feet"
     )
     assert engine.flight.arrival.hold is None and engine.summary().get("holding") is None
-    assert engine.handle(Intent("check_in"), approach, ISSUE, at_fix) is None  # one hold per arrival
+    assert engine.handle(Intent("check_in"), approach, ISSUE, at_fix).text == f"{CALLSIGN}, roger"  # one hold per arrival
 
 
 def test_a_hold_on_request_lasts_until_the_pilot_is_ready(tmp_path):
@@ -216,7 +216,7 @@ def test_a_hold_on_request_lasts_until_the_pilot_is_ready(tmp_path):
     assert engine.tick(approach, ISSUE, at(51.0, 4.95, feet=11000, heading=270)) is None  # no time limit
     ready = engine.handle(Intent("cancel_hold"), approach, ISSUE, at(51.0, 4.95, feet=11000, heading=270))
     assert ready.text.startswith(f"{CALLSIGN}, leave the hold, turn right heading zero seven zero")
-    assert engine.handle(Intent("cancel_hold"), approach, ISSUE, inbound) is None  # not holding any more
+    assert engine.handle(Intent("cancel_hold"), approach, ISSUE, inbound).text == f"{CALLSIGN}, roger"  # not holding any more
 
 
 def test_no_published_hold_means_no_hold(tmp_path):
@@ -292,7 +292,8 @@ def test_wind_check_destination_weather_and_deviations(tmp_path):
         f"{CALLSIGN}, Eastfield weather, wind two five zero degrees two zero gusting three two knots, "
         "visibility four thousand eight hundred metres, cloud broken one thousand two hundred feet, Q N H niner niner five hectopascals"
     )
-    assert engine.handle(Intent("request_weather"), west, None, {**cruising, "wx_source": 0}) is None  # no report to give
+    no_report = engine.handle(Intent("request_weather"), west, None, {**cruising, "wx_source": 0})
+    assert no_report.text == f"{CALLSIGN}, unable weather information"  # no report to give, and the sim's weather unknown
 
     labels = [s["label"] for s in engine.suggestions(west, None, cruising)]
     assert {"Deviate left", "Deviate right", "Destination weather"} <= set(labels)
@@ -301,7 +302,7 @@ def test_wind_check_destination_weather_and_deviations(tmp_path):
     )
     assert "Clear of weather" in [s["label"] for s in engine.suggestions(west, None, cruising)]
     assert engine.handle(Intent("clear_of_weather"), west, None, cruising).text == f"{CALLSIGN}, roger, resume own navigation"
-    assert engine.handle(Intent("clear_of_weather"), west, None, cruising) is None
+    assert engine.handle(Intent("clear_of_weather"), west, None, cruising).text == f"{CALLSIGN}, roger"  # not deviating
 
 
 def test_a_new_atis_is_announced_to_an_aircraft_on_frequency(tmp_path):

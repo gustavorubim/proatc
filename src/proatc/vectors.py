@@ -21,6 +21,11 @@ VECTOR_RANGE_NM = 30  # further out than this, only a descent is given
 INTERCEPT_DEG = 30
 DOGLEG_DEG = 45
 DOGLEG_BEYOND_NM = 4  # this much further out than the joining point, a dogleg replaces the base leg
+LATEST_JOIN_NM = 2  # an intercept joins final no closer in than this inside where it is usually joined
+BASE_DRIFT_NM = 1  # on a base leg that drifted in, one more mile: the heading is rounded, the turn takes room
+# A 30 degree intercept from CLOSE_NM off the centreline meets it this far further in: base is turned that much
+# further out, so that the intercept joins final where it should, not a mile from the runway far above the path.
+BASE_BEYOND_NM = CLOSE_NM / math.tan(math.radians(INTERCEPT_DEG)) - LATEST_JOIN_NM
 
 
 @dataclass
@@ -45,6 +50,7 @@ class Vector:
     stage: str  # "descend", "downwind", "base" or "intercept"
     heading_true: float | None
     altitude_ft: int
+    again: bool = False  # turned out from a base leg for a new one
 
 
 def _round_up(feet: float, step: int = 1000) -> int:
@@ -53,30 +59,41 @@ def _round_up(feet: float, step: int = 1000) -> int:
 
 def next_vector(
     position: Position, course_true: float, platform_ft: int, current_ft: float, safe_ft: int = 0,
-    final_nm: float = FINAL_NM, extend: bool = False, inbound: bool = False,
+    final_nm: float = FINAL_NM, extend: bool = False, inbound: bool = False, on_base: bool = False, vectored: bool = False,
 ) -> Vector:  # fmt: skip
     """The instruction that fits where the aircraft is now.
 
     `safe_ft` is the minimum safe altitude around the airport: nothing above the published
     approach's own joining altitude is given below it. `final_nm` is where final is joined.
     `extend` keeps the aircraft on its downwind leg (traffic on final). `inbound` says it has not
-    flown a downwind leg: it is coming from outside, and may close the centreline on a dogleg.
+    flown a downwind leg: it is coming from outside, and may close the centreline on a dogleg. `on_base` says it
+    is flying the base leg it was given, `vectored` that it is on a downwind or base leg already.
     """
     pattern_ft = max(platform_ft + 1000, int(math.ceil(safe_ft / 100) * 100))
     reciprocal = (course_true + 180) % 360
     toward = 1 if position.side == "left" else -1  # sign of the turn, from the course, that points at the centreline
 
-    if position.distance_nm > VECTOR_RANGE_NM:
+    if position.distance_nm > VECTOR_RANGE_NM and not vectored:
+        # Not yet vectored: only a descent this far out. One already on a downwind leg is turned onto base however
+        # wide the leg is, or it would fly on with nothing more said.
         # Roughly three degrees: 300 ft for every mile beyond the point where final is joined.
         target = platform_ft + 300 * (position.distance_nm - final_nm - 5)
         return Vector("descend", None, max(pattern_ft, min(_round_up(target), _round_up(current_ft))))
 
-    far_enough = position.along_nm >= final_nm - 2
-    if far_enough and position.cross_nm <= CLOSE_NM:
+    far_enough = position.along_nm >= final_nm + BASE_BEYOND_NM
+    latest = final_nm - LATEST_JOIN_NM - (BASE_DRIFT_NM if on_base else 0)
+    if position.cross_nm <= CLOSE_NM and joins_at(position) >= latest:
         turn = 0 if position.cross_nm < 0.7 else INTERCEPT_DEG
         return Vector("intercept", (course_true + toward * turn) % 360, platform_ft)
+    if on_base and position.along_nm < latest:
+        # Drifted in so far that no intercept from here would join final in time: out again, for a new base.
+        drift = 20 if position.cross_nm < 4 else 0
+        return Vector("downwind", (reciprocal + toward * drift) % 360, pattern_ft, again=True)
     if far_enough and not extend:
-        dogleg = inbound and position.along_nm >= final_nm + DOGLEG_BEYOND_NM
+        # At 45 degrees the aircraft comes in as far as it is from the centreline: far off to the side, that would
+        # take it past the joining point, so it gets a base leg instead.
+        room = position.along_nm - position.cross_nm >= final_nm
+        dogleg = inbound and position.along_nm >= final_nm + BASE_BEYOND_NM + DOGLEG_BEYOND_NM and room
         return Vector("base", (course_true + toward * (DOGLEG_DEG if dogleg else 90)) % 360, platform_ft)
     if far_enough:
         return Vector("downwind", reciprocal, pattern_ft)
@@ -84,6 +101,13 @@ def next_vector(
     # centreline first if the aircraft is close to it so there is room for the base turn.
     drift = 20 if position.cross_nm < 4 else 0
     return Vector("downwind", (reciprocal + toward * drift) % 360, pattern_ft)
+
+
+def joins_at(position: Position) -> float:
+    """How far out a 30 degree intercept given now meets the final approach course (straight in when nearly on it)."""
+    if position.cross_nm < 0.7:
+        return position.along_nm
+    return position.along_nm - position.cross_nm / math.tan(math.radians(INTERCEPT_DEG))
 
 
 def turn_direction(current: float, target: float) -> str:

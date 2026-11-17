@@ -5,7 +5,8 @@ another program or a web page on this machine cannot key the microphone or chang
 
 Engine -> app: every event from events.py, plus a "state" message about once a second.
 App -> engine: {"cmd": "ptt", "down": bool}, {"cmd": "say", "text": str},
-               {"cmd": "click", "text": str, "intent": {...}}, {"cmd": "set_key", "key": str}
+               {"cmd": "click", "text": str, "intent": {...}}, {"cmd": "set_key", "key": str},
+               {"cmd": "sound_check"}, {"cmd": "sound_check_answer", "heard": bool | None}, {"cmd": "report", "hide": bool}
 
 The view for other devices (a phone or tablet on the same network) is a second listener, off
 until it is switched on in the settings. It serves the app's own page over HTTP and accepts the
@@ -39,7 +40,7 @@ from .intents import Intent
 from .navdata import AirportDB, distance_nm
 from .radio import current_station, monitored, observe
 from .voice_loop import Session
-from .xpbridge import SimUnavailable, describe, magnetic_variation
+from .xpbridge import SimUnavailable, describe, magnetic_variation, same_channel
 
 BACKLOG = 200
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I: the code is typed on a phone
@@ -145,6 +146,8 @@ def build_state(session: Session, db: AirportDB) -> dict:
         "map": None,
         "settings": {"values": editable_values(config), "options": session.options, "capturing": session.capturing},
         "cost": {**session.usage, "cost": round(session.usage["cost"], 5)},
+        "computer": session.computer,
+        "sound_check": {"running": session._checking, "last": session.last_sound_check},
     }
     if session.joystick:
         state["settings"]["options"] = {**session.options, "joysticks": list(session.joystick.names)}
@@ -217,10 +220,10 @@ def build_state(session: Session, db: AirportDB) -> dict:
         feet = raw.get("elevation_m", 0.0) / 0.3048
         inside = [space for space in index.at(raw["lat"], raw["lon"], feet) if space.kind in CONTROLLED or space.area <= 1.0]
         state["airspace"] = [space.describe() for space in inside[:2]]
-    # A hand-off frequency stops being offered once it is tuned.
-    pending = session.engine.flight.next_frequency
-    if pending and khz and abs(float(pending) * 1000 - khz) <= 5:
-        session.engine.flight.next_frequency = None
+    # A hand-off frequency stops being offered once it is tuned. The engine keeps it until a call is made on
+    # it (the copilot checks in on it): this thread only reads it.
+    pending = state["flight"].get("next_frequency")
+    if pending and khz and same_channel(int(round(float(pending) * 1000)), khz):
         state["flight"].pop("next_frequency", None)
     state["status"]["can_tune"] = config.sim.allow_tuning
     if station and station.kind != "atis":
@@ -334,9 +337,18 @@ class AppServer:
                 session.set_key(key)
                 self.emit({"type": "status", "text": "OpenRouter key saved."})
             return
+        if name == "report":
+            # Before the engine is ready too: a report is most wanted when something went wrong at start.
+            session.write_report(command.get("hide") is True)
+            return
         if not session.ready:
             return
-        if name == "simbrief":
+        if name == "sound_check":
+            session.start_sound_check()
+        elif name == "sound_check_answer":
+            heard = command.get("heard")
+            session.answer_sound_check(heard if isinstance(heard, bool) else None)
+        elif name == "simbrief":
             user = str(command.get("user", "")).strip()
             plan = fetch_simbrief(user)
             save_settings({"simbrief_user": user})

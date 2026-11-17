@@ -47,7 +47,7 @@ def stand(name: str) -> str:
     compact = name.replace(" ", "").upper()
     if len(compact) <= 5 and compact.isalnum() and compact.isascii():
         return " ".join(PHONETIC[c] for c in compact)
-    return name.title()
+    return " ".join(name.split()).title()  # "Ga Ramp  3" in the scenery: one space when said
 
 
 def join(items: list[str]) -> str:

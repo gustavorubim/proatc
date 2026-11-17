@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from .navdata import bearing, distance_nm, latlon
 
 CROSSING_PENALTY_M = 3000  # prefer routes that do not cross another runway
+STAND_REACH_M = 200  # a stand this close to a taxiway node can be taxied to
+UNNAMED = ("none", "null")  # what some scenery tools write for a taxiway with no name
 FULL_LENGTH_M = 400  # runway entries this close to the threshold count as full-length departures
 
 
@@ -56,6 +58,9 @@ class TaxiNetwork:
                 return name
         return None
 
+    def runways_of(self, node: int, excluding: str | None = None) -> list[str]:
+        return [name for name, nodes in self.runway_nodes.items() if node in nodes and name != excluding]
+
 
 @dataclass
 class Route:
@@ -79,7 +84,9 @@ def parse_taxi(lines: list[str]) -> TaxiNetwork:
             elif line.startswith("1202 "):
                 t = line.split(None, 5)
                 if len(t) >= 5:
-                    pending.append((int(t[1]), int(t[2]), t[3] == "twoway", t[4] == "runway", t[5].strip() if len(t) > 5 else ""))
+                    name = t[5].strip() if len(t) > 5 else ""
+                    name = "" if name.lower() in UNNAMED else name  # not "via November Oscar November Echo"
+                    pending.append((int(t[1]), int(t[2]), t[3] == "twoway", t[4] == "runway", name))
             elif line.startswith("1300 "):
                 t = line.split(None, 6)
                 if len(t) >= 6:
@@ -129,7 +136,6 @@ def _shortest(net: TaxiNetwork, graph: dict[int, list[Edge]], start: int, target
 
 
 def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str | None) -> Route:
-    crossings: list[str] = []
     steps: list[tuple[str, float]] = []  # (taxiway, direction of travel) per edge, goal first
     path = [goal]
     distance = 0.0
@@ -138,19 +144,16 @@ def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str
         prior, edge = previous[node]
         distance += edge.length_m
         steps.append((edge.name, bearing(*net.nodes[prior], *net.nodes[node])))
-        crossed = net.runway_of(node, excluding=target_runway) if node != goal else None
-        if crossed and crossed not in crossings:
-            crossings.append(crossed)
         node = prior
         path.append(node)
     steps.reverse()
-    crossings.reverse()
     path.reverse()
+    # In the order the runways are met, every runway at each node: where two runways cross, both are crossed.
     crossing_index: dict[str, int] = {}
     for index, node in enumerate(path[1:-1], start=1):
-        crossed = net.runway_of(node, excluding=target_runway)
-        if crossed and crossed not in crossing_index:
-            crossing_index[crossed] = index
+        for crossed in net.runways_of(node, excluding=target_runway):
+            crossing_index.setdefault(crossed, index)
+    crossings = list(crossing_index)
     names: list[str] = []
     turns: list[str] = []
     heading = None
@@ -165,7 +168,9 @@ def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str
 
 
 def _route(net: TaxiNetwork, start: int, goals: dict[int, float], target_runway: str | None) -> Route | None:
-    """Best route to any goal; `goals` maps node -> extra cost. One-way rules are dropped only if they block every route."""
+    """Best route to any goal; `goals` maps node -> extra cost. One-way rules are dropped only if they block every route.
+    A route is never made along a runway (a backtrack needs its own clearance from the tower, which is not modelled):
+    where the taxiways alone do not connect, there is no route."""
     for graph in (net.edges, net.both_ways):
         cost, previous = _shortest(net, graph, start, target_runway)
         reachable = [(cost[g] + extra, g) for g, extra in goals.items() if g in cost]
@@ -229,8 +234,15 @@ def assign_stand(net: TaxiNetwork, category: str, airline: str | None, near: tup
     ):
         if pool:
             nearest = sorted(pool, key=lambda p: distance_nm(*near, p.lat, p.lon))[:6]
-            return rng.choice(nearest)
+            # A stand out on an apron the taxiway network does not come near cannot be taxied to: one that it does.
+            served = [p for p in nearest if _reaches(net, p)]
+            return rng.choice(served or nearest)
     return None
+
+
+def _reaches(net: TaxiNetwork, stand: Parking) -> bool:
+    node = net.nearest_node(stand.lat, stand.lon)
+    return node is not None and distance_nm(stand.lat, stand.lon, *net.nodes[node]) * 1852 <= STAND_REACH_M
 
 
 def route_to_point(net: TaxiNetwork, lat: float, lon: float, target: tuple[float, float]) -> Route | None:

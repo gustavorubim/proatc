@@ -109,10 +109,20 @@ describe('store', () => {
       say_again: 0,
       findings: [{ time: '10:02:11', kind: 'readback', text: 'Readback corrected by the controller', said: '' }],
       score: 94,
-      verdict: 'Good radio work, with a few things to tidy up.'
+      verdict: 'Good radio work, with a few things to tidy up.',
+      health: [
+        {
+          time: '10:31:02',
+          kind: 'handoff_missed',
+          title: 'Hand-off not followed',
+          text: 'Handed to Westfield Approach on 128.525, which was not tuned within two minutes.',
+          detail: 'station: Eastland Center; frequency: 128.525'
+        }
+      ]
     }
     const open = feed([debrief])
     expect(open.debrief?.score).toBe(94)
+    expect(open.debrief?.health[0].title).toBe('Hand-off not followed')
     expect(open.log).toHaveLength(0)
     expect(reduce(open, { type: 'close_debrief' }).debrief).toBeNull()
 
@@ -159,6 +169,63 @@ describe('store', () => {
     )
     expect(refused.log[1].text).toBe('Ask the cabin crew.')
     expect(refused.phrase).toEqual({ id: 2, text: '', intent: null })
+  })
+
+  it('follows the sound check: one answer per question, and the verdict in the log', () => {
+    expect(initialStore.soundCheck).toBeNull()
+    const asking = feed([
+      { type: 'sound_check', state: 'running', step: 1, total: 5, title: 'The first radio', text: 'Speaking…' },
+      {
+        type: 'sound_check',
+        state: 'question',
+        step: 1,
+        total: 5,
+        title: 'The first radio',
+        text: 'Played on Desk speakers',
+        question: 'Did you hear the controller?'
+      }
+    ])
+    expect(asking.soundCheck?.state).toBe('question')
+    expect(asking.log).toEqual([]) // the prompts are not part of the radio log
+    const answered = reduce(asking, { type: 'sound_check_answered' })
+    expect(answered.soundCheck?.state).toBe('running')
+    expect(answered.soundCheck?.question).toBeUndefined()
+    expect(reduce(answered, { type: 'sound_check_answered' })).toBe(answered) // a second click answers nothing
+    expect(reduce(answered, { type: 'close_sound_check' })).toBe(answered) // it cannot be closed while it runs
+
+    const done = feed(
+      [
+        {
+          type: 'sound_check',
+          state: 'done',
+          verdict: 'Sound check found 1 problem: the microphone heard nothing.',
+          steps: [{ title: 'The microphone', text: 'It heard nothing.', answer: true, problems: ['silent'] }]
+        }
+      ],
+      answered
+    )
+    expect(done.log.map((line) => [line.kind, line.text])).toEqual([
+      ['note', 'Sound check found 1 problem: the microphone heard nothing.']
+    ])
+    expect(reduce(done, { type: 'close_sound_check' }).soundCheck).toBeNull()
+
+    const refused = feed([{ type: 'sound_check', state: 'refused', text: 'It would talk over your flight.' }])
+    expect(refused.soundCheck?.text).toBe('It would talk over your flight.')
+    expect(refused.log).toEqual([])
+    expect(reduce(refused, { type: 'close_sound_check' }).soundCheck).toBeNull()
+  })
+
+  it('keeps the problem report to show it and the issue link', () => {
+    expect(initialStore.report).toBeNull()
+    const saved = feed([
+      { type: 'report_saved', path: '/data/logs/reports/proatc-report-20261117-120000.zip', issue: 'https://x/new' }
+    ])
+    expect(saved.report).toEqual({
+      path: '/data/logs/reports/proatc-report-20261117-120000.zip',
+      issue: 'https://x/new'
+    })
+    expect(saved.log[0].text).toBe('Problem report saved: /data/logs/reports/proatc-report-20261117-120000.zip')
+    expect(reduce(saved, { type: 'close_report' }).report).toBeNull()
   })
 
   it('fills the destination into a suggested call', () => {

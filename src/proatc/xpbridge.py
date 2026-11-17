@@ -75,6 +75,30 @@ def tuned_khz(state: dict) -> int | None:
     return int(value) if value else None
 
 
+# Where a channel name lies in its 25 kHz block, in Hz. With 8.33 kHz spacing a block holds the 25 kHz name
+# (.000) and three 8.33 kHz names: .005 (the same frequency as .000), .010 and .015. .020 names nothing; it is
+# taken at face value, between .015 and the next block's .025/.030.
+_IN_BLOCK_HZ = {0: 0, 5: 0, 10: 8333, 15: 16667, 20: 20000}
+
+
+def channel_hz(khz: int) -> int:
+    """The frequency, in Hz, of a channel name given in kHz (118425 for 118.425)."""
+    khz = int(round(khz))
+    return (khz - khz % 25) * 1000 + _IN_BLOCK_HZ.get(khz % 25, (khz % 25) * 1000)
+
+
+def same_channel(wanted_khz: int | float | None, reported_khz: int | float | None) -> bool:
+    """Whether the radio reporting `reported_khz` is on the channel asked for as `wanted_khz`.
+
+    A sim snaps a frequency to the nearest 8.33 kHz channel, and reports its name, which may not be the one
+    that was asked for: 118.420 comes back as 118.415, 118.425 or 118.430, all within 5 kHz of it. The names
+    themselves can be 5 kHz apart and the same channel (118.100 and 118.105), or 5 kHz apart and different
+    channels (118.105 and 118.110): names are compared by the frequency they stand for."""
+    if not wanted_khz or not reported_khz:
+        return False
+    return abs(channel_hz(wanted_khz) - channel_hz(reported_khz)) <= 5000
+
+
 def transmit_radio(state: dict) -> int:
     """The COM radio selected for transmitting: 1 or 2."""
     return 2 if state.get("com_selection") == 7 else 1

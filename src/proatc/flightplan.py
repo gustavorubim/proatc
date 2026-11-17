@@ -71,8 +71,12 @@ def fetch_simbrief(user: str) -> FlightPlan:
     params = {"json": "1", "userid" if user.isdigit() else "username": user}
     try:
         response = httpx.get(SIMBRIEF_URL, params=params, timeout=20, follow_redirects=True)
+    # httpx's own messages can quote the request, username and all: what went wrong is said in plain words,
+    # since the message is shown, written to the journal and saved with the log.
+    except httpx.TimeoutException as error:
+        raise PlanError("SimBrief did not answer in time. Try again in a moment.") from error
     except httpx.HTTPError as error:
-        raise PlanError(f"SimBrief could not be reached: {error}") from error
+        raise PlanError("SimBrief could not be reached. Check the internet connection.") from error
     if response.status_code != 200:
         raise PlanError(f"SimBrief returned {response.status_code}. Check the username, and that a flight is planned.")
     try:

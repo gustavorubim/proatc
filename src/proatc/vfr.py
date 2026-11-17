@@ -18,18 +18,17 @@ own data (apt.dat row 1101). These are functions over the Engine, like ifr.py.
 from __future__ import annotations
 
 import math
-import re
 
 from . import phraseology as say
 from . import traffic
 from .airspace import CONTROLLED, SPECIAL, Airspace, fallback_zone
 from .atis import uses_faa_style
-from .navdata import Airport, bearing, distance_nm
+from .navdata import INFORMATION_LABEL, Airport, bearing, distance_nm
 from .vectors import locate
 
 COMPASS = ["north", "north east", "east", "south east", "south", "south west", "west", "north west"]
 CLASS_WORD = {"B": "Bravo", "C": "Charlie", "D": "Delta"}
-INFORMATION = re.compile(r"\bAFIS\b|\bInfo(rmation)?\b|\bRadio\b|\bFISO?\b", re.I)
+INFORMATION = INFORMATION_LABEL  # a tower or unicom frequency labelled this way gives information only
 STRAIGHT_IN_BEYOND_NM = 2.0
 AHEAD_NM = 6
 SPECIAL_MAX_AREA = 1.0  # square degrees: larger restricted and danger areas are not called
@@ -132,7 +131,8 @@ def ctaf(engine, intent, station, issue, raw, variation, callsign, kind: str):
         flight.runway = active[0]
     if not flight.rules:
         flight.rules = "VFR"
-    if kind == "unicom" and intent.intent in ("request_weather", "radio_check", "initial_call"):
+    # An operator, not a controller: a question of any kind gets the airport advisory.
+    if kind == "unicom" and intent.intent in ("request_weather", "radio_check", "initial_call", "request_information"):
         if intent.intent == "radio_check":
             return Reply(f"{callsign}, {place} unicom, loud and clear")
         faa = uses_faa_style(airport.ident)

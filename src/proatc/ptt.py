@@ -53,3 +53,7 @@ class PushToTalk:
 
     def stop(self) -> None:
         self._listener.stop()
+
+    def listening(self) -> bool:
+        """Whether the keyboard listener is running. It stops by itself where it cannot work."""
+        return self._listener.is_alive()

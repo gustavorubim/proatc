@@ -136,7 +136,7 @@ def departure(tmp_path):
 
 def test_sid_crossings_are_judged_by_their_kind_and_their_speed(tmp_path):
     engine, radar = departure(tmp_path)
-    assert engine.flight.sid == "WEST2A" and len(engine.flight.sid_path) == 5
+    assert engine.flight.sid == "WEST2A" and len(engine.flight.sid_path) == 4  # its waypoints only: no line from the airport
     assert engine.tick(radar, ISSUE, {**at(51.0, -1.1, feet=2400), "ias_kt": 200}) is None  # above 2000: fine
     too_high = engine.tick(radar, ISSUE, {**at(51.0, -1.3, feet=6000), "ias_kt": 210})
     assert too_high.text == f"{CALLSIGN}, you were to cross Wmid at or below altitude five thousand feet"
@@ -155,22 +155,33 @@ def test_a_flight_that_leaves_its_sid_is_asked_once(tmp_path):
     clock = [0.0]
     engine.now = lambda: clock[0]
     off = {**at(51.12, -1.45, feet=7000), "ias_kt": 250}  # seven miles north of the track
+    # Found on a real flight out of Boston: the departure began on runway heading, then turned to intercept,
+    # and the controller called it "six miles off the departure track" before it had reached the track.
+    engine.flight.pending = None  # the climb was read back
+    clock[0] = 500.0
+    assert engine.tick(radar, ISSUE, off) is None
+    clock[0] = 700.0
+    assert engine.tick(radar, ISSUE, off) is None and engine.flight.on_track == set()  # not on it yet: not "off" it
+    on_it = {**at(51.005, -1.2, feet=6000), "ias_kt": 250}
+    clock[0] = 900.0
+    assert engine.tick(radar, ISSUE, on_it) is None and engine.flight.on_track == {"WEST2A"}  # joined: watched from now
+    clock[0] = 1000.0
     assert engine.tick(radar, ISSUE, off) is None  # only just noticed
-    clock[0] = 50.0
+    clock[0] = 1050.0
     asked = engine.tick(radar, ISSUE, off)
     assert (
         asked.text == f"{CALLSIGN}, you appear to be seven miles off the departure track, confirm you are following the departure"
     )
     assert asked.event == "off_route"
-    clock[0] = 200.0
+    clock[0] = 1200.0
     assert engine.tick(radar, ISSUE, off) is None  # once
     # A flight on a direct routing, or deviating around weather, is not on the SID any more.
     engine, radar = departure(tmp_path)
     engine.now = lambda: clock[0]
     engine.flight.direct_to = "BRAVO"
-    clock[0] = 300.0
+    clock[0] = 1300.0
     engine.tick(radar, ISSUE, off)
-    clock[0] = 400.0
+    clock[0] = 1400.0
     assert engine.tick(radar, ISSUE, off) is None
 
 
@@ -226,6 +237,45 @@ def test_an_rnav_approach_is_flown_from_its_initial_fix_not_vectored(tmp_path):
     _, engine, approach, _ = make(tmp_path, east=[line for line in STAR if line.startswith("APPCH")], navfix=FIXES)
     close = engine.handle(Intent("check_in"), approach, WESTERLY, at(51.1, 5.45, feet=4000, heading=90))
     assert "heading" in close.text and "direct" not in close.text
+
+
+def test_past_the_initial_fix_the_published_descent_is_not_called_a_level_bust_but_low_is_still_low(tmp_path):
+    # Found machine-flying gate to gate: cleared via the initial fix at 4,000 ft, the aircraft followed the
+    # procedure down past the fix and the controller said "check your level, cleared four thousand feet".
+    _, engine, approach, _ = make(tmp_path, east=[line for line in STAR if line.startswith("APPCH")], navfix=FIXES)
+    engine.handle(Intent("check_in"), approach, WESTERLY, at(51.3, 6.2, feet=7000, heading=230))
+    engine.flight.pending = None
+    before_fix = {**at(51.3, 5.95, feet=3500, heading=230), "vs_fpm": -800.0}
+    assert "check your level" in engine.tick(approach, WESTERLY, before_fix).text  # not yet on the procedure
+    engine.flight.bust_called_for = None
+    past_fix = {**at(51.08, 5.68, feet=3200, heading=230), "vs_fpm": -800.0}  # between the fix and the final segment
+    assert engine.tick(approach, WESTERLY, past_fix) is None
+    # Reached once is reached for good, wherever the procedure's legs then lead.
+    assert engine.flight.arrival.via_reached
+    engine.flight.bust_called_for = None
+    curving = {**at(51.25, 5.55, feet=3000, heading=180), "vs_fpm": -800.0}  # farther from the runway than the fix is
+    assert engine.tick(approach, WESTERLY, curving) is None
+    low = {**at(51.08, 5.68, feet=600, heading=230), "vs_fpm": -1500.0}
+    assert "low altitude alert" in engine.tick(approach, WESTERLY, low).text  # low is low, on a procedure too
+
+
+def test_a_long_final_flown_on_the_glide_path_is_not_a_level_bust_but_below_it_is_low(tmp_path):
+    # Found machine-flying gate to gate: established on the localizer 16 to 22 miles out, descending on the glide
+    # path, and the controller said "check your level". Below the path, the alert still comes.
+    from proatc.ifr import Arrival
+    from proatc.vectors import locate
+
+    _, engine, approach, _ = make(tmp_path, navfix=FIXES)
+    flight = engine.flight
+    flight.contacted.add(approach.key)
+    flight.arrival = Arrival("LFXX", "27", "I L S", 3000, 270.0, (51.0, 5.37), final_nm=10, stage="intercept")
+    flight.cleared_ft = 6000
+    on_path = {**at(51.0, 5.37 + 18 / (60 * 0.6293), feet=5800, heading=270), "vs_fpm": -800.0}  # 18 NM out
+    assert round(locate(on_path["lat"], on_path["lon"], (51.0, 5.37), 270.0).along_nm) == 18
+    assert engine.tick(approach, WESTERLY, on_path) is None
+    flight.bust_called_for = None
+    below = {**on_path, "elevation_m": 3500 * 0.3048, "agl_m": 3500 * 0.3048}  # 2,200 ft under a 3 degree path
+    assert "check your level" in engine.tick(approach, WESTERLY, below).text
 
 
 def test_a_hold_gives_an_expected_approach_time(tmp_path):
