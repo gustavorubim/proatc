@@ -49,6 +49,9 @@ def play(samples: np.ndarray, sample_rate: int, device: int | None = None) -> No
     sd.wait()
 
 
+STREAM_STEP_S = 0.1
+
+
 class Player:
     """One voice at a time on the speakers; a new transmission cuts off the previous one."""
 
@@ -68,6 +71,39 @@ class Player:
             sd.play(samples, sample_rate, device=self.device)
             self._ends_at = time.monotonic() + len(samples) / sample_rate
             return self._generation
+
+    def play_stream(self, pieces, sample_rate: int) -> int:
+        """Play sound that is still being made: each piece as it arrives. Returns a ticket for `wait`."""
+        with self._lock:
+            self._generation += 1
+            ticket = self._generation
+            sd.stop()
+            self._ends_at = float("inf")  # not known until the last piece has come
+        threading.Thread(target=self._feed, args=(ticket, pieces, sample_rate), name="speech", daemon=True).start()
+        return ticket
+
+    def _feed(self, ticket: int, pieces, sample_rate: int) -> None:
+        import time
+
+        step = max(int(sample_rate * STREAM_STEP_S), 1)  # written in short steps, so a cut-off is heard at once
+        try:
+            with sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32", device=self.device) as out:
+                for piece in pieces:
+                    piece = np.ascontiguousarray(piece, dtype=np.float32).reshape(-1, 1)
+                    for start in range(0, len(piece), step):
+                        if self._generation != ticket:
+                            out.abort()
+                            return
+                        out.write(piece[start : start + step])
+        except Exception as error:
+            print(f"Audio output failed: {type(error).__name__}: {error}", flush=True)
+        finally:
+            close = getattr(pieces, "close", None)
+            if close:
+                close()  # stops the voice engine if it was cut off
+            with self._lock:
+                if self._generation == ticket:
+                    self._ends_at = time.monotonic()
 
     @property
     def playing(self) -> bool:

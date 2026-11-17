@@ -66,6 +66,7 @@ class Llm:
 
 @dataclass
 class Tts:
+    engine: str = "kokoro"  # or "phonon": on trial; it starts speaking sooner (see tts.py)
     voice: str = "am_michael"
     speed: float = 1.15
     atis_voice: str = "af_sarah"
@@ -119,6 +120,7 @@ EDITABLE: dict[str, dict[str, object]] = {
     "audio": {"input_device": (int, type(None)), "output_device": (int, type(None))},
     "ptt": {"key": str, "joystick": (str, type(None)), "joystick_button": (int, type(None))},
     "tts": {
+        "engine": ("kokoro", "phonon"),
         "voice": str,
         "atis_voice": str,
         "pilot_voice": str,

@@ -112,6 +112,7 @@ export interface EngineState {
       audio: { input_device: number | null; output_device: number | null }
       ptt: { key: string; joystick: string | null; joystick_button: number | null }
       tts: {
+        engine: 'kokoro' | 'phonon'
         voice: string
         atis_voice: string
         pilot_voice: string

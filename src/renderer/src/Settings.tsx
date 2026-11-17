@@ -160,15 +160,34 @@ export function SettingsDialog({
           <Row label="Other traffic" hint="Traffic calls and runway sequencing against X-Plane's AI aircraft">
             <Toggle on={values.atc.traffic} onChange={(on) => change('atc', 'traffic', on)} />
           </Row>
-          <Row label="Radio chatter" hint="Other aircraft heard on the frequency. Sound only: they are not in the sim">
-            <select value={values.atc.chatter} onChange={(e) => change('atc', 'chatter', e.target.value)}>
-              <option value="off">Off</option>
-              <option value="some">Some</option>
-              <option value="busy">Busy</option>
-            </select>
+          <Row
+            label="Chatter from other aircraft"
+            hint="Other flights heard on the frequency. Sound only: they are not in the sim"
+          >
+            <Toggle
+              on={values.atc.chatter !== 'off'}
+              onChange={(on) => change('atc', 'chatter', on ? 'some' : 'off')}
+            />
           </Row>
+          {values.atc.chatter !== 'off' && (
+            <Row label="How much chatter">
+              <select value={values.atc.chatter} onChange={(e) => change('atc', 'chatter', e.target.value)}>
+                <option value="some">Some</option>
+                <option value="busy">Busy</option>
+              </select>
+            </Row>
+          )}
 
           <h3>Voices</h3>
+          <Row
+            label="Voice engine"
+            hint="Phonon is on trial: the controller starts speaking sooner. Its voices are downloaded the first time"
+          >
+            <select value={values.tts.engine} onChange={(e) => change('tts', 'engine', e.target.value)}>
+              <option value="kokoro">Kokoro</option>
+              <option value="phonon">Phonon (trial)</option>
+            </select>
+          </Row>
           <Row
             label="A voice for each controller"
             hint="British voices in the UK, American in the US and Canada. Off: one voice for all"
