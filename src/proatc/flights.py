@@ -20,21 +20,24 @@ from __future__ import annotations
 
 import math
 import random
+import re
 import time
 import traceback
+import zlib
 from collections import Counter
 from dataclasses import dataclass
 
-from . import vfr
+from . import ifr, vfr
+from . import phraseology as say
 from .airways import open_airways
 from .atis import Issue
 from .centers import CenterIndex
-from .engine import Engine, Phase
+from .engine import ON_RUNWAY_NM, Engine
 from .flightplan import FlightPlan
 from .intents import Intent
 from .navdata import AirportDB, bearing, distance_nm
 from .navfix import open_navfix
-from .procedures import NavaidNames
+from .procedures import NavaidNames, choose_approach
 from .radio import current_station
 from .vectors import locate
 from .verify import BAD_TEXT, Report
@@ -115,10 +118,10 @@ def fly(db: AirportDB, shared: dict, origin_ident: str, destination_ident: str) 
             if here and here.freqs_khz:
                 khz = here.freqs_khz[0]
             elif remaining <= 45:
-                target = engine._handoff(destination, "approach", raw) or engine._handoff(destination, "tower", raw)
-                if not target:
+                # Tuned from the chart: the engine is not told who should answer.
+                khz = _listed_khz(db, destination, "approach", lat, lon) or _listed_khz(db, destination, "tower", lat, lon)
+                if not khz:
                     return problems, said
-                khz = round(float(target[2]) * 1000)
             else:
                 continue
         raw["com1_khz"] = khz
@@ -234,6 +237,9 @@ NOT_VACATED_S = 120.0
 STUCK_S = 1800.0  # this long in one stage on the ground
 STAND_NM = 0.15  # a taxi route to a stand must end this close to it
 RECENT = 5  # lines of radio work given with a problem
+JOIN_NM = 8  # flying an approach from its initial fix, the pilot joins final this far out
+# Winds a flight may have, (from, knots): light, a strong crosswind for most runways, a tailwind for others.
+WINDS = ((270, 9), (90, 14), (200, 30), (330, 22), (45, 18), (160, 25))
 # Events by which a controller says the pilot did something wrong. A pilot that does as told should hear none.
 COMPLAINTS = ("readback_missed", "readback_incomplete", "level_bust", "heading_not_flown", "off_route",
               "runway_incursion", "low_altitude", "restriction_missed")  # fmt: skip
@@ -268,10 +274,48 @@ def _on_centreline(threshold: tuple[float, float], course: float, miles_out: flo
     return _moved(*threshold, (course + 180) % 360, miles_out)
 
 
+def _listed_khz(db: AirportDB, airport, kind: str, lat: float, lon: float) -> int | None:
+    """The frequency a pilot reads off the chart for this airport's station of this kind (the sector for where the
+    aircraft is): tuned by hand, which tells the engine nothing about who should answer."""
+    station = db.station_of(airport, kind, bearing(airport.lat, airport.lon, lat, lon))
+    return station.khz if station else None
+
+
+DIGIT_WORDS = {word: str(number) for number, word in enumerate(say.DIGITS)}
+SPOKEN_NUMBER = r"((?:(?:zero|one|two|three|four|five|six|seven|eight|niner) ?)+)"
+
+
+def _number(words: str) -> int:
+    return int("".join(DIGIT_WORDS[word] for word in words.split()))
+
+
+def _runway_said(text: str, airport, lead: str) -> str | None:
+    """The runway of this airport named in `text` right after `lead` ("approach runway", "cleared to land"...)."""
+    ends = [end for runway in airport.runways for end in (runway.end1, runway.end2)]
+    for end in sorted(ends, key=lambda end: -len(say.runway(end))):
+        if re.search(rf"\b{lead} {say.runway(end)}(?![a-z ]*(?:left|right|center)\b)", text):
+            return end
+    return None
+
+
+def _weathers(origin: str, destination: str) -> tuple[Weather, Weather | None]:
+    """The wind for this flight, and for one flight in three a different wind from the middle of the flight on: so
+    runway choice is flown in crosswinds, tailwinds and a change of runway, not only in one wind."""
+    pick = zlib.crc32(f"{origin}-{destination}".encode())
+    first = WINDS[pick % len(WINDS)]
+    second = WINDS[(pick // len(WINDS)) % len(WINDS)] if pick % 3 == 0 else None
+    weather = lambda wind: Weather(wind_dir_true=wind[0], wind_kt=wind[1], clouds=[Cloud(0.4, 3500)], qnh_hpa=1009)  # noqa: E731
+    return weather(first), (weather(second) if second and second != first else None)
+
+
 class GateToGate:
     """One flight from a stand at the origin to a stand at the destination. `run()` gives (problems, transcript).
 
-    A problem is (kind, detail); the detail names the stage of the flight and ends with the last radio work."""
+    The pilot acts on what it hears: headings, levels, speeds, the approach, the runways and the frequencies come from
+    the controllers' words and the readback items, never from the engine's state. It tunes by frequency, from what
+    it was told or from the chart, and reads charts for what a pilot has them for (taxi route on the map, the fixes of
+    an approach, the minimum safe altitudes). A problem is (kind, detail); the detail names the stage of the flight
+    and ends with the last radio work."""
 
     def __init__(self, db: AirportDB, shared: dict, origin_ident: str, destination_ident: str):
         self.db = db
@@ -281,6 +325,7 @@ class GateToGate:
         self.total = distance_nm(self.origin.lat, self.origin.lon, self.destination.lat, self.destination.lon)
         self.cruise = 36000 if self.total > 300 else 24000 if self.total > 160 else 12000
         self.engine.set_plan(FlightPlan(origin_ident, destination_ident, [], self.cruise))
+        self.first_weather, self.second_weather = _weathers(origin_ident, destination_ident)
         self.problems: list[tuple[str, str]] = []
         self.said: list[str] = []
         self.stage, self.stage_since = "clearance", 0.0  # what the pilot is doing: see _next_call
@@ -290,17 +335,25 @@ class GateToGate:
         self.station = None  # the last station that answered
         self.handed_to = ""  # the station named in the last hand-off, until somebody answers
         self.cleared: float | None = None  # the level read back last
+        self.speed_kt: float | None = None  # the last speed limit given
         # ("path", points) on the ground; ("route", points), ("heading", h), ("intercept", h), ("procedure", points),
         # ("own", None) or ("final", None) in the air
         self.lateral: tuple = ("hold", None)
-        self.holding_short: str | None = None  # the runway the aircraft is stopped short of
+        self.holding_short: str | None = None  # the runway ("09R/27L") the aircraft is stopped short of
+        self.hold_short_said: set[str] = set()  # runways the controller said to hold short of
+        self.crossing_cleared: set[str] = set()  # runways the controller cleared it to cross
+        self.departure_runway: str | None = None  # as said in the taxi clearance
+        self.takeoff_cleared = False
+        self.approach_runway: str | None = None  # the runway of the approach it was cleared for, as said
+        self.landing_runway: str | None = None  # the runway it is to land on, as said (a circling runway, say)
+        self.expected_runway: str | None = None  # "expect ... approach runway X"
+        self.landing_cleared: str | None = None
         self.side: str | None = None  # side of the final approach course while intercepting it
         self.silent_nm = 0.0
         self.in_contact = False
         self.vectors = 0
         self.arrival_nm = 0.0
         self.stopped_at: float | None = None  # when the landing roll ended
-        self.called_destination = False  # the pilot had to find the destination's controller alone
         self.seen_kinds: set[tuple[str, str]] = set()
         self.plane = self._parked_at_origin()
 
@@ -398,9 +451,19 @@ class GateToGate:
 
     # ---- the radio ------------------------------------------------------------------------------------------------
 
-    @staticmethod
-    def _issue(station):
-        return Issue("K", WEATHER, 43200.0) if station.airport is not None else None
+    def _shifted(self) -> bool:
+        """Past the middle of the flight, for a flight whose wind changes."""
+        if self.second_weather is None:
+            return False
+        plane = self.plane
+        return distance_nm(plane.lat, plane.lon, self.destination.lat, self.destination.lon) < self.total / 2
+
+    def _issue(self, station):
+        if station.airport is None:
+            return None
+        if self._shifted():
+            return Issue("L", self.second_weather, 43200.0)
+        return Issue("K", self.first_weather, 43200.0)
 
     def _radio(self, raw: dict) -> None:
         _, station = current_station(self.db, raw) if self.khz else (None, None)
@@ -408,10 +471,9 @@ class GateToGate:
             self._silent(raw)
             return
         self._answered(station)
-        flight = self.engine.flight
-        if flight.arrival is not None and flight.arrival.airport != self.destination.ident:
-            self.problem("vectored to another airport", f"{station.callsign}, to {flight.arrival.airport}", stop=True)
+        if self.stopped:
             return
+        flight = self.engine.flight
         issue, tuned = self._issue(station), self.khz
         reply = self.engine.tick(station, issue, raw)
         if reply is not None and reply.text:
@@ -423,19 +485,26 @@ class GateToGate:
             self._transmit(station, issue, raw, call)
 
     def _answered(self, station) -> None:
-        """A station answers on the tuned frequency: it should be the one the flight was sent to."""
+        """A station answers on the tuned frequency: it must be the one the flight was sent to."""
         self.silent_nm, self.in_contact, self.station = 0.0, True, station
         if self.handed_to and not self.handed_to.startswith(station.callsign):
-            self.problem("handed to one controller, another answers", f"sent to {self.handed_to}, {station.callsign} answers")
+            self.problem(
+                "handed to one controller, another answers", f"sent to {self.handed_to}, {station.callsign} answers", stop=True
+            )
         self.handed_to = ""
+        airport = station.airport
+        if not self.plane.on_ground and airport is not None and airport.ident not in (self.origin.ident, self.destination.ident):
+            if station.kind in ("approach", "departure") and self.stage == "arrival":
+                self.problem("vectored to another airport", f"{station.callsign} of {airport.ident}", stop=True)
         if not self.plane.on_ground and self.stage in ("departure", "en route"):
-            if station.airport is not None and station.airport.ident == self.destination.ident:
+            if airport is not None and airport.ident == self.destination.ident:
                 self.set_stage("arrival")
             elif station.kind == "center" and self.stage == "departure":
                 self.set_stage("en route")
 
     def _silent(self, raw: dict) -> None:
-        """Nobody on the tuned frequency. In the air the pilot looks for whoever works this airspace, as from the side panel."""
+        """Nobody on the tuned frequency. After a hand-off that is a fault, and the flight stops there. In a gap the
+        sim's data leaves between controllers, the pilot looks for whoever works this airspace, from the side panel."""
         plane = self.plane
         if plane.on_ground:
             self.problem("sent to a frequency nobody answers on", f"{(self.khz or 0) / 1000:.3f} on the ground", stop=True)
@@ -444,26 +513,29 @@ class GateToGate:
             self.silent_nm += plane.knots * self.step / 3600
             if self.silent_nm < SILENT_MILES or not self.in_contact:
                 if not self.in_contact and self.silent_nm >= SILENT_MILES:
-                    self._look_for_a_station(raw)  # tuned by the pilot, and nobody there: look again
+                    self._look_for_a_station()  # tuned by the pilot, and nobody there: look again
                 return
             here = self.engine.centers.at(plane.lat, plane.lon, plane.feet) if self.engine.centers else None
             if self.handed_to:
-                self.problem("sent to a frequency nobody answers on", f"{self.khz / 1000:.3f}, to {self.handed_to}")
-            elif here and here.freqs_khz and not self.engine.flight.told_approach:
-                self.problem("left on a dead frequency", f"{self.khz / 1000:.3f}, in {here.name}'s airspace")
+                self.problem("sent to a frequency nobody answers on", f"{self.khz / 1000:.3f}, to {self.handed_to}", stop=True)
+                return
+            if here and here.freqs_khz and not self.engine.flight.told_approach:
+                self.problem("left on a dead frequency", f"{self.khz / 1000:.3f}, in {here.name}'s airspace", stop=True)
+                return
             self.khz, self.in_contact, self.handed_to = None, False, ""
-        self._look_for_a_station(raw)
+        self._look_for_a_station()
 
-    def _look_for_a_station(self, raw: dict) -> None:
+    def _look_for_a_station(self) -> None:
+        """From the chart and the side panel, as a pilot does: nothing the engine is told."""
         plane, engine = self.plane, self.engine
         self.silent_nm = 0.0
         remaining = distance_nm(plane.lat, plane.lon, self.destination.lat, self.destination.lon)
         if remaining <= 45:
-            target = engine._handoff(self.destination, "approach", raw) or (
-                engine._handoff(self.destination, "tower", raw) if remaining <= 25 else None
-            )
-            if target:
-                self.khz = round(float(target[2]) * 1000)
+            khz = _listed_khz(self.db, self.destination, "approach", plane.lat, plane.lon)
+            if khz is None and remaining <= 25:
+                khz = _listed_khz(self.db, self.destination, "tower", plane.lat, plane.lon)
+            if khz:
+                self.khz = khz
                 return
         here = engine.centers.at(plane.lat, plane.lon, plane.feet) if engine.centers else None
         if here and here.freqs_khz:
@@ -497,7 +569,6 @@ class GateToGate:
             self.problem("a correct readback is refused", reply.text)
             flight.pending = None
             return
-        self._check_landing_runway(reply)
         if reply.expect and flight.pending is reply:
             readback = self._calls(station, issue, raw).get("Read back")
             if readback is None:
@@ -512,67 +583,138 @@ class GateToGate:
                     flight.pending = None
         self._follow(station, reply)
 
-    def _check_landing_runway(self, reply) -> None:
-        arrival = self.engine.flight.arrival
-        if "cleared to land" in reply.text and arrival is not None and reply.expect.get("runway") != arrival.runway:
-            self.problem("cleared to land on another runway", f"vectored to {arrival.runway}: {reply.text}")
-
     # ---- doing what was said --------------------------------------------------------------------------------------
 
     def _follow(self, station, reply) -> None:
-        flight, expect = self.engine.flight, reply.expect
+        expect, text, plane = reply.expect, reply.text, self.plane
+        if not plane.on_ground:
+            self._approach_words(station, text)
         if "altitude" in expect:
+            self._check_altitude(float(expect["altitude"]), text)
             self.cleared = float(expect["altitude"])
-            airport = self.destination if flight.has_been_airborne else self.origin
-            if self.cleared < airport.elev_ft + 1000 and station.airport is not None and station.airport.ident == airport.ident:
-                self.problem(
-                    "cleared below the ground", f"{self.cleared:.0f} ft at {airport.ident}, {airport.elev_ft:.0f} ft high"
-                )
-        if "heading" in expect and not self.plane.on_ground:
-            self.lateral = ("heading", float(expect["heading"]))
-            if flight.arrival is not None and station.kind in ("approach", "departure"):
+        speed = re.search(rf"(?:reduce speed(?: to)?|maintain|speed) {SPOKEN_NUMBER}(?: knots)?", text)
+        if speed and not plane.on_ground:
+            self.speed_kt = float(_number(speed.group(1)))
+        if "heading" in expect and not plane.on_ground:
+            heading = float(expect["heading"])
+            ours = station.airport is not None and station.airport.ident == self.destination.ident
+            if ours and station.kind in ("approach", "departure"):
                 self.vectors += 1
                 if self.vectors > TOO_MANY_VECTORS:
                     self.problem("vectors never converge", f"{self.vectors} headings from {station.callsign}", stop=True)
-        if not self.plane.on_ground:
-            if flight.arrival is not None and station.kind != "center":
-                self._follow_arrival()
-            elif station.kind == "tower" and self.lateral[0] not in ("own", "final") and flight.runway:
-                self.lateral = ("own", None)  # no radar controller: the pilot flies the approach on its own
+            if self.approach_runway and re.search(r"cleared .*approach runway", text):
+                self._check_intercept(heading)
+                self.lateral, self.side = ("intercept", heading), None
+            else:
+                self.lateral = ("heading", heading)
         if "frequency" in expect:
             self.khz = round(float(expect["frequency"]) * 1000)
-            self.handed_to = reply.text.split("contact ", 1)[-1]
+            self.handed_to = text.split("contact ", 1)[-1]
         self._ground_instruction(reply)
 
-    def _follow_arrival(self) -> None:
-        arrival, engine = self.engine.flight.arrival, self.engine
-        if not any(arrival.flown in (runway.end1, runway.end2) for runway in self.destination.runways):
-            self.problem("approach to a runway that is not found", f"{arrival.words()} at {arrival.airport}", stop=True)
+    def _approach_words(self, station, text: str) -> None:
+        """The approach and the runways, as the controller names them."""
+        airport = self.destination
+        expected = _runway_said(text, airport, r"expect [^,]*approach runway")
+        if expected:
+            self.expected_runway = expected
+        cleared = _runway_said(text, airport, r"cleared [^,]*approach runway")
+        if cleared and re.search(r"cleared [^,]*approach runway", text):
+            self.approach_runway = cleared
+            self.landing_runway = _runway_said(text, airport, "circle to land runway") or cleared
+            via = re.search(r" via ([A-Za-z ]+?), report", text)
+            if via and self.lateral[0] not in ("procedure", "final"):
+                self._fly_procedure(via.group(1), cleared)
+            elif "visual approach" in text and self.lateral[0] not in ("own", "final"):
+                self.lateral = ("own", None)
+        if station.kind == "tower" and self.approach_runway is None:
+            # No approach clearance: the tower's runway, flown as the pilot's own approach.
+            given = _runway_said(text, airport, "continue approach runway") or _runway_said(text, airport, "runway")
+            if given and self.lateral[0] not in ("own", "final"):
+                self.landing_runway = given
+                self.lateral = ("own", None)
+        if "cleared to land" in text:
+            self.landing_cleared = _runway_said(text, airport, "runway")
+            if self.landing_runway and self.landing_cleared != self.landing_runway:
+                self.problem("cleared to land on another runway", f"approach runway {self.landing_runway}: {text}", stop=True)
+
+    def _fly_procedure(self, fix_words: str, runway: str) -> None:
+        """Cleared for the approach via its initial fix: the fix, from the approach chart, then onto final."""
+        engine, airport = self.engine, self.destination
+        found = None
+        for approach in engine.procedures(airport.ident).approaches.values():
+            for fix, _ in approach.initial_fixes() if approach.runway == runway else []:
+                if ifr._fix_word(engine, fix, airport.lat, airport.lon) == fix_words.strip():
+                    found = fix
+        where = engine.navfix.position(found, airport.lat, airport.lon, 80) if found and engine.navfix else None
+        if where is None:
+            self.problem("approach fix not on the chart", f"via {fix_words} for runway {runway}", stop=True)
             return
-        if arrival.stage == "intercept" and self.lateral[0] == "heading":
-            self.lateral, self.side = ("intercept", self.lateral[1]), None
-        elif arrival.stage == "procedure" and self.lateral[0] not in ("procedure", "final"):
-            where = engine.navfix.position(arrival.via, self.destination.lat, self.destination.lon, 80) if engine.navfix else None
-            joining = _on_centreline(arrival.threshold, arrival.course_true, max(arrival.final_nm, 6))
-            self.lateral = ("procedure", [point for point in (where, joining) if point])
-        elif arrival.stage == "tower" and arrival.approach == "visual" and self.lateral[0] not in ("own", "final"):
-            self.lateral = ("own", None)
+        threshold, course = engine._threshold(airport, runway), _runway_course(airport, runway)
+        self.lateral = ("procedure", [where, _on_centreline(threshold, course, JOIN_NM)])
+
+    def _check_altitude(self, feet: float, text: str) -> None:
+        """No descent below the minimum safe altitude where the aircraft is: the sector altitude near an airport
+        (or the approach's own published altitude for the runway expected), the terrain below further out."""
+        plane = self.plane
+        if plane.on_ground or feet >= plane.feet - 200:
+            return
+        navfix, engine = self.engine.navfix, self.engine
+        airport = self.destination if self.engine.flight.has_been_airborne else self.origin
+        near = distance_nm(plane.lat, plane.lon, airport.lat, airport.lon) <= 25
+        if near:
+            sector = (navfix.airport_safe_ft(airport.ident) if navfix else None) or 0
+            runway = self.approach_runway or self.expected_runway
+            approach = choose_approach(engine.procedures(airport.ident), runway) if runway else None
+            published = approach.platform_ft if approach and approach.platform_ft else None
+            floor = min(sector, published) if published and sector else (sector or published or 0)
+            floor = max(floor, airport.elev_ft + 1000)
+        else:
+            floor = (navfix.grid_safe_ft(plane.lat, plane.lon) if navfix else None) or 0
+        if feet < floor - 100:
+            self.problem("cleared below the minimum safe altitude", f"{feet:,.0f} ft where the minimum is {floor:,.0f}: {text}")
+
+    def _check_intercept(self, heading: float) -> None:
+        """An intercept must join final with room to settle, and not far above the glide path."""
+        final = self._final()
+        if final is None:
+            return
+        position = locate(self.plane.lat, self.plane.lon, *final)
+        angle = abs((heading - final[1] + 180) % 360 - 180)
+        joins = position.along_nm if angle < 5 else position.along_nm - position.cross_nm / math.tan(math.radians(angle))
+        feet = min(self.cleared or self.plane.feet, self.plane.feet)
+        above = feet - self.destination.elev_ft - max(joins, 0.0) * GLIDE_FT_PER_NM
+        if joins < 4 or above > 1000:
+            self.problem("intercept too close or too high", f"joins final {joins:.1f} NM out, {above:,.0f} ft above the path")
 
     def _ground_instruction(self, reply) -> None:
-        """What the pilot does on the ground with what was said: push, taxi, line up, vacate."""
-        flight = self.engine.flight
-        if self.stage == "clearance" and flight.squawk and flight.pending is None:
+        """What the pilot does on the ground with what was said: push, taxi, cross, line up, vacate."""
+        text, airport = reply.text, self._ground_airport()
+        for end in [end for runway in airport.runways for end in (runway.end1, runway.end2)]:
+            name = self._runway_name(airport, end)
+            if re.search(rf"\bhold short runway {say.runway(end)}\b(?! (?:left|right|center))", text):
+                self.hold_short_said.add(name)
+            if re.search(rf"\bcross runway {say.runway(end)}\b(?! (?:left|right|center))", text):
+                self.crossing_cleared.add(name)
+        if self.stage == "clearance" and "squawk" in reply.expect:
             self.set_stage("push")
-        elif self.stage == "push" and "push back" in reply.text:
+        elif self.stage == "push" and "push back" in text:
             self.set_stage("taxi request")
-        elif self.stage == "taxi request" and flight.phase == Phase.TAXI_OUT and flight.taxi_goal:
+        elif self.stage == "taxi request" and "taxi" in text:
+            self.departure_runway = _runway_said(text, airport, "runway")
             self._start_taxi("runway")
-        elif self.stage in ("ready", "taxi out") and flight.phase == Phase.TAKEOFF_CLEARED:
-            self._line_up()
-        elif self.stage == "landing roll" and "vacate" in reply.text:
+        elif self.stage in ("ready", "taxi out") and "cleared for takeoff" in text:
+            self.takeoff_cleared = True
+            self.set_stage("lining up")
+        elif self.stage == "landing roll" and "vacate" in text:
             self._vacate()
-        elif self.stage == "vacated" and flight.phase == Phase.TAXI_IN:
+        elif self.stage == "vacated" and "taxi to" in text:
             self._start_taxi("stand")
+
+    @staticmethod
+    def _runway_name(airport, end: str) -> str:
+        runway = next(runway for runway in airport.runways if end in (runway.end1, runway.end2))
+        return f"{runway.end1}/{runway.end2}"
 
     def _next_call(self, station, issue, raw) -> dict | None:
         """The call that moves the flight on from here, from the engine's menu; None when there is nothing to say."""
@@ -587,9 +729,12 @@ class GateToGate:
             wanted = "Request push and start"
         elif self.stage == "taxi request":
             wanted = "Request taxi"
-        elif self.stage in ("taxi out", "taxi in"):
-            if self.holding_short and flight.crossings and self.holding_short == flight.crossings[0]:
-                wanted = "Holding short"
+        elif self.stage in ("taxi out", "taxi in") and self.holding_short:
+            if self.holding_short not in self.hold_short_said:
+                # A runway on the route that the controller never named: a pilot does not cross it unasked.
+                self.problem("taxi route crosses a runway not given as a crossing", self.holding_short, stop=True)
+                return None
+            wanted = "Holding short"
         elif self.stage == "ready":
             wanted = "Ready for departure"
         elif self.stage == "vacated":
@@ -623,9 +768,10 @@ class GateToGate:
 
     def _ready_to_report_final(self) -> bool:
         """Flying its own approach, with no landing clearance yet: the pilot reports final once established on it."""
-        flight = self.engine.flight
-        if self.lateral[0] != "final" or flight.phase == Phase.LANDING_CLEARED or flight.awaiting_landing:
+        if self.lateral[0] != "final" or self.landing_cleared or self.approach_runway:
             return False
+        if self.said and "continue approach" in self.said[-1]:
+            return False  # told to continue, already: the landing clearance comes by itself
         position = self._final_position()
         return position is not None and position.cross_nm < 0.5 and position.along_nm < REPORT_FINAL_NM
 
@@ -635,22 +781,29 @@ class GateToGate:
         return self.origin if not self.engine.flight.has_been_airborne else self.destination
 
     def _start_taxi(self, goal: str) -> None:
-        """Follow the taxi route the controller gave; without a taxiway network, straight to the runway."""
+        """Follow the taxi route the controller gave, as the map shows it; without a taxiway network, straight on."""
         flight, engine = self.engine.flight, self.engine
         airport = self._ground_airport()
         route = flight.taxi_route
         usable = engine.network(airport).usable
         points: list[tuple[float, float]] = list(route.points) if route and route.points else []
-        if not points and usable and (goal == "runway" or flight.stand is not None):
-            self.problem("no taxi route", f"to the {goal} at {airport.ident}")
         if goal == "runway":
+            if self.departure_runway is None:
+                self.problem("no way forward", "the taxi clearance names no runway", stop=True)
+                return
+            if not points and usable:
+                self.problem("no taxi route", f"to runway {self.departure_runway} at {airport.ident}", stop=True)
+                return
             if not points:
-                points = [engine._threshold(airport, flight.runway)]
-            elif route is not None:
+                points = [engine._threshold(airport, self.departure_runway)]
+            else:
                 self._check_reaches_runway(airport, points[-1])
             self.set_stage("taxi out")
         else:
             stand = flight.stand
+            if not points and usable and stand is not None:
+                self.problem("no taxi route", f"to the stand at {airport.ident}", stop=True)
+                return
             if points and stand is not None and len(points) > 1:
                 gap = distance_nm(*points[-2], stand.lat, stand.lon)
                 if gap > STAND_NM:
@@ -659,20 +812,25 @@ class GateToGate:
         self.lateral, self.holding_short = ("path", points), None
 
     def _check_reaches_runway(self, airport, end: tuple[float, float]) -> None:
-        runway = self.engine.flight.runway
+        runway = self.departure_runway
         offset = self.engine._offset_nm(airport, runway, {"lat": end[0], "lon": end[1]})
         if offset is None or offset > 0.03:
             far = distance_nm(*end, *self.engine._threshold(airport, runway)) * 1852
             self.problem("taxi route does not reach its goal", f"ends {far:.0f} m from the threshold of {runway}, off the runway")
 
-    def _runway_ahead(self, lat: float, lon: float) -> str | None:
-        """The runway the next bit of taxiing would enter without a clearance to: the next crossing, or the departure runway."""
-        flight, engine = self.engine.flight, self.engine
-        airport = self._ground_airport()
-        names = list(flight.crossings[:1])
-        if self.stage == "taxi out" and flight.runway and flight.phase != Phase.TAKEOFF_CLEARED:
-            names.append(flight.runway)
-        for name in names:
+    def _runway_ahead(self, lat: float, lon: float, target: tuple[float, float]) -> str | None:
+        """The runway the next bit of taxiing would enter without a clearance to: any runway the route goes onto, not
+        cleared to cross, and the departure runway until cleared for takeoff."""
+        engine, airport = self.engine, self._ground_airport()
+        for runway in airport.runways:
+            name = f"{runway.end1}/{runway.end2}"
+            if name in self.crossing_cleared:
+                continue
+            if self.takeoff_cleared and self.departure_runway in (runway.end1, runway.end2):
+                continue
+            onto = engine._offset_nm(airport, name, {"lat": target[0], "lon": target[1]})
+            if onto is None or onto > ON_RUNWAY_NM:
+                continue  # the route does not go onto this runway here
             after = engine._offset_nm(airport, name, {"lat": lat, "lon": lon})
             now = engine._offset_nm(airport, name, {"lat": self.plane.lat, "lon": self.plane.lon})
             if after is not None and after < HOLD_SHORT_NM and (now is None or after < now):
@@ -691,25 +849,29 @@ class GateToGate:
             piece = min(budget, gap, 0.005)  # about ten metres at a time, so no hold line is passed
             heading = bearing(plane.lat, plane.lon, *points[0])
             lat, lon = points[0] if piece >= gap else _moved(plane.lat, plane.lon, heading, piece)
-            blocking = self._runway_ahead(lat, lon)
+            blocking = self._runway_ahead(lat, lon, points[0])
             if blocking:
                 self.holding_short = blocking
                 break
             plane.lat, plane.lon, plane.heading = lat, lon, heading
             budget -= piece
         plane.knots = 0.0 if self.holding_short or not points else TAXI_KT
-        if self.stage == "taxi out" and (not points or self.holding_short == self.engine.flight.runway):
+        departure = self.departure_runway and self._runway_name(self._ground_airport(), self.departure_runway)
+        if self.stage == "taxi out" and (not points or self.holding_short == departure):
+            self.holding_short = None
             self.set_stage("ready")
+        elif self.stage == "lining up" and not points:
+            self._line_up()
         elif self.stage == "taxi in" and not points:
             self.set_stage("parked")
 
     def _line_up(self) -> None:
-        """Onto the centreline where the aircraft is (or at the threshold, if it is short of it), facing down the runway."""
-        flight, plane = self.engine.flight, self.plane
-        course = _runway_course(self.origin, flight.runway)
-        threshold = self.engine._threshold(self.origin, flight.runway)
-        past = -locate(plane.lat, plane.lon, threshold, course).along_nm
-        plane.lat, plane.lon = _moved(*threshold, course, max(past, 0.0))
+        """At the end of the taxi route, on the runway: turned onto its heading, where the aircraft is."""
+        plane, runway = self.plane, self.departure_runway
+        course = _runway_course(self.origin, runway)
+        if self.engine._offset_nm(self.origin, runway, {"lat": plane.lat, "lon": plane.lon}) is None:
+            self.problem("lined up off the runway", f"runway {runway}", stop=True)
+            return
         plane.heading, plane.knots = course, 0.0
         self.set_stage("takeoff")
 
@@ -733,12 +895,10 @@ class GateToGate:
         if self.stopped_at is None:
             self.stopped_at = self.t
         elif self.t - self.stopped_at > NOT_VACATED_S:
-            self.problem("not told to vacate", f"stopped on runway {self.engine.flight.runway} for two minutes")
-            self._vacate()
-            self.khz = (self.db.station_of(self.destination, "ground") or self.db.station_of(self.destination, "tower")).khz
+            self.problem("not told to vacate", f"stopped on runway {self.landing_cleared} for two minutes", stop=True)
 
     def _vacate(self) -> None:
-        """Off the runway at the nearest taxiway node beside it; without a taxiway network, a little to the side."""
+        """Off the runway to the nearest taxiway node clear of every runway; without a taxiway network, to the side."""
         plane, engine = self.plane, self.engine
         network = engine.network(self.destination)
         on_runways = set().union(*network.runway_nodes.values()) if network.runway_nodes else set()
@@ -756,19 +916,23 @@ class GateToGate:
         self.set_stage("vacating")
 
     def _fly_on_ground(self) -> None:
-        if self.stage in ("taxi out", "taxi in"):
+        if self.stage in ("taxi out", "taxi in", "lining up"):
             self._taxi()
         elif self.stage == "takeoff":
             self._take_off()
         elif self.stage == "landing roll":
             self._landing_roll()
         elif self.stage == "vacating":
-            plane = self.plane
-            target = self.lateral[1][0]
+            plane, points = self.plane, self.lateral[1]
+            target = points[0]
+            gap = distance_nm(plane.lat, plane.lon, *target)
             plane.heading = bearing(plane.lat, plane.lon, *target)
-            plane.lat, plane.lon = target
-            plane.knots = 0.0
-            self.set_stage("vacated")
+            step = TAXI_KT * self.step / 3600
+            plane.lat, plane.lon = target if gap <= step else _moved(plane.lat, plane.lon, plane.heading, step)
+            plane.knots = TAXI_KT
+            if gap <= step:
+                plane.knots = 0.0
+                self.set_stage("vacated")
         else:
             self.plane.knots = 0.0
 
@@ -790,14 +954,13 @@ class GateToGate:
             self._fly_in_the_air()
 
     def _final(self) -> tuple[tuple[float, float], float] | None:
-        """(threshold, course) of the final approach being flown: the approach's, or the runway the tower gave."""
-        arrival, flight = self.engine.flight.arrival, self.engine.flight
-        if arrival is not None and arrival.airport == self.destination.ident:
-            return arrival.threshold, arrival.course_true
-        course = _runway_course(self.destination, flight.runway)
+        """(threshold, course) of the final approach being flown: the runway the approach clearance named, or for
+        an approach of the pilot's own, the runway the tower gave."""
+        runway = self.approach_runway or self.landing_runway
+        course = _runway_course(self.destination, runway)
         if course is None:
             return None
-        return self.engine._threshold(self.destination, flight.runway), course
+        return self.engine._threshold(self.destination, runway), course
 
     def _final_position(self):
         final = self._final()
@@ -808,13 +971,10 @@ class GateToGate:
         if mode in ("route", "procedure"):
             while value and distance_nm(plane.lat, plane.lon, *value[0]) < WAYPOINT_NM:
                 value.pop(0)
-            if mode == "procedure" and self._joins_final():
+            if mode == "procedure" and (self._joins_final() or not value):
                 self.lateral = ("final", None)
                 return self._wanted_heading()
             if not value:
-                if mode == "procedure":
-                    self.lateral = ("final", None)
-                    return self._wanted_heading()
                 return plane.heading
             return bearing(plane.lat, plane.lon, *value[0])
         if mode == "heading":
@@ -835,9 +995,9 @@ class GateToGate:
         return plane.heading
 
     def _joins_final(self) -> bool:
-        position, arrival = self._final_position(), self.engine.flight.arrival
-        inbound = abs((self.plane.heading - arrival.course_true + 180) % 360 - 180) < 90  # not crossing it outbound
-        return inbound and position.cross_nm < 3 and 2 < position.along_nm <= max(arrival.final_nm, 6) + 0.5
+        final, position = self._final(), self._final_position()
+        inbound = abs((self.plane.heading - final[1] + 180) % 360 - 180) < 90  # not crossing it outbound
+        return inbound and position.cross_nm < 3 and 2 < position.along_nm <= JOIN_NM + 0.5
 
     def _own_approach_heading(self) -> float:
         """No vectors: to a point on the extended centreline, then down final."""
@@ -854,10 +1014,10 @@ class GateToGate:
         return bearing(self.plane.lat, self.plane.lon, *gate)
 
     def _ias(self) -> float:
-        plane, arrival = self.plane, self.engine.flight.arrival
+        plane = self.plane
         ias = 250.0 if plane.feet < 10000 else 290.0
-        if arrival is not None and arrival.speed_kt:
-            ias = min(ias, float(arrival.speed_kt))
+        if self.speed_kt and self.stage == "arrival":
+            ias = min(ias, self.speed_kt)
         if self.lateral[0] == "final":
             position = self._final_position()
             ias = 160.0 if position is None or position.along_nm > 4 else LANDING_KT
@@ -866,9 +1026,9 @@ class GateToGate:
         return ias
 
     def _target_feet(self) -> float:
+        """The cleared level; on the approach, the glide path, but never below what was cleared before established."""
         plane = self.plane
         target = self.cleared if self.cleared is not None else plane.feet
-        target = max(target, self._ground_elevation() + 500)  # whatever was said, not into the ground
         elevation = self.destination.elev_ft
         if not self.in_contact and not plane.on_ground and self.engine.flight.has_been_airborne:
             target = min(target, self._own_descent(plane, elevation))
@@ -876,15 +1036,14 @@ class GateToGate:
             target = min(target, elevation + 3000)
         elif self.lateral[0] == "procedure" and len(self.lateral[1]) <= 1:
             # Past the initial fix, cleared for the approach: down the procedure's profile, about three degrees.
-            arrival = self.engine.flight.arrival
             joining = self.lateral[1][0] if self.lateral[1] else (plane.lat, plane.lon)
-            remaining = distance_nm(plane.lat, plane.lon, *joining) + max(arrival.final_nm, 6)
+            remaining = distance_nm(plane.lat, plane.lon, *joining) + JOIN_NM
             target = min(target, elevation + 50 + remaining * GLIDE_FT_PER_NM)
         elif self.lateral[0] == "final":
             position = self._final_position()
             if position.cross_nm < 1.0:
                 target = min(target, elevation + 50 + max(position.along_nm, 0.0) * GLIDE_FT_PER_NM)
-            else:
+            elif self.approach_runway is None:
                 target = min(target, elevation + 3000)
         return target
 
@@ -907,11 +1066,13 @@ class GateToGate:
         plane.lat, plane.lon = _moved(plane.lat, plane.lon, plane.heading, miles)
         target = self._target_feet()
         climbing = 2500.0 if plane.feet < 10000 else 1800.0
-        descending = 3000.0 if self.lateral[0] in ("final", "own") else 2200.0
+        descending = 1500.0 if self.lateral[0] == "final" else 2500.0  # no more than a stable approach allows
         change = max(-descending * step / 60, min(climbing * step / 60, target - plane.feet))
         plane.feet += change
         plane.vs_fpm = change * 60 / step
-        if self.engine.flight.arrival is not None or self.stage == "arrival":
+        if plane.feet - self._ground_elevation() < 0:
+            self.problem("flown into the ground", f"{plane.feet:,.0f} ft, as cleared", stop=True)
+        if self.stage == "arrival":
             self.arrival_nm += miles
             if self.arrival_nm > ARRIVAL_TOO_LONG_NM and self.lateral[0] != "final":
                 self.problem(
@@ -922,28 +1083,25 @@ class GateToGate:
             self._check_final()
 
     def _check_destination_controller(self) -> None:
-        """Close in, the flight must be with the destination's own approach or tower. If not, the pilot calls them."""
+        """Close in, the flight must be with the destination's own approach or tower."""
         plane, station = self.plane, self.station
         remaining = distance_nm(plane.lat, plane.lon, self.destination.lat, self.destination.lon)
         ours = station is not None and station.airport is not None and station.airport.ident == self.destination.ident
-        if remaining > HANDED_BY_NM or ours or self.handed_to or self.called_destination:
+        if remaining > HANDED_BY_NM or ours or self.handed_to:
             return
-        self.called_destination = True
-        self.problem(
-            "never handed to the destination", f"still with {station.callsign if station else 'nobody'} {remaining:.0f} NM out"
-        )
-        target = self.engine._handoff(self.destination, "approach") or self.engine._handoff(self.destination, "tower")
-        if target:
-            self.khz = round(float(target[2]) * 1000)
+        where = station.callsign if station else "nobody"
+        self.problem("never handed to the destination", f"still with {where} {remaining:.0f} NM out", stop=True)
 
     def _check_final(self) -> None:
         position = self._final_position()
         station = self.station
         if position.along_nm < 4 and position.cross_nm < 1 and station is not None and station.kind != "tower":
-            tower = self.db.station_of(self.destination, "tower")
-            if tower is not None and self.khz != tower.khz:
-                self.problem("not handed to tower", f"{position.along_nm:.1f} NM out, still with {station.callsign}")
-                self.khz = tower.khz
+            self.problem("not handed to tower", f"{position.along_nm:.1f} NM out, still with {station.callsign}", stop=True)
+            return
+        if self.landing_runway and self.landing_runway != self.approach_runway and self.approach_runway:
+            if position.along_nm < 2:
+                self._land()  # circling: not flown, see the docs
+            return
         if position.along_nm <= 0.2:
             low = self.plane.feet < self.destination.elev_ft + 500
             if position.along_nm > -0.5 and position.cross_nm < 0.5 and low:
@@ -957,17 +1115,19 @@ class GateToGate:
                 )
 
     def _land(self) -> None:
-        flight, plane = self.engine.flight, self.plane
+        plane = self.plane
         information = self.station is not None and vfr.service(self.station) is not None  # lands at its own discretion
-        if flight.phase != Phase.LANDING_CLEARED and not information:
-            self.problem("landed without a landing clearance", f"runway {flight.runway}")
-        runway = flight.runway or (flight.arrival.runway if flight.arrival else None)
+        runway = self.landing_runway
+        if self.landing_cleared is None and not information:
+            self.problem("landed without a landing clearance", f"runway {runway}", stop=True)
+            return
         course = _runway_course(self.destination, runway)
         if course is None:
             self.problem("no runway to land on", f"runway {runway} at {self.destination.ident}", stop=True)
             return
-        threshold = self.engine._threshold(self.destination, runway)
-        plane.lat, plane.lon = _moved(*threshold, course, 0.15)
+        if runway != self.approach_runway and self.approach_runway:
+            # Circling to another runway is not flown: the aircraft is put on that runway's threshold.
+            plane.lat, plane.lon = _moved(*self.engine._threshold(self.destination, runway), course, 0.15)
         plane.heading, plane.feet, plane.on_ground, plane.vs_fpm = course, self.destination.elev_ft, True, 0.0
         plane.knots = LANDING_KT - 10
         self.lateral = ("hold", None)
