@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from .navdata import bearing, distance_nm, latlon
 
 CROSSING_PENALTY_M = 3000  # prefer routes that do not cross another runway
-BACKTRACK_FACTOR = 3  # a metre along a runway counts as this many on a taxiway
 STAND_REACH_M = 200  # a stand this close to a taxiway node can be taxied to
 UNNAMED = ("none", "null")  # what some scenery tools write for a taxiway with no name
 FULL_LENGTH_M = 400  # runway entries this close to the threshold count as full-length departures
@@ -114,8 +113,8 @@ def parse_taxi(lines: list[str]) -> TaxiNetwork:
     return net
 
 
-def _shortest(net: TaxiNetwork, graph: dict[int, list[Edge]], start: int, target_runway: str | None, backtrack: bool = False):
-    """Dijkstra over taxiways only, or with `backtrack` along runways too. Returns (cost, previous-step) maps."""
+def _shortest(net: TaxiNetwork, graph: dict[int, list[Edge]], start: int, target_runway: str | None):
+    """Dijkstra over taxiways only. Returns (cost, previous-step) maps."""
     cost = {start: 0.0}
     previous: dict[int, tuple[int, Edge]] = {}
     queue = [(0.0, start)]
@@ -124,9 +123,9 @@ def _shortest(net: TaxiNetwork, graph: dict[int, list[Edge]], start: int, target
         if dist > cost.get(node, float("inf")):
             continue
         for edge in graph.get(node, []):
-            if edge.runway and not backtrack:
+            if edge.runway:
                 continue
-            step = edge.length_m * (BACKTRACK_FACTOR if edge.runway else 1)
+            step = edge.length_m
             if net.runway_of(edge.to, excluding=target_runway):
                 step += CROSSING_PENALTY_M
             if dist + step < cost.get(edge.to, float("inf")):
@@ -138,7 +137,6 @@ def _shortest(net: TaxiNetwork, graph: dict[int, list[Edge]], start: int, target
 
 def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str | None) -> Route:
     steps: list[tuple[str, float]] = []  # (taxiway, direction of travel) per edge, goal first
-    on_runway: list[bool] = []
     path = [goal]
     distance = 0.0
     node = goal
@@ -146,11 +144,9 @@ def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str
         prior, edge = previous[node]
         distance += edge.length_m
         steps.append((edge.name, bearing(*net.nodes[prior], *net.nodes[node])))
-        on_runway.append(edge.runway)
         node = prior
         path.append(node)
     steps.reverse()
-    on_runway.reverse()
     path.reverse()
     # In the order the runways are met, every runway at each node: where two runways cross, both are crossed.
     crossing_index: dict[str, int] = {}
@@ -161,9 +157,7 @@ def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str
     names: list[str] = []
     turns: list[str] = []
     heading = None
-    for (name, direction), runway in zip(steps, on_runway, strict=True):
-        if runway:
-            continue  # a stretch along a runway is said as that runway's crossing clearance, not as a taxiway
+    for name, direction in steps:
         if name and (not names or names[-1] != name):
             if names:
                 change = (direction - heading + 180) % 360 - 180 if heading is not None else 0.0
@@ -174,11 +168,11 @@ def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str
 
 
 def _route(net: TaxiNetwork, start: int, goals: dict[int, float], target_runway: str | None) -> Route | None:
-    """Best route to any goal; `goals` maps node -> extra cost. One-way rules are dropped only if they block every route,
-    and a stretch along a runway is taken only when the taxiways alone do not connect (scenery whose taxiways meet
-    only on the runway, as at many small airports): it is then a runway to be cleared onto, like a crossing."""
-    for graph, backtrack in ((net.edges, False), (net.both_ways, False), (net.both_ways, True)):
-        cost, previous = _shortest(net, graph, start, target_runway, backtrack)
+    """Best route to any goal; `goals` maps node -> extra cost. One-way rules are dropped only if they block every route.
+    A route is never made along a runway (a backtrack needs its own clearance from the tower, which is not modelled):
+    where the taxiways alone do not connect, there is no route."""
+    for graph in (net.edges, net.both_ways):
+        cost, previous = _shortest(net, graph, start, target_runway)
         reachable = [(cost[g] + extra, g) for g, extra in goals.items() if g in cost]
         if reachable:
             return _build(net, previous, start, min(reachable)[1], target_runway)

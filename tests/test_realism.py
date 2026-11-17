@@ -70,8 +70,9 @@ def test_an_aircraft_already_out_on_the_approach_side_closes_on_a_dogleg():
     out_east = locate(51.1, 5.9, THRESHOLD_27, course)  # 20 miles out along the approach, six north of it
     assert next_vector(out_east, course, 2500, 6000, inbound=True).heading_true == 225.0
     assert next_vector(out_east, course, 2500, 6000).heading_true == 180.0  # after a downwind leg: a square base turn
-    # A shorter final for this arrival moves the base turn in.
-    abeam = locate(51.1, 5.56, THRESHOLD_27, course)  # seven miles out
+    # A shorter final for this arrival moves the base turn in. Base is turned about four miles beyond where final is
+    # joined, so that the 30 degree intercept from three and a half miles off meets final in time.
+    abeam = locate(51.1, 5.73, THRESHOLD_27, course)  # thirteen and a half miles out
     assert next_vector(abeam, course, 2500, 4000, final_nm=10).stage == "downwind"
     assert next_vector(abeam, course, 2500, 4000, final_nm=9).stage == "base"
     assert next_vector(abeam, course, 2500, 4000, final_nm=9, extend=True).stage == "downwind"

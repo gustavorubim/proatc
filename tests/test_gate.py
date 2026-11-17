@@ -4,6 +4,7 @@ Each test names the kind of airport or airspace that showed the fault; the fligh
 pull request and in docs/testing.md.
 """
 
+import math
 import random
 from types import SimpleNamespace
 
@@ -11,16 +12,16 @@ import pytest
 
 from proatc import ifr
 from proatc import phraseology as say
-from proatc.atis import Issue
+from proatc.atis import Issue, runways_in_use
 from proatc.centers import CenterIndex, parse_atc
-from proatc.engine import Engine, Phase
+from proatc.engine import Engine, Phase, _end
 from proatc.flightplan import FlightPlan
 from proatc.intents import Intent
 from proatc.navdata import AirportDB, Station, build_index, expect_station, prefer_airports
 from proatc.procedures import parse_cifp
 from proatc.radio import station_on
-from proatc.taxi import assign_stand, parse_taxi, route_to_point
-from proatc.vectors import Position, locate, next_vector
+from proatc.taxi import assign_stand, parse_taxi, route_to_point, route_to_runway
+from proatc.vectors import Position, joins_at, locate, next_vector
 from proatc.weather import Weather
 from tests.test_ifr import CALLSIGN, at, world  # noqa: F401  (a fixture)
 from tests.test_realism import APRON, CROSSING, taxiing
@@ -59,6 +60,11 @@ APT = """A
 100 45.00 1 1 0.25 1 3 0  09 56.0000 0.9800 0 0 3 2 1 0 27 56.0000 1.0200 0 0 3 2 1 0
 1054 118300 Deptfield Tower
 1056 124500 Deptfield Departure
+
+1    100 0 0 EGNO Northfield
+1302 icao_code EGNO
+100 45.00 1 1 0.25 1 3 0  09 59.0000 -0.0200 0 0 3 2 1 0 27 59.0000 0.0200 0 0 3 2 1 0
+1054 118700 Northfield Tower
 """.splitlines()
 
 
@@ -143,7 +149,8 @@ def test_of_two_centres_on_one_frequency_the_one_the_flight_was_sent_to_answers_
 
 def test_an_information_service_listed_as_a_tower_is_called_information_and_the_real_tower_is_handed_to(fields):
     airport = fields.airport("EDHH")
-    assert Station(airport, "tower", 125100, "Landshut Info", 0.0).callsign == "Infofield Information"
+    assert Station(airport, "tower", 125100, "Landshut Info", 0.0).callsign == "Landshut Information"
+    assert Station(airport, "tower", 125100, "BREMEN INFO", 0.0).callsign == "Bremen Information"  # not the airport's
     assert fields.station_of(airport, "tower").callsign == "Infofield Tower"  # not "BREMEN INFO", listed first
 
 
@@ -169,15 +176,28 @@ def test_the_initial_climb_is_above_an_airport_high_above_the_sea(fields):
     assert reply.expect["altitude"] == 9000 and "climb and maintain niner thousand" in reply.text  # was five thousand
 
 
-def test_departures_use_a_runway_the_taxiways_reach(tmp_path):
-    no_runway = [line for line in CROSSING if "runway 09L/27R" not in line]  # 09L/27R is not in the network
-    no_link = [line for line in CROSSING if "taxiway_E B1" not in line]  # it is, but no taxiway joins it
-    for name, rows, expected in (("both", CROSSING, "27R"), ("one", no_runway, "27L"), ("link", no_link, "27L")):
+def test_departures_avoid_a_runway_no_taxiway_joins_but_not_one_the_scenery_leaves_untagged(tmp_path):
+    untagged = [line for line in CROSSING if "runway 09L/27R" not in line]  # the network does not mention 09L/27R
+    no_link = [line for line in CROSSING if "taxiway_E B1" not in line]  # it does, and no taxiway joins it
+    for name, rows, expected in (("both", CROSSING, "27R"), ("untagged", untagged, "27R"), ("link", no_link, "27L")):
         (tmp_path / f"{name}.dat").write_text("\n".join(rows), encoding="utf-8")
         build_index(tmp_path / f"{name}.dat", tmp_path / f"{name}.sqlite")
         db = AirportDB(tmp_path / f"{name}.sqlite")
         engine = Engine(db, seed=1, procedures=lambda ident: parse_cifp([]))
         assert engine._departure_runway(db.airport("EGXX"), ISSUE, taxiing(*APRON)) == expected
+    assert _end("07L") == _end("7L") and _end("07") == "7"  # scenery that writes "7" for "07"
+
+
+def test_a_departure_runway_is_only_ever_one_in_use(tmp_path):
+    no_link = [line for line in CROSSING if "taxiway_E B1" not in line]
+    (tmp_path / "x.dat").write_text("\n".join(no_link), encoding="utf-8")
+    build_index(tmp_path / "x.dat", tmp_path / "x.sqlite")
+    db = AirportDB(tmp_path / "x.sqlite")
+    engine = Engine(db, seed=1, procedures=lambda ident: parse_cifp([]))
+    for wind in (90, 180, 270):
+        weather = Issue("C", Weather(wind_dir_true=wind, wind_kt=30, qnh_hpa=1013.2), 12 * 3600)
+        in_use = runways_in_use(db.airport("EGXX"), wind, 30)
+        assert engine._departure_runway(db.airport("EGXX"), weather, taxiing(*APRON)) in in_use  # never out of wind
 
 
 # Taxiways on either side of a runway that meet only on the runway, as at many small airports.
@@ -192,15 +212,17 @@ SPLIT = """1201 52.0000 -1.0000 both 0 apron
 1300 52.0300 -0.9500 0.0 gate jets FAR""".splitlines()
 
 
-def test_a_taxi_route_that_can_only_be_made_along_a_runway_goes_along_it_with_a_clearance():
-    route = route_to_point(parse_taxi(SPLIT), 52.0, -1.0, (52.0, -0.9899))
-    assert route is not None  # was: no route at all, so the flight was sent to "parking" with no way there
-    assert route.taxiways == ["A", "B"] and route.crossings == ["09/27"]
+def test_a_taxi_route_is_never_made_along_a_runway():
+    # Backtracking needs its own clearance from the tower, read back and checked against traffic: not modelled, so
+    # where the taxiways meet only on the runway there is no route (the airport is a known limit), as before.
+    network = parse_taxi(SPLIT)
+    assert route_to_point(network, 52.0, -1.0, (52.0, -0.9899)) is None
+    assert route_to_runway(network, 52.0, -1.0, "27", (52.001, -0.99)) is None  # not along 09/27 to its far end
 
 
 def test_a_taxiway_the_scenery_names_none_is_not_spoken_as_none():
     rows = [row.replace("taxiway_E A", "taxiway_E None") for row in SPLIT]
-    assert route_to_point(parse_taxi(rows), 52.0, -1.0, (52.0, -0.9899)).taxiways == ["B"]
+    assert [edge.name for edge in parse_taxi(rows).edges[0]] == [""]
 
 
 def test_an_arriving_aircraft_is_given_a_stand_the_taxiways_come_near():
@@ -264,24 +286,43 @@ def test_a_procedure_flown_from_far_to_the_side_is_handed_to_tower_only_near_the
     assert ifr.tick(engine, approach, ISSUE, on_final, 0.0, CALLSIGN).text.startswith(f"{CALLSIGN}, contact Eastfield Tower")
 
 
-def test_an_aircraft_on_a_base_leg_that_drifted_in_still_gets_its_intercept():
-    drifted = Position(distance_nm=8.3, along_nm=7.6, cross_nm=3.0, side="left")  # final is joined at ten miles
-    assert next_vector(drifted, 226.0, 3000, 3000, on_base=True).stage == "intercept"
-    assert next_vector(drifted, 226.0, 3000, 3000).stage == "downwind"  # what it got before: nothing new, forever
+def test_an_intercept_is_given_only_where_it_joins_final_in_time():
+    # Final at nine or ten miles: a 30 degree intercept from 3.5 miles off meets the course six miles further in.
+    for along, cross, final in ((6.2, 3.4, 9), (7.0, 3.5, 9), (8.1, 3.5, 10)):
+        late = Position(math.hypot(along, cross), along, cross, "left")
+        assert next_vector(late, 90.0, 3000, 3000, final_nm=final, on_base=True).stage != "intercept"
+    on_time = Position(14.5, 14.1, 3.4, "left")
+    vector = next_vector(on_time, 90.0, 3000, 3000, final_nm=10, on_base=True)
+    assert vector.stage == "intercept" and joins_at(on_time) >= 7.0
+    drifted = Position(7.0, 6.5, 2.0, "left")  # a base leg that drifted far in: out again, for a new base
+    out = next_vector(drifted, 90.0, 3000, 3000, final_nm=10, on_base=True)
+    assert (out.stage, out.again) == ("downwind", True)
 
 
 def test_an_aircraft_far_to_the_side_of_final_gets_a_base_leg_not_a_dogleg_through_the_centreline():
     wide = Position(distance_nm=29.0, along_nm=14.2, cross_nm=25.6, side="right")
     vector = next_vector(wide, 321.0, 3000, 12000, inbound=True)
     assert (vector.stage, vector.heading_true) == ("base", 231.0)  # 90 degrees; 45 would cross final past the runway
-    close = Position(distance_nm=16.0, along_nm=15.0, cross_nm=5.0, side="right")
+    close = Position(distance_nm=19.6, along_nm=19.0, cross_nm=5.0, side="right")
     assert next_vector(close, 321.0, 3000, 12000, inbound=True).heading_true == 276.0  # still a dogleg when it fits
 
 
 def test_a_wide_downwind_leg_is_turned_onto_base_even_beyond_vectoring_range():
-    wide = Position(distance_nm=30.5, along_nm=13.5, cross_nm=27.0, side="right")
+    wide = Position(distance_nm=33.6, along_nm=20.0, cross_nm=27.0, side="right")
     assert next_vector(wide, 270.0, 3000, 11000, final_nm=15, vectored=True).stage == "base"  # was: "descend", silence
     assert next_vector(wide, 270.0, 3000, 11000, final_nm=15, inbound=True).stage == "descend"  # not yet vectored
+
+
+def test_no_vector_beyond_the_sector_altitude_circle_goes_below_the_terrain_there(world):  # noqa: F811
+    db, engine, _ = world
+    approach = db.station(124300, 51.0, 5.5, feet=9000)
+    engine.navfix = SimpleNamespace(airport_safe_ft=lambda ident: None, grid_safe_ft=lambda lat, lon: 9000)
+    flight = engine.flight
+    flight.has_been_airborne, flight.origin_ident, flight.cleared_ft = True, "EGXX", 12000
+    flight.arrival = ifr.Arrival("LFXX", "27", "I L S", 2500, 270.0, (51.0, 5.37), stage="downwind", final_nm=10)
+    wide = at(51.45, 5.37 + 25 / 37.7, feet=12000, heading=90)  # 25 miles out along the approach, 27 to the side
+    reply = ifr._vector(engine, approach, ISSUE, wide, 0.0, CALLSIGN, "", first=False)
+    assert reply.expect["altitude"] == 9000  # was: 2,500 ft, the joining altitude, 37 miles from the runway
 
 
 def test_an_initial_approach_fix_beyond_the_runway_is_not_flown_to(world):  # noqa: F811
@@ -308,24 +349,24 @@ def test_an_approach_altitude_under_the_airport_is_raised_above_it():
     assert ifr._platform(None, high) == 6500
 
 
-def test_an_r_nav_approach_keeps_its_published_initial_altitude_below_a_high_sector_altitude(world):  # noqa: F811
+def test_an_r_nav_approach_is_never_cleared_below_the_minimum_sector_altitude(world):  # noqa: F811
     db, engine, _ = world
     approach = db.station(124300, 51.0, 5.5, feet=9000)
     fixes = {"NEARS": (51.0, 5.75)}
-    engine.navfix = SimpleNamespace(position=lambda fix, lat, lon, within=400: fixes.get(fix))
+    engine.navfix = SimpleNamespace(position=lambda fix, lat, lon, within=400: fixes.get(fix), grid_safe_ft=lambda *_: 0)
     procedure = SimpleNamespace(kind="R", initial_fixes=lambda: [("NEARS", 4000)])
     engine.flight.arrival = ifr.Arrival("LFXX", "27", "R NAV", 2500, 270.0, (51.0, 5.37), procedure=procedure)
-    raw = at(51.0, 6.2, feet=12000, heading=270)
+    raw = at(51.0, 6.2, feet=22000, heading=270)
     position = locate(raw["lat"], raw["lon"], (51.0, 5.37), 270.0)
-    # A mountain behind the airport makes the sector altitude 19,000 ft; the procedure was designed for 4,000.
-    reply = ifr._via_initial_fix(engine, approach, ISSUE, raw, CALLSIGN, "", position, 19000, False)
-    assert "descend altitude four thousand feet" in reply.text and reply.expect["altitude"] == 4000
+    # Direct to the fix from wherever the aircraft is: the sector altitude, 14,400 ft, not the fix's own 4,000.
+    reply = ifr._via_initial_fix(engine, approach, ISSUE, raw, CALLSIGN, "", position, 14400, False)
+    assert reply.expect["altitude"] == 14400
 
 
 def test_a_departure_controller_hands_on_to_the_centre_ahead_when_none_covers_the_airport(fields):
     db = fields
     engine = engine_for(db)
-    engine.set_plan(FlightPlan("EGDD", "EGAA", [], 24000))
+    engine.set_plan(FlightPlan("EGDD", "EGNO", [], 24000))  # north, into Northside's airspace
     departure = db.station(124500, 56.0, 1.0, feet=20000)
     flight = engine.flight
     flight.rules, flight.has_been_airborne, flight.origin_ident, flight.cleared_ft = "IFR", True, "EGDD", 24000
@@ -334,6 +375,31 @@ def test_a_departure_controller_hands_on_to_the_centre_ahead_when_none_covers_th
     assert ifr.tick(engine, departure, ISSUE, topping_out, 0.0, CALLSIGN).text == (
         f"{CALLSIGN}, contact Northside Control one two three decimal four five"
     )  # was: nothing, until the departure frequency went silent sixty miles out
+
+
+def test_a_departure_is_not_handed_to_a_centre_it_only_points_at_in_the_climb_out(fields):
+    db = fields
+    engine = engine_for(db)
+    engine.set_plan(FlightPlan("EGTT", "EGAA", [], 12000))  # south, away from Northside
+    tower = db.station(119900, 56.0, 0.0)
+    flight = engine.flight
+    flight.rules, flight.phase, flight.has_been_airborne, flight.origin_ident = "IFR", Phase.AIRBORNE, True, "EGTT"
+    flight.contacted.add(tower.key)
+    climbing_out = at(56.02, -0.01, feet=2000, heading=330, speed=120.0)  # before the turn south
+    assert engine.tick(tower, ISSUE, climbing_out) is None  # was: "contact Northside Control", a centre it never enters
+
+
+def test_a_centre_gives_no_level_to_an_aircraft_outside_its_airspace(fields):
+    db = fields
+    engine = engine_for(db)
+    engine.set_plan(FlightPlan("EGTT", "EGAA", [], 24000))
+    north = next(centre for centre in db.centers.centers if centre.name == "NORTHSIDE")
+    radio = db.centers.station_for(north)
+    flight = engine.flight
+    flight.rules, flight.has_been_airborne, flight.origin_ident, flight.cleared_ft = "IFR", True, "EGTT", 6000
+    outside = at(55.6, 0.0, feet=6000, heading=180, speed=200.0)  # thirty miles south of its boundary
+    reply = engine.handle(Intent("check_in"), radio, None, outside)
+    assert "climb" not in reply.text  # was: "identified, climb flight level one two zero"
 
 
 def test_an_oceanic_sector_gives_the_descent_to_a_destination_inside_it(fields):
@@ -373,6 +439,38 @@ def test_a_stand_name_with_two_spaces_is_said_with_one():
 def test_the_tower_clears_the_flight_to_land_on_the_runway_approach_brought_it_to(world):  # noqa: F811
     db, engine, _ = world
     airport = db.airport("LFXX")
-    # Wind from the west: 27 is in use. Approach brought the flight straight in to 09 (no approach to 27).
+    # Light wind from the west: 27 is in use. Approach brought the flight straight in to 09 (no approach to 27).
+    light = Issue("C", Weather(wind_dir_true=270, wind_kt=5, qnh_hpa=1013.2), 12 * 3600)
     engine.flight.arrival = ifr.Arrival("LFXX", "09", "V O R", 2500, 90.0, (51.0, 5.33))
-    assert engine._landing_runway(airport, ISSUE, at(51.0, 5.25, feet=1500), Intent("established")) == "09"
+    assert engine._landing_runway(airport, light, at(51.0, 5.25, feet=1500), Intent("established")) == "09"
+    # Once the wind is too strong behind it, not that runway.
+    assert engine._landing_runway(airport, ISSUE, at(51.0, 5.25, feet=1500), Intent("established")) == "27"
+
+
+def test_far_out_and_low_an_aircraft_cleared_for_the_approach_still_gets_the_alerts(world):  # noqa: F811
+    db, engine, _ = world
+    approach = db.station(124300, 51.0, 5.5, feet=3000)
+    flight = engine.flight
+    flight.cleared_ft = 3500
+    for stage in ("procedure", "intercept"):
+        flight.bust_called_for, flight.low_altitude_called = None, False
+        flight.arrival = ifr.Arrival("LFXX", "27", "R NAV", 2500, 270.0, (51.0, 5.37), stage=stage, final_nm=10)
+        far_and_low = {**at(51.0, 5.37 + 33 / 37.7, feet=500, heading=270), "vs_fpm": -1500.0}
+        assert "check your level" in ifr._watch(engine, approach, far_and_low, CALLSIGN).text  # was: silent
+
+
+def test_a_new_flight_forgets_who_the_last_one_was_sent_to(fields):
+    db = fields
+    engine = engine_for(db)
+    on_stand = {**parked(52.0, -1.0), "com1_khz": 118100}
+    tower = station_on(db, 118100, on_stand)
+    flight = engine.flight
+    flight.rules, flight.phase, flight.has_been_airborne, flight.origin_ident = "IFR", Phase.AIRBORNE, True, "EGAA"
+    flight.contacted.add(tower.key)
+    climbing = at(52.0, -0.95, feet=2000, heading=90, speed=120.0)
+    engine.tick(tower, ISSUE, climbing)  # "contact Sharefield Departure", on the frequency it shares with the tower
+    engine._observe(climbing)
+    engine.reset()  # the aircraft is put back on its stand in the sim
+    again = station_on(db, 118100, on_stand)
+    assert again.kind == "tower"  # was: the departure controller, which did not answer "request taxi"
+    assert engine.handle(Intent("request_taxi"), again, ISSUE, on_stand) is not None

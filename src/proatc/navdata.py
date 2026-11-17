@@ -77,6 +77,12 @@ def expect_station(khz: int, key: str) -> None:
     TALKING_TO[khz] = key
 
 
+def forget_stations() -> None:
+    """A new flight: nobody is being talked to, and nobody has been sent to."""
+    TALKING_TO.clear()
+    _HELD.clear()
+
+
 def is_preferred(ident: str) -> bool:
     return ident in _PREFERRED
 
@@ -91,12 +97,20 @@ def prefer_airports(idents) -> None:
 
 SPOKEN_LABEL = re.compile(
     r"([A-Za-z][A-Za-z' ]*?) "
-    r"(Tower|Twr|Ground|Gnd|Approach|App|Departure|Dep|Delivery|Del|Clearance|Information|ATIS|Control|Radar|Director|Arrival|Radio)"
+    r"(Tower|Twr|Ground|Gnd|Approach|App|Departure|Dep|Delivery|Del|Clearance|Information|Info|ATIS|Control|Radar|Director|Arrival|Radio)"
     # "Heathrow Tower 1", "De Gaulle Twr North 2", "De Gaulle Arrival NE/NW": the position is not spoken.
     r"(?:[ /]+(?:\d+|North|South|East|West|[NSEW]{1,2}))*",
     re.I,
 )
-ROLE_WORDS = {"Twr": "Tower", "Gnd": "Ground", "App": "Approach", "Dep": "Departure", "Del": "Delivery", "Atis": "Information"}
+ROLE_WORDS = {
+    "Info": "Information",
+    "Twr": "Tower",
+    "Gnd": "Ground",
+    "App": "Approach",
+    "Dep": "Departure",
+    "Del": "Delivery",
+    "Atis": "Information",
+}
 
 
 @dataclass
@@ -152,7 +166,7 @@ class Station:
     def callsign(self) -> str:
         """The name in the sim's data when it is a real callsign ('Luton Tower'), else built from the airport name."""
         match = SPOKEN_LABEL.fullmatch(self.label.strip())
-        if not match and self.kind in ("tower", "unicom") and re.search(r"\bAFIS\b|\bFISO?\b|\bInfo\b", self.label, re.I):
+        if not match and self.kind in ("tower", "unicom") and re.search(r"\bAFIS\b|\bFISO?\b", self.label, re.I):
             return f"{self.airport.spoken_name} Information"
         if match:
             role = match.group(2).title()
@@ -501,6 +515,8 @@ class AirportDB:
             return None
         held = _HELD.get(khz)
         sent_to = [found for found in in_range if f"{found[1]}:{found[3]}" == TALKING_TO.get(khz)]
+        if feet is None:
+            sent_to = [found for found in sent_to if found[3] in GROUND_SIDE]  # parked: tower or ground, never departure
         planned = [found for found in in_range if found[1] in _PREFERRED]
         kept = [found for found in in_range if held == (found[1], found[3])]
         # The station the flight was sent to, else the flight's own airport, else the station already being talked
