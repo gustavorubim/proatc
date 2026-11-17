@@ -334,6 +334,23 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
           </div>
         )}
         {station && !station.airport && <div className="muted">En-route centre</div>}
+        {radio?.second && (
+          <div
+            className={radio.second.listening && radio.second.station ? 'second listening' : 'second'}
+            title={
+              radio.second.listening
+                ? `COM${radio.second.radio} is on in the aircraft's audio panel: an ATIS on it is heard under the first radio`
+                : `COM${radio.second.radio} is not being listened to: turn its reception on in the aircraft's audio panel`
+            }
+          >
+            <span className="tag">COM{radio.second.radio}</span>
+            <span className="mono">{radio.second.mhz}</span>
+            <span className="name">
+              {radio.second.station ?? 'no station'}
+              {radio.second.listening ? '' : ' · off'}
+            </span>
+          </div>
+        )}
       </section>
 
       <section className="card">
@@ -477,6 +494,18 @@ function RadioPanel({ engine, send }: { engine: EngineState | null; send: (comma
               >
                 <span className="mono">{frequency.mhz}</span>
                 <span className="name">{frequency.label || KIND_LABEL[frequency.kind] || frequency.kind}</span>
+                {canTune && radio?.second && (
+                  <button
+                    className="other"
+                    title={`Tune COM${radio.second.radio}, the radio you are not transmitting on, to listen`}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      send({ cmd: 'tune', mhz: frequency.mhz, radio: 'other' })
+                    }}
+                  >
+                    {radio.second.radio}
+                  </button>
+                )}
               </li>
             ))}
           </ul>

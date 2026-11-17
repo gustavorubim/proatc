@@ -15,7 +15,7 @@ from .events import Emit, console
 from .navdata import AirportDB, Station
 from .radio_fx import radio_effect, radio_stream
 from .weather import Weather, from_snapshot
-from .xpbridge import magnetic_variation, tuned_khz
+from .xpbridge import magnetic_variation, other_radio, tuned_khz
 
 
 class SimClock:
@@ -131,6 +131,85 @@ def briefing(station: Station, weather: Weather | None, letter: str | None, vari
     if letter:
         facts["current_atis"] = say.letter(letter)
     return facts
+
+
+SECOND_RADIO_GAIN = 0.5  # the second radio is heard under the first, as with its volume turned down
+
+
+def monitored(db: AirportDB, state: dict) -> tuple[dict, Station | None]:
+    """(the radio that is not transmitted on, the station in range on it). The same station as on the
+    transmitting radio counts as none: it is already heard."""
+    other = other_radio(state)
+    if not other["khz"] or "lat" not in state or other["khz"] == tuned_khz(state):
+        return other, None
+    station = db.station(other["khz"], state["lat"], state["lon"])
+    if station is None and db.centers:
+        station = db.centers.on_frequency(other["khz"], state["lat"], state["lon"])
+    return other, station
+
+
+class SecondRadio(threading.Thread):
+    """The COM radio the pilot is not transmitting on, when the audio panel has it on: its ATIS is heard
+    under whatever happens on the first radio. Listening only: nobody on it is talking to this aircraft."""
+
+    def __init__(self, bridge, db: AirportDB, tts, player, book: AtisBook, config, emit: Emit = console):
+        super().__init__(name="second-radio", daemon=True)
+        self.bridge, self.db, self.tts, self.player, self.book, self.config = bridge, db, tts, player, book, config
+        self.emit = emit
+        self._halt = threading.Event()
+        self._text = ""
+        self._audio = None
+        self._again_at = 0.0
+
+    def stop(self) -> None:
+        self._halt.set()
+        self.player.stop()
+
+    def run(self) -> None:
+        while not self._halt.wait(0.5):
+            try:
+                self.tick()
+            except Exception as error:
+                self.emit({"type": "error", "text": f"Second radio: {error}"})
+                self._halt.wait(5)
+
+    def heard(self, state: dict):
+        """(frequency, ATIS station, loudness) the second radio is playing now, or None."""
+        if not self.config.atc.second_radio or state.get("paused"):
+            return None
+        other, station = monitored(self.db, state)
+        if not other["listening"] or station is None or station.kind != "atis":
+            return None
+        return other["khz"], station, SECOND_RADIO_GAIN * min(1.0, other["volume"] / 0.55)
+
+    def tick(self) -> None:
+        state = self.bridge.snapshot() if self.bridge.connected else {}
+        heard = self.heard(state)
+        if heard is None:
+            if self.player.playing:
+                self.player.stop()  # tuned away, turned down, or switched off
+            self._again_at = 0.0
+            return
+        khz, station, gain = heard
+        if self.player.playing or time.monotonic() < self._again_at:
+            return
+        weather = observe(self.db, station.airport, state)
+        if weather is None:
+            return
+        variation = round(magnetic_variation(state))
+        _, text = self.book.text(station.airport, weather, state.get("zulu_seconds", 0.0), variation, station.place)
+        if text != self._text:
+            samples, rate = self.tts.speak(text, voice=self.config.tts.atis_voice, speed=self.config.tts.atis_speed)
+            if self.config.radio.enabled:
+                samples = radio_effect(samples, rate, self.config.radio.noise)
+            self._text, self._audio = text, (samples, rate)
+            radio = other_radio(state)["radio"]
+            self.emit(
+                {"type": "atis", "airport": station.airport.ident, "mhz": f"{khz / 1000:.3f}", "text": text, "radio": radio}
+            )
+        samples, rate = self._audio
+        self.player.play_stream(iter([samples * gain]), rate)
+        self._again_at = time.monotonic() + len(samples) / rate + 2  # a pause between repeats
 
 
 class AtisBroadcaster(threading.Thread):

@@ -37,7 +37,7 @@ from .config import PROJECT_DIR, Config, editable_values, load_settings, save_se
 from .flightplan import PlanError, fetch_simbrief, manual
 from .intents import Intent
 from .navdata import AirportDB, distance_nm
-from .radio import current_station, observe
+from .radio import current_station, monitored, observe
 from .voice_loop import Session
 from .xpbridge import SimUnavailable, describe, magnetic_variation
 
@@ -161,6 +161,15 @@ def build_state(session: Session, db: AirportDB) -> dict:
                     "airport": station.airport.ident if station.airport else None,
                     "distance_nm": round(station.distance_nm, 1)} if station else None,
     }  # fmt: skip
+    other, listened = monitored(db, raw)
+    if other["khz"]:
+        state["radio"]["second"] = {
+            "radio": other["radio"],
+            "mhz": f"{other['khz'] / 1000:.3f}",
+            "listening": other["listening"] and config.atc.second_radio,
+            "station": listened.callsign if listened else None,
+            "kind": listened.kind if listened else None,
+        }
     airport = station.airport if station else None
     if airport is None and "lat" in raw:
         airport = airport_to_list(session, db, raw)
@@ -347,7 +356,7 @@ class AppServer:
             if found:
                 self.emit({"type": "chart", **found})
         elif name == "tune":
-            session.tune(str(command.get("mhz", "")))
+            session.tune(str(command.get("mhz", "")), other=command.get("radio") == "other")
         elif name == "capture_ptt":
             session.capture_ptt()
         elif name == "clear_joystick":

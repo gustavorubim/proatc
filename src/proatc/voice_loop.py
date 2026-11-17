@@ -36,11 +36,11 @@ from .navdata import AirportDB
 from .navfix import open_navfix
 from .procedures import NavaidNames, route_fixes
 from .ptt import PushToTalk
-from .radio import AtisBroadcaster, SimClock, briefing, current_station, observe, station_voice, transmit
+from .radio import AtisBroadcaster, SecondRadio, SimClock, briefing, current_station, observe, station_voice, transmit
 from .replay import snapshot
 from .stt import SpeechToText
 from .tts import TextToSpeech, download_models, models_present
-from .xpbridge import SimUnavailable, XPBridge, describe, magnetic_variation
+from .xpbridge import SimUnavailable, XPBridge, describe, magnetic_variation, transmit_radio
 
 MIN_SECONDS = 0.4
 
@@ -220,6 +220,12 @@ class Session:
             after=lambda: self.jobs.put(("after", None, None)),
         )  # fmt: skip
         self.broadcaster.start()
+        second_db = AirportDB()  # each background thread has its own connection
+        second_db.centers, second_db.metars = self.centers, self.metars
+        self.second_radio = SecondRadio(
+            self.bridge, second_db, self.tts, Player(config.audio.output_device, alongside=True), self.book, config, emit
+        )
+        self.second_radio.start()
         self.ptt = PushToTalk(config.ptt.key, on_down=lambda: self.jobs.put(("voice", None, None)))
         self.ptt.start()
         self.joystick = JoystickButtons(self._joystick_button, config.ptt.joystick, config.ptt.joystick_button)
@@ -263,6 +269,7 @@ class Session:
             self.recorder.device = audio["input_device"]
         if "output_device" in audio:
             self.player.device = audio["output_device"]
+            self.second_radio.player.device = audio["output_device"]
         if "key" in ptt:
             self.ptt.set_key(ptt["key"])
         if "joystick" in ptt or "joystick_button" in ptt:
@@ -330,14 +337,16 @@ class Session:
 
     # ---- the radio ----------------------------------------------------------
 
-    def tune(self, mhz: str) -> None:
-        """Set the COM radio selected for transmitting to this frequency, at the pilot's request."""
+    def tune(self, mhz: str, other: bool = False) -> None:
+        """Set the COM radio selected for transmitting to this frequency, at the pilot's request; with
+        `other`, the radio that is not: the one to listen on."""
         if not self.config.sim.allow_tuning:
             raise SimUnavailable("Tuning from the app is switched off (sim.allow_tuning in config.toml).")
         khz = int(round(float(mhz) * 1000))
         if not 118000 <= khz <= 136990:
             raise SimUnavailable(f"{mhz} is not a voice frequency.")
-        radio = 2 if self.bridge.snapshot().get("com_selection") == 7 else 1
+        radio = transmit_radio(self.bridge.snapshot())
+        radio = 3 - radio if other else radio
         key = f"com{radio}_khz"
         self.bridge.write(key, khz)
         deadline = time.monotonic() + 2.0
@@ -520,6 +529,7 @@ class Session:
         if not self.ready:
             return
         self.broadcaster.stop()
+        self.second_radio.stop()
         self.player.stop()
         self.ptt.stop()
         if self.joystick:

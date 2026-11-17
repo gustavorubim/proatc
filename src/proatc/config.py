@@ -92,6 +92,9 @@ class Atc:
     copilot: str = "off"
     traffic: bool = True  # traffic calls and runway sequencing against X-Plane's AI aircraft
     chatter: str = "some"  # other aircraft heard on the frequency: "off", "some" or "busy". Sound only.
+    # The COM radio you are not transmitting on is heard too when the aircraft's audio panel has it on:
+    # an ATIS on COM2 while you work a controller on COM1.
+    second_radio: bool = True
 
 
 @dataclass
@@ -130,7 +133,7 @@ EDITABLE: dict[str, dict[str, object]] = {
     },  # fmt: skip
     "llm": {"model": str, "provider": PROVIDERS, "local_url": str, "local_model": str},
     "radio": {"enabled": bool},
-    "atc": {"holding": HOLDING, "copilot": COPILOT, "traffic": bool, "chatter": CHATTER},
+    "atc": {"holding": HOLDING, "copilot": COPILOT, "traffic": bool, "chatter": CHATTER, "second_radio": bool},
     "sim": {"allow_tuning": bool, "auto_tune": bool},
     "remote": {"enabled": bool},
 }

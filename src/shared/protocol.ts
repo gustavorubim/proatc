@@ -60,6 +60,8 @@ export interface EngineState {
   radio: {
     mhz: string | null
     station: { callsign: string; kind: string; airport: string | null; distance_nm: number } | null
+    /** The COM radio that is not transmitted on: heard when the aircraft's audio panel has it on. */
+    second?: { radio: number; mhz: string; listening: boolean; station: string | null; kind: string | null }
   } | null
   airport: {
     ident: string
@@ -126,7 +128,7 @@ export interface EngineState {
       }
       llm: { model: string; provider: string; local_url: string; local_model: string }
       radio: { enabled: boolean }
-      atc: { holding: string; copilot: string; traffic: boolean; chatter: string }
+      atc: { holding: string; copilot: string; traffic: boolean; chatter: string; second_radio: boolean }
       sim: { allow_tuning: boolean; auto_tune: boolean }
       remote: { enabled: boolean }
     }
@@ -186,7 +188,7 @@ export type Command =
   | { cmd: 'simbrief'; user: string }
   | { cmd: 'plan'; destination: string; cruise: string; route: string }
   | { cmd: 'clear_plan' }
-  | { cmd: 'tune'; mhz: string }
+  | { cmd: 'tune'; mhz: string; radio?: 'other' }
   | { cmd: 'settings'; changes: Record<string, Record<string, unknown>> }
   | { cmd: 'capture_ptt' }
   | { cmd: 'clear_joystick' }
