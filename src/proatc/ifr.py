@@ -1350,8 +1350,49 @@ def _route_watch(
     return _reply(engine, text, event="off_route")
 
 
+def alerts(engine, station, raw, callsign):
+    """What a radar controller says at once even while waiting for a readback: a level bust, a low altitude
+    alert, traffic. None of it is an instruction to read back."""
+    if bool(raw.get("on_ground", True)) or "lat" not in raw or station.key not in engine.flight.contacted:
+        return None
+    if station.kind == "center" and station.center.oceanic:
+        return None  # no radar
+    return _safety(engine, station, raw, callsign) or _traffic(engine, raw, callsign)
+
+
+def _traffic(engine, raw, callsign):
+    """Traffic information. A Basic Service gives none; every other service, and every IFR flight, gets it."""
+    flight = engine.flight
+    if not engine.traffic_enabled or (flight.following and flight.service == "basic"):
+        return None
+    call = traffic.advisory(raw, engine._traffic_seen, engine.now())
+    return _reply(engine, f"{callsign}, {call}") if call else None
+
+
 def _watch(engine, station, raw, callsign):
     """Things a radar controller notices: a level bust, an assigned heading not being flown."""
+    arrival = engine.flight.arrival
+    alert = _safety(engine, station, raw, callsign)
+    if alert:
+        return alert
+    if (
+        arrival
+        and arrival.heading is not None
+        and arrival.stage in ("downwind", "base")
+        and not arrival.heading_asked
+        and engine.now() - arrival.heading_at > HEADING_GRACE_S
+        and "heading_mag" in raw
+        and abs((raw["heading_mag"] - arrival.heading + 180) % 360 - 180) > 25
+    ):
+        arrival.heading_asked = True
+        return _reply(
+            engine, f"{callsign}, fly heading {say.heading(arrival.heading)}", {"heading": arrival.heading}, "heading_not_flown"
+        )
+    return _traffic(engine, raw, callsign) or vfr.airspace_watch(engine, station, raw, callsign, _faa(station))
+
+
+def _safety(engine, station, raw, callsign):
+    """A level bust or a low altitude alert."""
     flight, arrival = engine.flight, engine.flight.arrival
     feet, rate, cleared = _feet(raw), raw.get("vs_fpm", 0.0), flight.cleared_ft
     faa = _faa(station)
@@ -1375,25 +1416,7 @@ def _watch(engine, station, raw, callsign):
             safe = engine.navfix.grid_safe_ft(raw["lat"], raw["lon"]) if engine.navfix else None
             tail = f", minimum safe altitude {say.altitude(safe)} feet" if safe else ""
             return _reply(engine, f"{callsign}, low altitude alert, check your altitude immediately{tail}", event="low_altitude")
-    if (
-        arrival
-        and arrival.heading is not None
-        and arrival.stage in ("downwind", "base")
-        and not arrival.heading_asked
-        and engine.now() - arrival.heading_at > HEADING_GRACE_S
-        and "heading_mag" in raw
-        and abs((raw["heading_mag"] - arrival.heading + 180) % 360 - 180) > 25
-    ):
-        arrival.heading_asked = True
-        return _reply(
-            engine, f"{callsign}, fly heading {say.heading(arrival.heading)}", {"heading": arrival.heading}, "heading_not_flown"
-        )
-    # A Basic Service gives no traffic information; every other service, and every IFR flight, gets it.
-    if engine.traffic_enabled and not (flight.following and flight.service == "basic"):
-        call = traffic.advisory(raw, engine._traffic_seen, engine.now())
-        if call:
-            return _reply(engine, f"{callsign}, {call}")
-    return vfr.airspace_watch(engine, station, raw, callsign, faa)
+    return None
 
 
 def tick(engine, station, issue, raw, variation, callsign):

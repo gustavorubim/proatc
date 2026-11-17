@@ -210,19 +210,24 @@ class SimBridge:
 
     A written COM frequency is reported `tune_delay` seconds later, `snap` kHz off (the name of the 8.33 kHz
     channel it was snapped to). `refuse` makes writes fail: "error" (the sim refuses them) or "ignored"
-    (accepted and never taken, as some add-on aircraft do)."""
+    (accepted and never taken, as some add-on aircraft do). `settle_khz`: half a second after that, the sim
+    reports the frequency this much off what was written, as one that rounds to its own 8.33 kHz channel does.
+    `vertical_fpm`: how fast the autopilot climbs or descends to the cleared level; `override` replaces any
+    value of the snapshot (a scenario's own)."""
 
     def __init__(self, clock: SimTime, lat: float, lon: float, feet: float, khz: int, speed_ms: float = 230.0,
-                 cleared=None, tune_delay: float = 0.3, refuse: str | None = None, snap: int = 0):  # fmt: skip
+                 cleared=None, tune_delay: float = 0.3, refuse: str | None = None, snap: int = 0, settle_khz: int = 0,
+                 vertical_fpm: float = 1500.0):  # fmt: skip
         self.clock, self.connected = clock, True
         self.lat, self.lon0, self.speed_ms = lat, lon, speed_ms
-        self.feet, self._feet_at = feet, clock.monotonic()
+        self.feet, self._feet_at, self.vs_fpm, self.vertical_fpm = feet, clock.monotonic(), 0.0, vertical_fpm
         self.start = clock.monotonic()
         self.cleared = cleared or (lambda: None)  # the autopilot's target level
         self.radios = {"com1_khz": khz, "com2_khz": 0}
-        self.tune_delay, self.refuse, self.snap = tune_delay, refuse, snap
+        self.tune_delay, self.refuse, self.snap, self.settle_khz = tune_delay, refuse, snap, settle_khz
         self._landing: list[tuple[float, str, int]] = []  # (when the sim reports it, key, value)
         self.written: list[tuple[float, str, int]] = []
+        self.override: dict = {}
 
     def write(self, key: str, value) -> None:
         now = self.clock.monotonic()
@@ -231,6 +236,8 @@ class SimBridge:
             raise SimUnavailable("X-Plane refused the change (403).")
         if self.refuse != "ignored":
             self._landing.append((now + self.tune_delay, key, int(value) + self.snap))
+            if self.settle_khz:
+                self._landing.append((now + self.tune_delay + 0.5, key, int(value) + self.snap + self.settle_khz))
 
     def tune_by_hand(self, khz: int, key: str = "com1_khz") -> None:
         """The pilot turns the knob: at once, and ahead of any write still on its way."""
@@ -244,10 +251,12 @@ class SimBridge:
         self._landing = [item for item in self._landing if item[0] > now]
 
     def _fly(self, now: float) -> None:
-        target = self.cleared()
+        target, before = self.cleared(), self.feet
         if target is not None:
-            step = 25.0 * (now - self._feet_at)  # 1,500 feet a minute
+            step = self.vertical_fpm / 60 * (now - self._feet_at)
             self.feet = max(target, self.feet - step) if self.feet > target else min(target, self.feet + step)
+        if now > self._feet_at:
+            self.vs_fpm = 0.0 if self.feet == before else self.vertical_fpm * (1 if self.feet > before else -1)
         self._feet_at = now
 
     def lon(self, now: float | None = None) -> float:
@@ -262,8 +271,9 @@ class SimBridge:
         return {
             "tail_number": "G-ABCD", "lat": self.lat, "lon": self.lon(now), "on_ground": 0, "elevation_m": metres,
             "agl_m": metres, "groundspeed_ms": self.speed_ms, "heading_mag": 90.0, "heading_true": 90.0, "ias_kt": 240.0,
-            "zulu_seconds": 43200.0, "wx_qnh_pas": 101300.0, "wx_visibility_sm": 10.0, "wx_wind_alt_m": [150.0],
-            "wx_wind_kt": [8.0], "wx_wind_dir": [270.0], "com_selection": 6, **self.radios,
+            "vs_fpm": self.vs_fpm, "zulu_seconds": 43200.0, "wx_qnh_pas": 101300.0, "wx_visibility_sm": 10.0,
+            "wx_wind_alt_m": [150.0], "wx_wind_kt": [8.0], "wx_wind_dir": [270.0], "com_selection": 6, **self.radios,
+            **self.override,
         }  # fmt: skip
 
     def stop(self) -> None:
@@ -278,15 +288,26 @@ def seconds_to_say(text: str) -> float:
 
 
 class SimPlayer:
-    """The sound card, as audio_io.Player behaves: one sound at a time, a new one cuts the last off."""
+    """The sound card, as audio_io.Player behaves: one sound at a time, a new one cuts the last off.
 
-    def __init__(self, clock: SimTime, alongside: bool = False):
+    With `voices` (SimTts.made) it knows what each sound says, and notes every sentence cut off by another
+    one starting: (when, the sentence cut off, the one that cut it)."""
+
+    def __init__(self, clock: SimTime, alongside: bool = False, voices: dict | None = None):
         self.clock, self.alongside, self.device = clock, alongside, None
         self._generation, self._ends_at = 0, 0.0
+        self.voices = voices if voices is not None else {}
+        self._saying: str | None = None
+        self.cut: list[tuple[float, str, str | None]] = []
 
     def play(self, samples, rate: int) -> int:
+        made = self.voices.get(id(samples))
+        text = made[1] if made is not None and made[0] is samples else None  # chatter is scaled: not a known voice
+        if self.playing and self._saying is not None:
+            self.cut.append((self.clock.monotonic(), self._saying, text))
         self._generation += 1
         self._ends_at = self.clock.monotonic() + len(samples) / rate
+        self._saying = text
         return self._generation
 
     def play_stream(self, pieces, rate: int) -> int:
@@ -312,15 +333,23 @@ class SimPlayer:
 
 
 class SimTts:
+    """The voices. Making one takes `delay` simulated seconds (the real engines take 0.2 to 6)."""
+
     streams = False
     engine_name = "stand-in"
 
-    def __init__(self):
+    def __init__(self, clock: SimTime | None = None, delay: float = 0.0):
+        self.clock, self.delay = clock, delay
         self.spoken: list[str] = []
+        self.made: dict[int, tuple] = {}  # id(samples) -> (samples, text): what the player is playing
 
     def speak(self, text: str, voice=None, speed=None):
         self.spoken.append(text)
-        return np.zeros(int(seconds_to_say(text) * SOUND_RATE), dtype=np.float32), SOUND_RATE
+        if self.delay and self.clock is not None:
+            self.clock.sleep(self.delay)
+        samples = np.zeros(int(seconds_to_say(text) * SOUND_RATE), dtype=np.float32)
+        self.made[id(samples)] = (samples, text)
+        return samples, SOUND_RATE
 
     def voices(self) -> list[str]:
         return ["controller", "pilot"]
@@ -337,11 +366,21 @@ class SimStt:
 
 
 class SimRecorder:
+    """The microphone: from `start` to `stop`, it hears the pilot for the time the key was down."""
+
+    def __init__(self, clock: SimTime, ptt: SimPtt | None = None):
+        self.clock, self.ptt, self._from = clock, ptt, None
+
     def start(self) -> None:
-        pass
+        self._from = self.clock.monotonic()
 
     def stop(self):
-        return np.full(16000, 0.2, dtype=np.float32)
+        start, end = self._from, self.clock.monotonic()
+        self._from = None
+        if start is None or self.ptt is None:
+            return np.zeros(0, dtype=np.float32)
+        spoken = sum(max(0.0, min(end, released) - max(start, pressed)) for pressed, released in self.ptt.held)
+        return np.full(int(spoken * 16000), 0.2, dtype=np.float32)
 
 
 class SimPtt:
@@ -441,7 +480,8 @@ class Rig:
 
     def __init__(self, tmp_path, *, miles_out: float = 57, feet: float = 13000, khz: int = WEST, copilot: str = "full",
                  auto_tune: bool = False, allow_tuning: bool = True, tune_delay: float = 0.3, refuse: str | None = None, snap: int = 0,
-                 chatter: str = "off", seed: int = 1, speak_pilot_text: bool = True):  # fmt: skip
+                 chatter: str = "off", seed: int = 1, speak_pilot_text: bool = True, voice_delay: float = 0.0,
+                 settle_khz: int = 0):  # fmt: skip
         self.clock = SimTime()
         self.db = _world_db(tmp_path)
         self.db.centers = CenterIndex(parse_atc(NEAR_BOUNDARY))
@@ -456,7 +496,7 @@ class Rig:
         destination = self.db.airport("LFXX")
         lon = destination.lon - miles_out / (60 * math.cos(math.radians(51.0)))
         self.bridge = SimBridge(self.clock, 51.0, lon, feet, khz, cleared=lambda: engine.flight.cleared_ft,
-                                tune_delay=tune_delay, refuse=refuse, snap=snap)  # fmt: skip
+                                tune_delay=tune_delay, refuse=refuse, snap=snap, settle_khz=settle_khz)  # fmt: skip
 
         config = Config()
         config.atc.copilot, config.atc.chatter, config.atc.second_radio = copilot, chatter, True
@@ -468,9 +508,10 @@ class Rig:
         session = Session(config, emit=self._record, clock=self.clock)
         session.jobs = SimQueue(self.clock)
         session.db, session.book, session.engine = self.db, AtisBook(), engine
-        session.bridge, session.tts, session.stt = self.bridge, SimTts(), SimStt()
-        session.player, session.recorder = SimPlayer(self.clock), SimRecorder()
+        session.bridge, session.tts, session.stt = self.bridge, SimTts(self.clock, voice_delay), SimStt()
+        session.player = SimPlayer(self.clock, voices=session.tts.made)
         session.ptt = SimPtt(self.clock, on_down=session._key_down)
+        session.recorder = SimRecorder(self.clock, session.ptt)
         session.controller, session.parser = SimModel(), SimParser()
         session.centers = self.db.centers
         session.broadcaster = AtisBroadcaster(
@@ -509,7 +550,7 @@ class Rig:
         return current_station(self.db, self.bridge.snapshot())[1]
 
     def tuned_mhz(self) -> str:
-        return f"{self.bridge.radios['com1_khz'] / 1000:.3f}"
+        return f"{self.bridge.snapshot()['com1_khz'] / 1000:.3f}"  # what the sim reports by now
 
     def said(self, kind: str) -> list[Heard]:
         return [item for item in self.heard if item.type == kind]
@@ -594,10 +635,11 @@ class Rig:
     def settled_on(self, khz: int, callsign: str, errors: int = 0) -> list[str]:
         """What is wrong, if anything, with the flight's state at the end of a run: it must be on this frequency,
         checked in with this station, with no readback owed and no hand-off left to follow; nobody may have talked
-        over the pilot, and nothing may have been said twice. `errors`: how many error messages are expected."""
+        over the pilot or over another call, and nothing may have been said twice. `errors`: how many error
+        messages are expected."""
         problems = []
         station, flight = self.station(), self.engine.flight
-        if self.bridge.radios["com1_khz"] != khz:
+        if self.bridge.snapshot()["com1_khz"] != khz:
             problems.append(f"tuned to {self.tuned_mhz()}, not {khz / 1000:.3f}")
         if station is None or station.callsign != callsign:
             problems.append(f"talking to {station and station.callsign}, not {callsign}")
@@ -613,10 +655,14 @@ class Rig:
         return problems + self.said_twice() + self.talked_over()
 
     def talked_over(self) -> list[str]:
-        """Controller calls that began while the pilot's key was down."""
+        """Controller calls that began while the pilot's key was down, and calls (the controller's, or the
+        pilot's voice) cut off by another one starting: neither was heard in full. A call stopped because the
+        pilot keyed the microphone or turned the knob is not counted: that was the pilot's doing."""
         held = self.session.ptt.held
-        return [f"{item.station} spoke at {item.t:.2f} while the pilot was transmitting: {item.text}"
-                for item in self.said("atc") if any(start < item.t < end for start, end in held)]  # fmt: skip
+        over_key = [f"{item.station} spoke at {item.t:.2f} while the pilot was transmitting: {item.text}"
+                    for item in self.said("atc") if any(start < item.t < end for start, end in held)]  # fmt: skip
+        cut = [f"at {t:.2f} '{said}' was cut off by '{by or 'another sound'}'" for t, said, by in self.session.player.cut]
+        return over_key + cut
 
     def said_twice(self) -> list[str]:
         """The same call made twice running to the same station, or an instruction left unanswered."""

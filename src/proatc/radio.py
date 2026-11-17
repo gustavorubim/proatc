@@ -88,20 +88,28 @@ def prime(pieces):
     return all_of_them()
 
 
-def transmit(tts, player, text: str, voice: dict, radio, on_sound=None) -> int:
+def transmit(tts, player, text: str, voice: dict, radio, on_sound=None, go=None) -> int | None:
     """Say `text` on the frequency. With a voice engine that gives sound in pieces, it is played as it is made:
-    the controller starts speaking before the sentence is finished. Returns the player's ticket."""
+    the controller starts speaking before the sentence is finished. Returns the player's ticket.
+
+    Making the voice takes seconds. `go`, asked once it is ready: whether the frequency is still free. If not,
+    nothing is played and None is returned."""
     if getattr(tts, "streams", False) and hasattr(player, "play_stream"):
         pieces, rate = tts.stream(text, **voice)
         if radio.enabled:
             pieces = radio_stream(pieces, rate, radio.noise)
         pieces = prime(pieces)
+        if go and not go():
+            pieces.close()
+            return None
         if on_sound:
             on_sound()
         return player.play_stream(pieces, rate)
     samples, rate = tts.speak(text, **voice)
     if radio.enabled:
         samples = radio_effect(samples, rate, radio.noise)
+    if go and not go():
+        return None
     if on_sound:
         on_sound()
     return player.play(samples, rate)
@@ -264,6 +272,7 @@ class AtisBroadcaster(threading.Thread):
         self._chatter_at = 0.0  # when the next exchange is due
         self._chatter_until = 0.0  # while an exchange is playing
         self._tuned: int | None = None  # the frequency at the last tick
+        self._unsaid: tuple | None = None  # (station key, reply) decided but not yet said: the frequency was taken
 
     def stop(self) -> None:
         self._halt.set()
@@ -318,24 +327,49 @@ class AtisBroadcaster(threading.Thread):
         """Say what the controller has to say without being asked. True when something was said."""
         weather = observe(self.db, station.airport, state) if station.airport else None
         issue = self.book.current(station.airport, weather, state.get("zulu_seconds", 0.0)) if weather else None
-        reply = self.engine.tick(station, issue, state)
+        reply = self._still_to_say(station) or self.engine.tick(station, issue, state)
         if not reply or not reply.text:
             return False
         self._chatter_until = 0.0
         event = {"type": "atc", "station": station.callsign, "text": reply.text, "unprompted": True}
         if reply.event:
             event["event"] = reply.event
-        self.emit(event)
-        ticket = transmit(self.tts, self.player, reply.text, station_voice(self.tts, station), self.config.radio)
-        # Tuned away mid-sentence: the rest is not heard on the new frequency.
         khz = tuned_khz(state)
+        free = lambda: not (self._halt.is_set() or self.busy.is_set() or self._retuned(khz))  # noqa: E731
+        ticket = transmit(self.tts, self.player, reply.text, station_voice(self.tts, station), self.config.radio,
+                          on_sound=lambda: self._saying(reply, event), go=free)  # fmt: skip
+        if ticket is None:
+            # The pilot keyed the microphone, or a call began, or the radio was retuned, while the voice was being
+            # made: the controller waits, and says it when the frequency is next free.
+            self._unsaid = (station.key, reply)
+            return True
+        # Tuned away mid-sentence: the rest is not heard on the new frequency.
         self.player.wait(ticket, should_stop=lambda: self._halt.is_set() or self.busy.is_set() or self._retuned(khz))
         if self.after:
             self.after()
         return True
 
+    def _still_to_say(self, station: Station):
+        """A call that was decided and not said, if it is still this station's to say. An instruction that has
+        been replaced, or a station that is no longer tuned, drops it: the engine says it again if it must."""
+        unsaid, self._unsaid = self._unsaid, None
+        if unsaid is None or unsaid[0] != station.key:
+            return None
+        reply = unsaid[1]
+        if reply.expect and self.engine.flight.pending is not reply:
+            return None
+        return reply
+
+    def _saying(self, reply, event: dict) -> None:
+        """The call is heard from now: it goes in the log, and the wait for its readback starts now."""
+        with self.engine.lock:
+            if self.engine.flight.pending is reply:
+                self.engine.flight.pending_at = self.engine.now()
+        self.emit(event)
+
     def _retuned(self, khz: int | None) -> bool:
-        return tuned_khz(self.bridge.snapshot()) != khz
+        now = tuned_khz(self.bridge.snapshot())
+        return now is None or khz is None or abs(now - khz) > 5  # a sim that settles 118.420 to 118.425 has not
 
     # ---- other aircraft on the frequency (sound only) -----------------------
 
@@ -360,8 +394,7 @@ class AtisBroadcaster(threading.Thread):
             return
         if now < self._chatter_at or now < self._chatter_until:
             return
-        flight = self.engine.flight
-        if (flight.pending is not None and flight.pending_key == station.key) or getattr(self.player, "playing", False):
+        if self.engine.waiting_on(station, state) or getattr(self.player, "playing", False):
             self._chatter_at = now + 4  # the controller is waiting for your readback, or someone is talking
             return
         weather = observe(self.db, station.airport, state) if station.airport else None

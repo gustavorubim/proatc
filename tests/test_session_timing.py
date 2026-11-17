@@ -309,13 +309,139 @@ def test_a_frequency_the_radio_does_not_take_is_reported_once(rigs, refuse, snap
     assert rig.tuned_mhz() == ("127.500" if refuse else "118.010") and str(failed.value).count("118.005") == 1
 
 
+# ---- while a readback is owed -------------------------------------------------------------
+
+
+def test_a_level_bust_is_called_at_once_even_while_a_readback_is_owed(rigs):
+    rig = rigs(copilot="off")
+    rig.controller_says(5, descend_to(11000))
+    rig.run_until(6)
+    rig.bridge.cleared, rig.bridge.vertical_fpm = (lambda: 9000), 6000  # the pilot dials too low, and fast
+    rig.run_until(40)
+    crossed = 6 + (13000 - (11000 - 400)) / 100  # 400 ft through the cleared level, at 100 ft a second
+    bust = next(item for item in rig.said("atc") if "check your level" in item.text)
+    assert bust.t < crossed + 1.5, rig.transcript()  # not held back until the descent is read back
+    assert rig.engine.flight.pending is not None and "descend" in rig.engine.flight.pending.text  # still owed
+
+
+def test_a_low_altitude_alert_is_given_at_once_even_while_a_readback_is_owed(rigs):
+    rig = rigs(copilot="off")
+    engine, raw, station = rig.engine, rig.bridge.snapshot(), rig.station()
+    rig.controller_says(0, descend_to(11000))
+    assert "descend" in engine.tick(station, None, raw).text and engine.flight.pending is not None
+    engine.flight.cleared_ft = 500  # so that it is the ground, not the cleared level, that is close
+    low = {**raw, "agl_m": 600 * 0.3048, "elevation_m": 600 * 0.3048, "vs_fpm": -2000.0}
+    alert = engine.tick(station, None, low)
+    assert alert is not None and "low altitude alert" in alert.text and not alert.expect
+    assert "descend" in engine.flight.pending.text  # the descent is still owed, not replaced
+
+
+def test_after_the_controller_says_it_again_the_pilot_has_time_to_read_it_back_before_the_next(rigs):
+    rig = rigs(copilot="off")
+    rig.controller_says(5, descend_to(11000))
+    rig.controller_says(6, handoff_to_next_centre)  # waiting behind the descent
+    rig.run_until(45)
+    again = next(item for item in rig.said("atc") if "I say again" in item.text)
+    assert "descend" in again.text and not any("contact Eastland" in item.text for item in rig.said("atc"))
+    rig.say("Descend flight level one one zero, Golf Alfa Bravo Charlie Delta", Intent("readback", altitude=11000))
+    rig.run_until(60)
+    assert rig.said("silent") and not any("negative" in item.text or "read back" in item.text for item in rig.said("atc"))
+    handoff = next(item for item in rig.said("atc") if "contact Eastland" in item.text)
+    assert handoff.t > rig.said("pilot")[0].t  # given once the descent was read back
+    ok(rig, rig.talked_over())
+
+
+def test_with_auto_tune_alone_a_hand_off_not_read_back_does_not_pull_the_pilot_off_another_frequency(rigs):
+    rig = rigs(copilot="off", auto_tune=True)
+    rig.controller_says(5, handoff_to_next_centre)
+    rig.run_until(10)
+    rig.tune_by_hand(121500)  # the pilot listens elsewhere: the hand-off has not been read back
+    rig.run_until(30)
+    assert not rig.bridge.written and rig.tuned_mhz() == "121.500"
+
+
+def test_a_copilot_readback_lost_to_a_retune_is_given_again_when_the_pilot_comes_back(rigs):
+    rig = rigs(copilot="readbacks")
+    rig.controller_says(5, descend_to(11000))
+    rig.run_until(12)  # the copilot is reading back
+    assert rig.session.busy.is_set()
+    rig.tune_by_hand(EAST_2)
+    rig.run_until(16)
+    assert any("changed during the call" in item.text for item in rig.said("info"))
+    rig.tune_by_hand(WEST)  # back on Westland, who is still waiting for it
+    rig.run_until(30)  # well before Westland would say it again
+    assert rig.engine.flight.pending is None, rig.transcript()
+    assert [item.station for item in readbacks(rig)] == ["Westland Control"]
+
+
+# ---- slow voices, slow jobs, a sim that rounds its frequencies ----------------------------
+
+
+def test_a_controller_whose_voice_is_slow_to_make_does_not_cut_into_a_call_begun_meanwhile(rigs):
+    rig = rigs(copilot="off", voice_delay=2.0)
+    rig.controller_says(5, descend_to(11000))
+    rig.run_until(5.6)  # the descent has been decided; its voice is being made
+    rig.click("Westland, Golf Alfa Bravo Charlie Delta, request direct Delta", Intent("request_direct", fix="DELTA"))
+    rig.run_until(40)
+    ok(rig, rig.talked_over())  # neither the pilot's call, nor the reply, nor the descent was cut off
+    reply, descent = rig.said("atc")[:2]
+    assert "descend" in descent.text and descent.t > reply.t
+    assert rig.engine.flight.pending is not None and "descend" in rig.engine.flight.pending.text
+
+
+def test_a_call_keyed_while_the_copilot_is_busy_tuning_is_recorded_from_the_moment_the_key_went_down(rigs):
+    rig = rigs()
+    rig.controller_says(5, handoff_to_next_centre)
+    rig.run_until(16)  # the readback is done and the radio is on Eastland; the copilot pauses before calling
+    assert rig.tuned_mhz() == "132.100"
+    rig.say("Eastland Control, Golf Alfa Bravo Charlie Delta, level flight level one three zero", Intent("check_in"),
+            seconds=1.2)  # fmt: skip
+    rig.run_until(40)
+    assert not [item for item in rig.said("info") if "too short" in item.text], rig.transcript()
+    assert [item.station for item in rig.said("pilot") if item.event.get("source") == "voice"] == ["Eastland Control"]
+    ok(rig, rig.settled_on(EAST, "Eastland Control"))
+
+
+def test_a_frequency_the_sim_rounds_after_tuning_does_not_lose_a_call_made_meanwhile(rigs):
+    # 132.100 is reported as 132.105 half a second after it was taken. No copilot pause: the call is answered at once.
+    rig = rigs(copilot="readbacks", auto_tune=True, settle_khz=5)
+    rig.controller_says(5, handoff_to_next_centre)
+    rig.run_until(15.9)
+    assert rig.tuned_mhz() == "132.100"
+    rig.say("Eastland Control, Golf Alfa Bravo Charlie Delta, level flight level one three zero", Intent("check_in"),
+            seconds=1.0)  # fmt: skip
+    rig.run_until(40)
+    assert not any("changed during the call" in item.text for item in rig.said("info")), rig.transcript()
+    assert [item.station for item in rig.said("pilot") if item.event.get("source") == "voice"] == ["Eastland Control"]
+    ok(rig, rig.settled_on(EAST + 5, "Eastland Control"))
+
+
+def test_a_readback_on_the_frequency_the_instruction_was_given_on_counts_when_another_station_answers_there(rigs):
+    # Where a centre and an airport share a frequency, which of them answers can change as the aircraft moves,
+    # while the pilot has not touched the radio. The readback is for whoever is on that frequency.
+    rig = rigs(copilot="off")
+    engine, centres = rig.engine, rig.db.centers
+    approach = rig.db.station(APPROACH, 51.0, 5.0)
+    here = {**rig.bridge.snapshot(), "lon": 4.4, "com1_khz": APPROACH}
+    engine.flight.contacted.add(approach.key)  # checked in with approach on 124.300
+    rig.controller_says(0, descend_to(9000))
+    assert "descend" in engine.tick(approach, None, here).text
+    assert engine.flight.pending is not None and engine.flight.pending_key == approach.key
+    centre = centres.on_frequency(EAST, 51.0, 4.4)  # a different station, as if found on 124.300
+    readback = Intent("readback", altitude=engine.flight.pending.expect["altitude"])
+    elsewhere = engine.handle(readback, centre, None, {**here, "com1_khz": EAST})
+    assert "not for Eastland Control" in elsewhere.note and engine.flight.pending is not None  # really another one
+    assert [call["label"] for call in engine.suggestions(centre, None, here)][0] == "Read back"
+    assert engine.handle(readback, centre, None, here).text == "" and engine.flight.pending is None
+
+
 # ---- the same flight, many times ----------------------------------------------------------
 
 
 def jittered_flight(rigs, seed):
     """Two hand-offs and a descent at random moments, random tuning delays, chatter on the frequency."""
     rng = random.Random(seed)
-    rig = rigs(tune_delay=rng.uniform(0.05, 1.9), chatter="busy", seed=seed)
+    rig = rigs(tune_delay=rng.uniform(0.05, 1.9), chatter="busy", seed=seed, voice_delay=rng.uniform(0, 2))
     first = rng.uniform(1, 10)
     rig.controller_says(first, handoff_to_next_centre)
     rig.controller_says(first + rng.uniform(0, 12), descend_to(11000))

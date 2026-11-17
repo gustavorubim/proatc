@@ -119,6 +119,9 @@ class Session:
         self._answers: queue.Queue = queue.Queue()  # the person's answers to the sound check's questions
         checked = soundcheck.last(PROJECT_DIR / "logs")
         self.last_sound_check: str = checked.get("verdict", "") if isinstance(checked, dict) else ""
+        self._recording = False  # the microphone was started at key-down
+        self._keying = threading.Lock()  # between the key going down and a finished job letting others talk
+        self._missed: tuple | None = None  # a readback of the copilot's that nobody heard, tried once more
 
     # ---- events -------------------------------------------------------------
 
@@ -267,10 +270,20 @@ class Session:
         emit({"type": "status", "text": f"\nReady. Hold [{config.ptt.key}] to talk, release to send. Ctrl+C to quit.\n"})
 
     def _key_down(self) -> None:
-        """The pilot keyed the microphone. From now nobody else talks (the job that records it may still be
-        waiting its turn), and the call is for whoever is on this frequency."""
-        self.busy.set()
+        """The pilot keyed the microphone. From now nobody else talks, the microphone records, and the call is
+        for whoever is on this frequency, even while the job that will answer it is still waiting its turn
+        (the copilot may be tuning, or a reply still being spoken)."""
+        with self._keying:
+            self.busy.set()
         self._keyed_khz = tuned_khz(self.bridge.snapshot()) if self.ready and self.bridge.connected else None
+        recorder = getattr(self, "recorder", None)
+        self._recording = False
+        if recorder is not None:
+            try:
+                recorder.start()
+                self._recording = True
+            except Exception as error:  # the job tries again, and reports what is wrong
+                self.emit({"type": "error", "text": f"Microphone: {error}"})
         self.jobs.put(("voice", None, None))
 
     def _joystick_button(self, down: bool) -> None:
@@ -556,9 +569,10 @@ class Session:
                     self.player.stop()
                     try:
                         if kind == "voice":
+                            recording, self._recording = self._recording, False  # a key going down again sets it anew
                             _exchange(self.config, self.bridge, self.db, self.book, self.stt, self.tts, self.controller,
                                       self.player, self.ptt, self.recorder, self.engine, self.parser, self.emit,
-                                      on_khz=self._keyed_khz)  # fmt: skip
+                                      on_khz=self._keyed_khz, recording=recording)  # fmt: skip
                         elif kind in ("explain", "what_next"):
                             self._instructor(kind)
                         elif kind == "debrief":
@@ -572,8 +586,9 @@ class Session:
                     except Exception as error:  # one bad exchange must not end the session
                         self.emit({"type": "error", "text": f"{type(error).__name__}: {error}"})
                     finally:
-                        if not self.ptt.pressed.is_set():  # keyed again meanwhile: still nobody else talks
-                            self.busy.clear()
+                        with self._keying:  # so that a key going down now is not undone
+                            if not self.ptt.pressed.is_set():  # keyed again meanwhile: still nobody else talks
+                                self.busy.clear()
                 try:
                     self._after_transmission()
                 except Exception as error:
@@ -583,12 +598,13 @@ class Session:
         finally:
             self.close()
 
-    def _say(self, text: str, kind: str, intent: Intent | None) -> None:
-        """A typed, clicked or copilot call: spoken in a pilot voice, then answered by whoever was listening."""
+    def _say(self, text: str, kind: str, intent: Intent | None) -> bool:
+        """A typed, clicked or copilot call: spoken in a pilot voice, then answered by whoever was listening.
+        True if a station heard it."""
         on_khz = tuned_khz(self.bridge.snapshot()) if self.bridge.connected else None
         self._spoken_for_you(text)
-        _respond(text, kind, intent, time.perf_counter(), self.config, self.bridge, self.db, self.book, self.tts,
-                 self.controller, self.player, self.ptt, self.engine, self.parser, self.emit, on_khz=on_khz)  # fmt: skip
+        return _respond(text, kind, intent, time.perf_counter(), self.config, self.bridge, self.db, self.book, self.tts,
+                        self.controller, self.player, self.ptt, self.engine, self.parser, self.emit, on_khz=on_khz)  # fmt: skip
 
     def _spoken_for_you(self, text: str) -> None:
         """A clicked, typed or copilot call is read out in a pilot voice, so the exchange still sounds like radio."""
@@ -636,8 +652,9 @@ class Session:
         if station is None or station.kind == "atis":
             return None
         with self.engine.lock:
-            pending, giver, reminded, handoff = flight.pending, flight.pending_key, flight.reminded, flight.next_frequency
-        if pending is not None and giver == station.key:
+            pending, reminded, handoff = flight.pending, flight.reminded, flight.next_frequency
+            waiting = self.engine.waiting_on(station, raw)
+        if waiting:
             if self._read_back == (pending, reminded):
                 return None  # read back already; a controller who says it again is read back again
             return self._suggested("Read back", station, issue, raw)
@@ -656,11 +673,17 @@ class Session:
             return
         raw, station, _ = self._station_and_issue()
         with self.engine.lock:
-            handoff, pending, giver, given = flight.next_frequency, flight.pending, flight.pending_key, flight.handoffs
+            handoff, pending, given = flight.next_frequency, flight.pending, flight.handoffs
+            waiting = station is not None and self.engine.waiting_on(station, raw)
         if not handoff or _same_frequency(handoff, tuned_khz(raw)) or self._followed == (handoff, given):
             return
-        if pending is not None and station is not None and giver == station.key:
+        if waiting or (pending is not None and mode != "full"):
+            # Read back first. Only the full copilot, which has heard the hand-off, follows one at once that a
+            # controller no longer tuned gave: auto-tune alone waits for the pilot's readback, wherever the pilot
+            # has since turned the knob.
             return
+        if self._keyed():
+            return  # not under the pilot's call: looked at again once it is over
         self._followed = (handoff, given)  # tried once: a failure is reported once, and the pilot is not fought
         try:
             self.tune(handoff)
@@ -671,24 +694,35 @@ class Session:
             self.clock.sleep(1.5)  # a moment on the new frequency before calling
             self.jobs.put(("after", None, None))  # then look again: something may have been said meanwhile
 
+    def _keyed(self) -> bool:
+        ptt = getattr(self, "ptt", None)  # none before load()
+        return ptt is not None and ptt.pressed.is_set()
+
     def _wait_for_quiet(self, longest: float = 30.0) -> bool:
         """The copilot does not talk over a controller or another aircraft. False if the pilot came first."""
         deadline = self.clock.monotonic() + longest
         while getattr(self.player, "playing", False) and self.clock.monotonic() < deadline:
-            if not self.jobs.empty() or self.ptt.pressed.is_set():
+            if not self.jobs.empty() or self._keyed():
                 return False
             self.clock.sleep(0.1)
-        return self.jobs.empty() and not self.ptt.pressed.is_set()
+        return self.jobs.empty() and not self._keyed()
 
     def _copilot_speaks(self) -> None:
         """Make the call that is due now, which may not be the one that was queued."""
         call = self._copilot_call()
         if call is None:
             return
-        if call["label"] == "Read back":
-            with self.engine.lock:
-                self._read_back = (self.engine.flight.pending, self.engine.flight.reminded)
-        self._say(call["text"], "copilot", Intent.from_dict(call["intent"]))
+        with self.engine.lock:
+            instruction = (self.engine.flight.pending, self.engine.flight.reminded)
+        heard = self._say(call["text"], "copilot", Intent.from_dict(call["intent"]))
+        if call["label"] != "Read back":
+            return
+        # A readback nobody heard (the radio was retuned during it) is tried once more, when the controller who
+        # is waiting for it is on frequency again; after that, when the controller says it again.
+        if heard or self._missed == instruction:
+            self._read_back = instruction
+        else:
+            self._missed = instruction
 
     def _instructor(self, kind: str) -> None:
         """'What does that mean?' and 'what do I say now?', answered in the log, not on the radio."""
@@ -741,12 +775,14 @@ def run(config: Config) -> None:
 
 
 def _exchange(config, bridge, db, book, stt, tts, controller, player, ptt, recorder, engine=None, parser=None,
-              emit: Emit = console, on_khz: int | None = None) -> None:  # fmt: skip
+              emit: Emit = console, on_khz: int | None = None, recording: bool = False) -> None:  # fmt: skip
     """One voice transmission: record while the key is held, transcribe, answer. `on_khz`: the frequency the
-    key was pressed on, when that was before this job began."""
+    key was pressed on; `recording`: the microphone has recorded since then. Both when the key went down
+    before this job began."""
     if on_khz is None and bridge.connected:
         on_khz = tuned_khz(bridge.snapshot())
-    recorder.start()
+    if not recording:
+        recorder.start()
     emit({"type": "tx", "on": True})
     ptt.released.wait()
     audio = recorder.stop()
@@ -832,6 +868,11 @@ def _same_frequency(mhz: str, khz: int | None) -> bool:
     return khz is not None and same_channel(int(round(float(mhz) * 1000)), khz)
 
 
+def _same_khz(one: int | None, other: int | None) -> bool:
+    """Within 5 kHz: a sim may report 118.425 for the 118.420 that was written, or the other way round."""
+    return one is not None and other is not None and abs(one - other) <= 5
+
+
 def _someone_listening(bridge, db, emit: Emit) -> bool:
     """False, with a note, when the tuned frequency has no controller in range."""
     if not bridge.connected:
@@ -848,14 +889,15 @@ def _someone_listening(bridge, db, emit: Emit) -> bool:
 
 
 def _respond(transcript, source, intent, started, config, bridge, db, book, tts, controller, player, ptt,
-             engine=None, parser=None, emit: Emit = console, on_khz: int | None = None) -> None:  # fmt: skip
-    """Answer one pilot transmission, whatever way it arrived. `on_khz`: the frequency it was begun on."""
-    if on_khz is not None and bridge.connected and tuned_khz(bridge.snapshot()) != on_khz:
+             engine=None, parser=None, emit: Emit = console, on_khz: int | None = None) -> bool:  # fmt: skip
+    """Answer one pilot transmission, whatever way it arrived. `on_khz`: the frequency it was begun on.
+    True if a station heard it (whether or not it answered)."""
+    if on_khz is not None and bridge.connected and not _same_khz(tuned_khz(bridge.snapshot()), on_khz):
         # Retuned in the middle of the call: the station it was meant for heard half of it, the new one the rest.
         emit({"type": "info", "text": "the frequency was changed during the call: nobody heard all of it"})
-        return
+        return False
     if source != "voice" and not _someone_listening(bridge, db, emit):
-        return
+        return False
     raw = bridge.snapshot() if bridge.connected else {}
     context = dict(describe(raw))
     station_key = "free"
@@ -863,7 +905,7 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
     if raw:
         _, station = current_station(db, raw)
         if station is None or station.kind == "atis":
-            return  # retuned while transmitting
+            return False  # retuned while transmitting
         weather = observe(db, station.airport, raw) if station.airport else None
         # The controller works from the same observation the ATIS is broadcasting.
         issue = book.current(station.airport, weather, raw.get("zulu_seconds", 0.0)) if weather else None
@@ -878,12 +920,12 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
         answer = _answer(transcript, intent, context, station_key, station, issue, raw, controller, engine, parser, emit)
     except LlmError as error:
         emit({"type": "error", "text": str(error)})
-        return
+        return True
     thought = time.perf_counter()
     if not answer:
         note = engine.flight.last_note if engine is not None else ""
         emit({"type": "silent", "text": note} if note else {"type": "silent"})
-        return
+        return True
     label = context["station"]["you_are"] if "station" in context else "ATC"
     event = {"type": "atc", "station": label, "text": answer, "unprompted": False}
     if context.get("fallback"):
@@ -902,6 +944,7 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
 
     ticket = transmit(tts, player, answer, station_voice(tts, station), config.radio, timings)
     player.wait(ticket, should_stop=ptt.pressed.is_set)  # pressing the key again cuts the controller off
+    return True
 
 
 def _answer(transcript, intent, context, station_key, station, issue, raw, controller, engine, parser, emit: Emit) -> str:
