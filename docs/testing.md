@@ -54,6 +54,25 @@ CI runs the first three on Windows, macOS and Linux, and the packaged-app self-t
 
 Nothing here flies the sim. A change to behaviour in flight is not verified until someone has flown it; say so in the pull request.
 
+## What only a person can check
+
+Some things no test can hear: two radios sounding at once on a given sound card, a voice engine keeping up on a slow processor, a microphone that is really heard, the Mac and Linux builds in use. The **sound check** (Settings, or `proatc sound-check`) plays each in turn and asks the person a yes/no question after each:
+
+| Step | What it plays | What it asks |
+|---|---|---|
+| 1 | A controller's sentence on the first radio | Did you hear it? |
+| 2 | A weather recording on the second radio (`SecondRadio.broadcast`, on its own `Player(alongside=True)` stream) and the controller over it | Did you hear both at once? |
+| 3… | The controller in each voice engine that loads (Kokoro; Phonon if installed) | Was it clear, without breaks? |
+| last | Two seconds from the microphone, with the level shown | Did you speak while it recorded? |
+
+Next to each answer it records what the machine can measure without ears: that each output stream opened, how many frames were handed to the sound card, the underruns PortAudio reported (the underflow flag `OutputStream.write` returns; `sd.get_status()` after a whole sentence), the output and input device names, the time from the reply being known to the first sound, how many times faster than real time the speech was made, and whether a piece of speech arrived after the sound before it had run out. A step is a problem when the machine saw a failure or a gap, or the person said no.
+
+The outcome goes into the journal as one `sound_check` note (the prompts are not kept) and into `logs/sound-check.json`, and a one-line verdict is shown in the window. The check never starts by itself, and is refused while the sim is connected and the aircraft is not parked on the ground, or while a controller is talking. The tests (`tests/test_sound_check.py`) stand in for the sound card: nothing in the suite plays a sound or records one, so a passing suite says nothing about how it sounds.
+
+**This computer** in the settings lists what can be checked without the person: whether PortAudio loaded, whether there are speakers and a microphone, and whether the push-to-talk key can be heard (on macOS, the Input Monitoring permission, asked with `IOHIDCheckAccess`; on Linux, whether the session is Wayland, where it cannot). On macOS and Linux a failed item is also told at start-up. The macOS and Linux branches are tested only with stand-ins for those systems (`tests/test_report.py`).
+
+To get a tester's results, ask for a **problem report** (the header's "Report a problem", or `proatc report`): one zip in `logs/reports/` with the newest journal (and the run before it when the newest is under a minute old), the versions, the settings without secrets, the last sound check and the checks of this computer. It never holds the OpenRouter key, the SimBrief ID or the pairing code: the settings come from the list the settings window shows, and every file is scrubbed of those values on its way in. "Hide my callsign and positions" masks the callsign and rounds coordinates to one decimal in the copy; the journal on disk is untouched.
+
 ## Golden flights
 
 `tests/golden/*.txt` are transcripts of scripted flights: every call, every answer, and the flight's state after each. A change that alters what a controller says fails the test with a diff.
