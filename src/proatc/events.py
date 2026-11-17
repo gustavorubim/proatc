@@ -12,6 +12,7 @@ Every event is a dict with a "type":
   atis       {airport, mhz, text}               a new ATIS recording started
   error      {text}
   coach      {text}                             the instructor: an explanation, or what to say next
+  phrase     {said, text, intent, note}         what the pilot typed in their own words, as the proper call
   capture    {active}                           waiting for the key or button to use for push-to-talk
   log_saved  {path}                             the flight log was written to this file
   chatter    {station, callsign, said, answered} another aircraft heard on the frequency (sound only)
@@ -48,6 +49,8 @@ def console(event: dict) -> None:
         )
     elif kind == "coach":
         print(f"INSTRUCTOR: {event['text']}")
+    elif kind == "phrase":
+        print(f"INSTRUCTOR: say “{event['text']}”" if event["text"] else f"INSTRUCTOR: {event['note']}")
     elif kind == "chatter":
         print(f"       ~ {event['said']} / {event['answered']}")
     elif kind == "debrief":

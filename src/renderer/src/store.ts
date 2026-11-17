@@ -22,6 +22,8 @@ export interface Store {
   fatal: string | null
   savedLog: string | null
   debrief: Debrief | null
+  /** The last answer to "Phraseology": the proper call for what was typed, or none and why. */
+  phrase: { id: number; text: string; intent: Record<string, unknown> | null } | null
   /** The map of the airport the aircraft is at, once the engine has sent it. */
   chart: Chart | null
   /** A browser on another device: 'ask' for the pairing code, 'wrong' when the engine refused it. */
@@ -42,6 +44,7 @@ export const initialStore: Store = {
   savedLog: null,
   debrief: null,
   chart: null,
+  phrase: null,
   pairing: 'no',
   nextId: 1
 }
@@ -112,6 +115,10 @@ export function reduce(store: Store, action: Action): Store {
       return push(store, 'error', '', message.text)
     case 'coach':
       return push(store, 'coach', 'Instructor', message.text)
+    case 'phrase': {
+      const next = push(store, 'coach', 'Instructor', message.text ? `Say: “${message.text}”` : message.note)
+      return { ...next, phrase: { id: store.nextId, text: message.text, intent: message.intent } }
+    }
     case 'log_saved':
       return { ...push(store, 'note', '', `Flight log saved: ${message.path}`), savedLog: message.path }
     case 'chatter':

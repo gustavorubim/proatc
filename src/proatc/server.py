@@ -359,6 +359,8 @@ class AppServer:
             session.usage.update(calls=0, prompt_tokens=0, completion_tokens=0, cost=0.0)
         elif name == "ptt":
             session.ptt.press() if command.get("down") else session.ptt.release()
+        elif name == "phrase" and str(command.get("text", "")).strip():
+            session.phrase(str(command["text"]))
         elif name == "say" and str(command.get("text", "")).strip():
             session.submit(str(command["text"]).strip()[:500])
         elif name == "click" and str(command.get("text", "")).strip():
