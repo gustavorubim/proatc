@@ -157,30 +157,31 @@ def test_a_flight_that_leaves_its_sid_is_asked_once(tmp_path):
     off = {**at(51.12, -1.45, feet=7000), "ias_kt": 250}  # seven miles north of the track
     # Found on a real flight out of Boston: the departure began on runway heading, then turned to intercept,
     # and the controller called it "six miles off the departure track" before it had reached the track.
-    clock[0] = -500.0
+    engine.flight.pending = None  # the climb was read back
+    clock[0] = 500.0
     assert engine.tick(radar, ISSUE, off) is None
-    clock[0] = -300.0
+    clock[0] = 700.0
     assert engine.tick(radar, ISSUE, off) is None and engine.flight.on_track == set()  # not on it yet: not "off" it
     on_it = {**at(51.005, -1.2, feet=6000), "ias_kt": 250}
-    clock[0] = -100.0
+    clock[0] = 900.0
     assert engine.tick(radar, ISSUE, on_it) is None and engine.flight.on_track == {"WEST2A"}  # joined: watched from now
-    clock[0] = 0.0
+    clock[0] = 1000.0
     assert engine.tick(radar, ISSUE, off) is None  # only just noticed
-    clock[0] = 50.0
+    clock[0] = 1050.0
     asked = engine.tick(radar, ISSUE, off)
     assert (
         asked.text == f"{CALLSIGN}, you appear to be seven miles off the departure track, confirm you are following the departure"
     )
     assert asked.event == "off_route"
-    clock[0] = 200.0
+    clock[0] = 1200.0
     assert engine.tick(radar, ISSUE, off) is None  # once
     # A flight on a direct routing, or deviating around weather, is not on the SID any more.
     engine, radar = departure(tmp_path)
     engine.now = lambda: clock[0]
     engine.flight.direct_to = "BRAVO"
-    clock[0] = 300.0
+    clock[0] = 1300.0
     engine.tick(radar, ISSUE, off)
-    clock[0] = 400.0
+    clock[0] = 1400.0
     assert engine.tick(radar, ISSUE, off) is None
 
 

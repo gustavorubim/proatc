@@ -7,21 +7,31 @@ This builds the whole matrix on invented airports, without X-Plane and without a
     uv run python -m tests.deadends            # the matrix, state by state, and the counts
     uv run python -m tests.deadends --missing  # only the unanswered calls a pilot plausibly makes
 
-A cell is two characters, the instrument flight then the visual one: "." answered, "s" answered with
-silence (a broadcast, an acknowledgement), "X" no rule, blank where the station cannot be heard in that state.
-`tests/test_deadends.py` holds the count down.
+A cell is two characters, the instrument flight then the visual one: "." a specific answer, "r" a bare
+"roger", "u" a bare "unable ..." or "say again", "c" "contact ..." (sent to another controller), "s" silence (a
+broadcast, an acknowledgement), "X" no rule, "!" an answer that is FALSE, blank where the station cannot be heard.
+
+An answer counts only when it is true. Every reply is checked against the flight's state at that moment: a level
+after "climb", "descend" or "maintain" must be the level the flight is now cleared to, a climb is never given to an
+aircraft above that level nor a descent to one below it, a heading, squawk or speed said must be the one assigned,
+a frequency said must be the one handed off to, a runway cleared for takeoff or landing must exist and suit the wind,
+and an approach is never "cleared" on the ground. Each reply also records the rule (the function) that made it.
+`tests/test_answers.py` holds the false answers and the plausible gaps at zero.
 """
 
 from __future__ import annotations
 
 import copy
 import random
+import re
 import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from proatc import engine as engine_module
 from proatc import questions
+from proatc.answers import acceptable_runway
 from proatc.atis import Issue
 from proatc.centers import CenterIndex, parse_atc
 from proatc.engine import Engine, Reply
@@ -80,7 +90,7 @@ PLAN = FlightPlan("EGXX", "LFXX", "ALFAX UL9 BRAVO UM605 DELTA".split(), 36000, 
 KINDS = ("delivery", "ground", "tower", "departure", "approach", "centre", "oceanic", "unicom", "afis")
 STATES = (
     "parked", "cleared", "taxiing", "holding short", "departing", "climbing", "climbing, asked", "cruising", "descending",
-    "approach, before vectors", "approach, vectors", "final", "landed", "taxiing in",
+    "approach, before vectors", "approach, vectors", "diverting", "final", "landed", "taxiing in",
 )  # fmt: skip
 ON_GROUND = {"parked", "cleared", "taxiing", "holding short", "departing", "landed", "taxiing in"}
 # The values a pilot would say with each call, where the call needs one.
@@ -208,6 +218,12 @@ def controlled(world: World, rules: str) -> dict:
     snap("approach, before vectors", {"centre": (east, near), "approach": (approach, near), "tower": (arrival_tower, near)})
     say(engine, Intent("check_in"), approach, near)
     snap("approach, vectors", {"approach": (approach, near), "tower": (arrival_tower, near)})
+    if rules == "IFR":
+        # A diversion back to Westfield from the vectors: measured, then the flight goes on to land as before.
+        saved = copy.deepcopy(engine.flight)
+        say(engine, Intent("request_diversion", destination="EGXX"), approach, near)
+        snap("diverting", {"approach": (approach, near), "centre": (east, near)})
+        engine.flight = saved
     final = at(51.0, 5.43, 1200, heading=270)
     if engine.flight.arrival is not None:
         engine.flight.arrival.stage = "intercept"
@@ -293,11 +309,153 @@ def plausible(name: str, state: str) -> bool:
 
 @dataclass
 class Matrix:
-    cells: dict = field(default_factory=dict)  # (call, state, kind, rules) -> "." | "s" | "X"
+    cells: dict = field(default_factory=dict)  # (call, state, kind, rules) -> "." | "r" | "u" | "c" | "s" | "X" | "!"
     texts: dict = field(default_factory=dict)  # same key -> what the controller said
+    rules: dict = field(default_factory=dict)  # same key -> the function that made the reply ("answers.unable")
+    false: dict = field(default_factory=dict)  # same key -> why the reply is not true
 
     def unanswered(self, only_plausible: bool = False) -> list[tuple]:
         return [key for key, mark in self.cells.items() if mark == "X" and (not only_plausible or plausible(key[0], key[1]))]
+
+    def kinds(self, only_plausible: bool = True) -> dict[str, int]:
+        counts = {name: 0 for name in KIND_NAMES.values()}
+        for key, mark in self.cells.items():
+            if not only_plausible or plausible(key[0], key[1]):
+                counts[KIND_NAMES[mark]] += 1
+        return counts
+
+
+KIND_NAMES = {".": "specific", "r": "roger", "u": "unable", "c": "contact", "s": "silence", "X": "no rule", "!": "false"}
+NUMBER = {
+    word: str(i) for i, word in enumerate(["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "niner"])
+}
+
+
+def _digits(words: list[str]) -> tuple[str, int]:
+    """The digits spoken at the start of these words, and how many words they took."""
+    taken = 0
+    while taken < len(words) and words[taken] in NUMBER:
+        taken += 1
+    return "".join(NUMBER[word] for word in words[:taken]), taken
+
+
+def spoken_level(words: list[str]) -> int | None:
+    """'flight level two four zero' -> 24000; 'altitude three thousand five hundred feet' or 'three thousand
+    five hundred' -> 3500. None when the words are not a level."""
+    if words[:2] == ["flight", "level"]:
+        value, taken = _digits(words[2:])
+        return int(value) * 100 if taken == 3 else None
+    if words[:1] == ["altitude"]:
+        words = words[1:]
+    thousands, taken = _digits(words)
+    feet = 0
+    if taken and words[taken : taken + 1] == ["thousand"]:
+        feet, words = int(thousands) * 1000, words[taken + 1 :]
+        hundreds, taken = _digits(words)
+    if taken == 1 and words[1:2] == ["hundred"]:
+        feet += int(hundreds if feet else thousands) * 100
+    return feet or None
+
+
+def _words(text: str) -> list[str]:
+    return re.sub(r"[^a-z ]", " ", text.lower()).split()
+
+
+def truth(engine, station, raw: dict, issue, reply) -> list[str]:
+    """What in this reply is not true of the flight now. Empty when everything said holds."""
+    flight, problems = engine.flight, []
+    words = _words(reply.text)
+    airborne = not bool(raw.get("on_ground", True))
+    feet = raw.get("elevation_m", 0.0) / 0.3048
+    for at_word, word in enumerate(words):
+        if word not in ("climb", "descend", "maintain") or (at_word and words[at_word - 1] == "and"):
+            continue
+        rest = words[at_word + 1 :]
+        if rest[:2] == ["and", "maintain"]:
+            rest = rest[2:]
+        level = spoken_level(rest)
+        if level is None:
+            continue
+        if flight.cleared_ft is not None and abs(level - flight.cleared_ft) > 50:
+            problems.append(f"says {word} {level} but the flight is cleared to {flight.cleared_ft}")
+        if airborne and word == "climb" and level < feet - 300:
+            problems.append(f"climb to {level} for an aircraft at {feet:.0f} ft")
+        if airborne and word == "descend" and level > feet + 300:
+            problems.append(f"descend to {level} for an aircraft at {feet:.0f} ft")
+    for match in re.finditer(r"\bheading ((?:\w+ ){2}\w+)", reply.text):
+        heading, taken = _digits(match.group(1).split())
+        if taken == 3 and int(heading) % 360 not in {
+            (getattr(flight, "heading_assigned", None) or -1) % 360,
+            (getattr(flight.arrival, "heading", None) or -1) % 360,
+        }:
+            problems.append(f"heading {heading} but {getattr(flight, 'heading_assigned', None)} is assigned")
+    for match in re.finditer(r"\bsquawk ((?:\w+ ){3}\w+)", reply.text):
+        code, taken = _digits(match.group(1).split())
+        if taken == 4 and code != flight.squawk:
+            problems.append(f"squawk {code} but {flight.squawk} is assigned")
+    for match in re.finditer(
+        r"(?<!restriction )\b(?:reduce speed to|reduce speed|speed|maintain) ((?:\w+ ){2}\w+) knots(?! or less)", reply.text
+    ):
+        knots, taken = _digits(match.group(1).split())
+        if taken == 3 and int(knots) != getattr(flight.arrival, "speed_kt", None):
+            problems.append(f"speed {knots} but {getattr(flight.arrival, 'speed_kt', None)} is assigned")
+    for match in re.finditer(r"contact [A-Z][\w ]*? ((?:one|two) (?:\w+ ){2}decimal(?: \w+)+)", reply.text):
+        before, after = match.group(1).split(" decimal ")
+        said, _ = _digits(before.split())
+        decimals, _ = _digits(after.split())
+        khz = int(said) * 1000 + int(decimals.ljust(3, "0")[:3])
+        # The hand-off just given, or one given earlier that "say again" repeats word for word.
+        given = [entry[1].get("frequency") for entry in flight.last_instruction.values()]
+        told = [value for value in (reply.expect.get("frequency"), flight.next_frequency, *given) if value]
+        # Or a station of this airport ("readback correct, contact Ground when ready"): a real frequency of its own.
+        told += [f"{freq.khz / 1000:.3f}" for freq in (station.airport.freqs if station.airport else [])]
+        if not any(abs(float(value) * 1000 - khz) <= 6 for value in told):
+            problems.append(f"contact on {khz} kHz, which was not the hand-off")
+    cleared = re.search(
+        r"runway ((?:\w+ ){1}\w+(?: left| right| center)?), cleared (?:to land|for takeoff|touch and go)", reply.text
+    )
+    if cleared and station.airport:
+        ident = next((end for rw in station.airport.runways for end, _ in rw.ends() if say_runway(end) == cleared.group(1)), None)
+        if ident is None:
+            problems.append(f"cleared on runway {cleared.group(1)}, which this airport does not have")
+        elif issue and acceptable_runway(station.airport, ident, issue.weather) not in (None, "runway too short"):
+            problems.append(f"cleared on runway {ident} against the wind")
+    if "cleared" in words and "approach" in words and not airborne and " approach runway" in reply.text:
+        problems.append("an approach is cleared on the ground")
+    return problems
+
+
+def say_runway(ident: str) -> str:
+    from proatc import phraseology
+
+    return phraseology.runway(ident)
+
+
+def kind_of(reply, station, callsign: str) -> str:
+    """'.' specific, 'r' roger, 'u' unable, 'c' contact, 's' silence."""
+    if not reply.text:
+        return "s"
+    body = reply.text.removeprefix(f"{callsign}, ").removeprefix(f"{station.callsign}, ")
+    for lead in ("identified, ", "radar contact, "):
+        body = body.removeprefix(lead)
+    if body in ("roger", "identified", "radar contact"):
+        return "r"
+    if body in ("say again", "unable, no information") or re.fullmatch(r"unable [a-z ]+", body):
+        return "u"
+    if body.startswith("contact "):
+        return "c"
+    return "."
+
+
+class _Traced(engine_module.Reply):
+    """A reply that remembers which function made it: the rule behind every answer in the matrix."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        frame = sys._getframe(1)
+        while frame.f_back is not None and frame.f_code.co_name in ("_reply", "__init__"):
+            frame = frame.f_back
+        self.rule = f"{frame.f_globals.get('__name__', '').rsplit('.', 1)[-1]}.{frame.f_code.co_name}"
 
 
 def measure(folder: Path | None = None) -> Matrix:
@@ -311,6 +469,15 @@ def measure(folder: Path | None = None) -> Matrix:
                           uncontrolled(world, rules, "KXAA", "unicom")]  # fmt: skip
     matrix = Matrix()
     engine = world.engine()
+    original, engine_module.Reply = engine_module.Reply, _Traced
+    try:
+        _fill(matrix, engine, flights)
+    finally:
+        engine_module.Reply = original
+    return matrix
+
+
+def _fill(matrix: Matrix, engine, flights: dict) -> None:
     for rules, worlds in flights.items():
         for snaps in worlds:
             for state, (flight, stations) in snaps.items():
@@ -325,9 +492,16 @@ def measure(folder: Path | None = None) -> Matrix:
                         issue = ISSUE if getattr(station, "airport", None) else None
                         reply = engine.handle(copy.copy(intent), station, issue, dict(raw))
                         key = (name, state, kind, rules)
-                        matrix.cells[key] = "X" if reply is None else ("." if reply.text else "s")
                         matrix.texts[key] = reply.text if reply else None
-    return matrix
+                        if reply is None:
+                            matrix.cells[key] = "X"
+                            continue
+                        matrix.rules[key] = getattr(reply, "rule", "?")
+                        wrong = truth(engine, station, raw, issue, reply)
+                        if wrong:
+                            matrix.false[key] = wrong
+                        callsign = engine._callsign(raw)
+                        matrix.cells[key] = "!" if wrong else kind_of(reply, station, callsign)
 
 
 def render(matrix: Matrix, report=print) -> None:
@@ -350,7 +524,11 @@ def summary(matrix: Matrix) -> str:
     every = len(matrix.unanswered())
     likely = len(matrix.unanswered(only_plausible=True))
     counted = sum(1 for key in matrix.cells if plausible(key[0], key[1]))
-    return f"{total} cells, {every} unanswered; {counted} a pilot plausibly makes, {likely} of them unanswered"
+    kinds = ", ".join(f"{name} {count}" for name, count in matrix.kinds().items())
+    return (
+        f"{total} cells, {every} unanswered; {counted} a pilot plausibly makes, {likely} of them unanswered\n"
+        f"plausible cells by kind of answer: {kinds}; false answers in all cells: {len(matrix.false)}"
+    )
 
 
 def main(argv: list[str]) -> None:
@@ -358,6 +536,9 @@ def main(argv: list[str]) -> None:
     if "--missing" in argv:
         for name, state, kind, rules in sorted(matrix.unanswered(only_plausible=True), key=lambda k: (k[0], k[1], k[2])):
             print(f"{name:34} {state:26} {kind:10} {rules}")
+    elif "--false" in argv:
+        for key, why in sorted(matrix.false.items()):
+            print(f"{' / '.join(key)}: {'; '.join(why)}\n    {matrix.texts[key]}  [{matrix.rules[key]}]")
     else:
         render(matrix)
     print()

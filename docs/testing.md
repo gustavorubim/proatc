@@ -307,18 +307,20 @@ A call the rules engine has no rule for falls to the language model, which may o
 ```bash
 uv run python -m tests.deadends            # the matrix, state by state
 uv run python -m tests.deadends --missing  # only the unanswered calls a pilot plausibly makes
+uv run python -m tests.deadends --false    # answers that are not true of the flight, with the rule that made them
 ```
 
-`tests/test_answers.py` holds the plausible gaps at zero. Only `other` (speech nobody foresaw) and a blind call to other traffic are left to the model. A new intent is measured as soon as it is in `intents.py`.
+An answer only counts when it is true. Every reply is read against the flight's state at that moment: a level after "climb", "descend" or "maintain" must be the level the flight is now cleared to, and a climb is never given to an aircraft above it nor a descent to one below; a heading, squawk or speed said must be the one assigned; a frequency must be the hand-off or one of the airport's own; a runway cleared for takeoff or landing must exist and suit the wind; no approach is cleared on the ground. Each cell records which function made the reply, and the answers are counted by kind: specific, a bare "roger", a bare "unable"/"say again", "contact …" (another controller's), silence. `tests/test_answers.py` holds the plausible gaps at zero; `tests/test_answers_state.py` holds the false answers at zero and reads the text of the cells an independent review found wrong (on final, after landing, after a diversion, after a hand-off, on the takeoff roll, on an information service). Only `other` (speech nobody foresaw) and a blind call to other traffic are left to the model. A new intent is measured as soon as it is in `intents.py`.
 
-| Matrix (0.14) | Cells | No rule | Plausible cells | Plausible with no rule |
-|---|---|---|---|---|
-| Before | 4,000 | 2,209 | 2,220 | 742 |
-| After, the same intents | 4,000 | 163 | 2,220 | 0 |
-| After, with the new intents | 5,800 | 163 | 4,020 | 0 |
-| With a question asked, and yes, no and vectors | 6,324 | 167 | 4,318 | 0 |
+| Matrix (0.14) | Plausible cells | No rule | False | Specific | Roger | Unable | Contact | Silence |
+|---|---|---|---|---|---|---|---|---|
+| Main, before | 2,220 | 742 | | | | | | |
+| First version of this work, new intents | 4,110 | 0 | 61 | 2,674 | 90 | 378 | 361 | 546 |
+| After the review | 4,110 | 0 | 0 | 2,615 | 250 | 320 | 379 | 546 |
 
-A yes or a no counts as plausible only where a question was asked. The four new cells with no rule are `other` and a blind call, in the new state.
+The rogers that grew are mostly an information service acknowledging a request it can neither grant nor refuse, which is what it should do.
+
+A yes or a no counts as plausible only where a question was asked.
 
 ## Fuzz tests
 
