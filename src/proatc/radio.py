@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import random
 import threading
-import time
 
 import numpy as np
 
 from . import chatter, navdata
 from . import phraseology as say
 from .atis import AtisBook, runways_in_use, uses_faa_style
+from .clock import REAL, Clock
 from .events import Emit, console
 from .navdata import AirportDB, Station
 from .radio_fx import radio_effect, radio_stream
@@ -21,13 +21,14 @@ from .xpbridge import magnetic_variation, other_radio, tuned_khz
 class SimClock:
     """Seconds of simulated flight: it stops while the sim is paused, so a hold or a reminder does not run out."""
 
-    def __init__(self):
+    def __init__(self, clock: Clock = REAL):
         self.running = True
+        self._time = clock
         self._total = 0.0
-        self._since = time.monotonic()
+        self._since = clock.monotonic()
 
     def __call__(self) -> float:
-        now = time.monotonic()
+        now = self._time.monotonic()
         if self.running:
             self._total += now - self._since
         self._since = now
@@ -163,10 +164,11 @@ class SecondRadio(threading.Thread):
     """The COM radio the pilot is not transmitting on, when the audio panel has it on: its ATIS is heard
     under whatever happens on the first radio. Listening only: nobody on it is talking to this aircraft."""
 
-    def __init__(self, bridge, db: AirportDB, tts, player, book: AtisBook, config, emit: Emit = console):
+    def __init__(self, bridge, db: AirportDB, tts, player, book: AtisBook, config, emit: Emit = console, clock: Clock = REAL):
         super().__init__(name="second-radio", daemon=True)
         self.bridge, self.db, self.tts, self.player, self.book, self.config = bridge, db, tts, player, book, config
         self.emit = emit
+        self.clock = clock
         self._halt = threading.Event()
         self._text = ""
         self._audio = None
@@ -177,12 +179,12 @@ class SecondRadio(threading.Thread):
         self.player.stop()
 
     def run(self) -> None:
-        while not self._halt.wait(0.5):
+        while not self.clock.wait(self._halt, 0.5):
             try:
                 self.tick()
             except Exception as error:
                 self.emit({"type": "error", "text": f"Second radio: {error}"})
-                self._halt.wait(5)
+                self.clock.wait(self._halt, 5)
 
     def heard(self, state: dict):
         """(frequency, ATIS station, loudness) the second radio is playing now, or None."""
@@ -202,7 +204,7 @@ class SecondRadio(threading.Thread):
             self._again_at = 0.0
             return
         khz, station, gain = heard
-        if self.player.playing or time.monotonic() < self._again_at:
+        if self.player.playing or self.clock.monotonic() < self._again_at:
             return
         weather = observe(self.db, station.airport, state)
         if weather is None:
@@ -220,7 +222,7 @@ class SecondRadio(threading.Thread):
             )
         samples, rate = self._audio
         self.player.play_stream(iter([samples * gain]), rate)
-        self._again_at = time.monotonic() + len(samples) / rate + 2  # a pause between repeats
+        self._again_at = self.clock.monotonic() + len(samples) / rate + 2  # a pause between repeats
 
 
 class AtisBroadcaster(threading.Thread):
@@ -238,10 +240,12 @@ class AtisBroadcaster(threading.Thread):
         engine=None,
         emit: Emit = console,
         after=None,
+        clock: Clock = REAL,
     ):
         super().__init__(name="atis", daemon=True)
         self.bridge, self.db, self.tts, self.player, self.book, self.config = bridge, db, tts, player, book, config
         self.emit = emit
+        self.clock = clock
         self.after = after  # called after an unprompted transmission (the copilot may want to answer)
         self.engine = engine  # rules engine, for calls the controller makes unprompted
         self.busy = busy  # set while the pilot is transmitting or the controller is replying
@@ -252,17 +256,18 @@ class AtisBroadcaster(threading.Thread):
         self._chatter_key: str | None = None  # the station whose frequency the chatter is on
         self._chatter_at = 0.0  # when the next exchange is due
         self._chatter_until = 0.0  # while an exchange is playing
+        self._tuned: int | None = None  # the frequency at the last tick
 
     def stop(self) -> None:
         self._halt.set()
 
     def run(self) -> None:
-        while not self._halt.wait(0.5):
+        while not self.clock.wait(self._halt, 0.5):
             try:
                 self._tick()
             except Exception as error:  # never let the broadcast thread die silently
                 self.emit({"type": "error", "text": f"ATIS error: {error}"})
-                self._halt.wait(5)
+                self.clock.wait(self._halt, 5)
 
     def _tick(self) -> None:
         if not self.bridge.connected or self.busy.is_set():
@@ -274,6 +279,10 @@ class AtisBroadcaster(threading.Thread):
         if state.get("paused"):
             return  # the sim is paused: controllers do not carry on without the aircraft
         khz, station = current_station(self.db, state)
+        if khz != self._tuned:
+            self._tuned = khz
+            if self.after:
+                self.after()  # a new frequency: the copilot may have a call to make on it
         if station and station.kind != "atis" and self.engine:
             if not self._unprompted(station, state):
                 self._chatter(station, state)
@@ -296,7 +305,7 @@ class AtisBroadcaster(threading.Thread):
         self.player.wait(
             ticket, should_stop=lambda: self._halt.is_set() or self.busy.is_set() or tuned_khz(self.bridge.snapshot()) != khz
         )
-        self._halt.wait(2)  # pause between repeats
+        self.clock.wait(self._halt, 2)  # pause between repeats
 
     def _unprompted(self, station: Station, state: dict) -> bool:
         """Say what the controller has to say without being asked. True when something was said."""
@@ -311,22 +320,27 @@ class AtisBroadcaster(threading.Thread):
             event["event"] = reply.event
         self.emit(event)
         ticket = transmit(self.tts, self.player, reply.text, station_voice(self.tts, station), self.config.radio)
-        self.player.wait(ticket, should_stop=lambda: self._halt.is_set() or self.busy.is_set())
+        # Tuned away mid-sentence: the rest is not heard on the new frequency.
+        khz = tuned_khz(state)
+        self.player.wait(ticket, should_stop=lambda: self._halt.is_set() or self.busy.is_set() or self._retuned(khz))
         if self.after:
             self.after()
         return True
+
+    def _retuned(self, khz: int | None) -> bool:
+        return tuned_khz(self.bridge.snapshot()) != khz
 
     # ---- other aircraft on the frequency (sound only) -----------------------
 
     def _quiet(self) -> None:
         """The frequency was left: an exchange still playing belongs to it and stops."""
-        if time.monotonic() < self._chatter_until:
+        if self.clock.monotonic() < self._chatter_until:
             self.player.stop()
         self._chatter_key, self._chatter_until = None, 0.0
 
     def _chatter(self, station: Station, state: dict) -> None:
         mode = self.config.atc.chatter
-        now = time.monotonic()
+        now = self.clock.monotonic()
         if self._chatter_key != station.key:
             self._quiet()
             self._chatter_key = station.key
@@ -340,7 +354,7 @@ class AtisBroadcaster(threading.Thread):
         if now < self._chatter_at or now < self._chatter_until:
             return
         flight = self.engine.flight
-        if flight.pending is not None or getattr(self.player, "playing", False):
+        if (flight.pending is not None and flight.pending_key == station.key) or getattr(self.player, "playing", False):
             self._chatter_at = now + 4  # the controller is waiting for your readback, or someone is talking
             return
         weather = observe(self.db, station.airport, state) if station.airport else None
@@ -365,4 +379,4 @@ class AtisBroadcaster(threading.Thread):
             return  # you keyed the microphone, or a controller started talking, while this was being prepared
         self.emit({"type": "chatter", "station": station.callsign, "callsign": callsign, "said": said, "answered": answered})
         self.player.play(samples * 0.6, rate)
-        self._chatter_until = time.monotonic() + len(samples) / rate
+        self._chatter_until = self.clock.monotonic() + len(samples) / rate

@@ -105,7 +105,8 @@ class Flight:
     left_sector: tuple | None = None  # (centre, lat, lon): the centre that handed the flight on, and where
     sector_ahead: str | None = None  # the centre the flight was sent to before reaching its boundary
     direct_to: str | None = None
-    next_frequency: str | None = None  # the frequency of the last hand-off, until it is tuned
+    next_frequency: str | None = None  # the frequency of the last hand-off, until a call is made on it
+    handoffs: int = 0  # how many hand-offs have been given: the same frequency given twice is two hand-offs
     star_procedure: object | None = None  # procedures.Procedure
     constraints: list | None = None  # restrictions.Constraint along the STAR; None until looked up
     deviating: bool = False  # off track around weather
@@ -398,6 +399,8 @@ class Engine:
         # A request that happens to carry a number (a level asked for, a runway named) is not a readback.
         if pending is None or intent.intent not in ("readback", "other"):
             return None
+        if self.flight.pending_key != station.key:
+            return None  # read back to someone else: the controller who gave the instruction has not heard it
         values = (intent.runway, intent.squawk, intent.frequency, intent.qnh, intent.altitude, intent.heading)
         if intent.intent != "readback" and all(value is None for value in values):
             return None
@@ -438,10 +441,11 @@ class Engine:
                     self.flight.last_said[key] = reply.text
                 return reply
 
+            self._reached(station)
             reply = self._check_readback(intent, callsign, station)
             if reply is None:
                 if intent.intent == "readback":
-                    reply = Reply("")  # an acknowledgement with nothing outstanding
+                    reply = Reply("", note=self._not_for(station))  # an acknowledgement with nothing outstanding
                 else:
                     contacted = set(self.flight.contacted)
                     reply = self._decide(intent, station, issue, raw, variation, callsign)
@@ -493,10 +497,29 @@ class Engine:
         hello = self._greeting(station)
         return Reply(f"{callsign}, {hello}roger {flight.emergency}, squawk seven seven zero zero, say intentions")
 
+    def _reached(self, station: Station) -> None:
+        """A call on the frequency the flight was handed to completes the hand-off: there is no frequency left
+        to follow, and a hand-off not yet read back to the controller who gave it has been obeyed instead."""
+        flight, khz = self.flight, getattr(station, "khz", None)
+        if khz is None:
+            return
+        if flight.next_frequency and abs(float(flight.next_frequency) * 1000 - khz) <= 5:
+            flight.next_frequency = None
+        handed = flight.pending.expect.get("frequency") if flight.pending else None
+        if handed and flight.pending_key != station.key and abs(float(handed) * 1000 - khz) <= 5:
+            flight.pending = None
+
+    def _not_for(self, station: Station) -> str:
+        """Why a readback got no answer: the instruction it reads back was another controller's."""
+        if self.flight.pending is None or self.flight.pending_key == station.key:
+            return ""
+        return f"That readback was not for {station.callsign}: read it back to the controller who gave the instruction."
+
     def _await_readback(self, reply: Reply, key: str) -> None:
         flight = self.flight
         if "frequency" in reply.expect:
             flight.next_frequency = reply.expect["frequency"]  # offered in the app as a one-click tune
+            flight.handoffs += 1
         flight.pending, flight.pending_key, flight.pending_at, flight.reminded = reply, key, self.now(), False
 
     def _decide(
@@ -963,6 +986,11 @@ class Engine:
                     event="readback_missed",
                 )  # fmt: skip
             if station.kind in ifr.RADAR_KINDS:
+                if flight.pending is not None and flight.pending_key == key and not flight.reminded:
+                    # One instruction at a time: the next waits for the readback of the last, or a new one
+                    # would take its place and that readback would never be asked for. Once the last has been
+                    # said again, the controller carries on rather than fall silent for good.
+                    return None
                 reply = ifr.tick(self, station, issue, raw, magnetic_variation(raw), callsign)
                 if reply:
                     flight.last_said[key] = reply.text
@@ -1088,7 +1116,7 @@ class Engine:
                     item["needs"] = needs
                 items.append(item)
 
-            if flight.pending:
+            if flight.pending and flight.pending_key == key:  # read back to the controller who gave it
                 said = self.instruction_body(flight.pending.text, station.callsign)
                 said = re.sub(r", information [\w-]+ is current", "", said)  # the pilot does not read that back
                 items.append(
