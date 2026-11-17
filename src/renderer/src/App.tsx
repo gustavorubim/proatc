@@ -1,5 +1,6 @@
 import { type FormEvent, useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { Command, Debrief, EngineMessage, EngineState, Suggestion, UpdateState } from '../../shared/protocol'
+import { AirportMap } from './AirportMap'
 import logo from './assets/logo.svg'
 import { SettingsDialog } from './Settings'
 import { fillDestination, initialStore, type Line, reduce } from './store'
@@ -513,6 +514,16 @@ function KeyDialog({
   )
 }
 
+const MAP_KEY = 'proatc-map'
+
+function savedMapChoice(): boolean {
+  try {
+    return localStorage.getItem(MAP_KEY) !== 'off'
+  } catch {
+    return true
+  }
+}
+
 export function App() {
   const { store, send, pair, closeDebrief } = useEngine()
   const engine = store.engine
@@ -521,7 +532,32 @@ export function App() {
   const [destination, setDestination] = useState('')
   const [keyOpen, setKeyOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [mapOpen, setMapOpen] = useState(savedMapChoice)
+  const askedChart = useRef('')
   const logEnd = useRef<HTMLDivElement | null>(null)
+
+  // The map of the airport the aircraft stands on is asked for once, when it is first needed.
+  const mapIdent = engine?.map?.ident ?? ''
+  const chartIdent = store.chart?.ident ?? ''
+  const link = store.link
+  useEffect(() => {
+    if (link !== 'open') askedChart.current = ''
+    else if (mapIdent && mapIdent !== chartIdent && askedChart.current !== mapIdent) {
+      askedChart.current = mapIdent
+      send({ cmd: 'chart', ident: mapIdent })
+    }
+  }, [mapIdent, chartIdent, link, send])
+  const map = engine?.map && store.chart?.ident === engine.map.ident ? engine.map : null
+  const toggleMap = (): void => {
+    setMapOpen((open) => {
+      try {
+        localStorage.setItem(MAP_KEY, open ? 'off' : 'on')
+      } catch {
+        // Without storage the choice lasts until the window closes.
+      }
+      return !open
+    })
+  }
 
   useEffect(() => {
     logEnd.current?.scrollIntoView({ block: 'end' })
@@ -576,6 +612,11 @@ export function App() {
             >
               ${engine.cost.cost.toFixed(engine.cost.cost < 1 ? 4 : 2)}
             </span>
+          )}
+          {map && (
+            <button className="quiet" title="The airport map, with your taxi route" onClick={toggleMap}>
+              {mapOpen ? 'Hide map' : 'Map'}
+            </button>
           )}
           <button
             className="quiet"
@@ -632,6 +673,8 @@ export function App() {
               <div>{store.lastInstruction.text}</div>
             </div>
           )}
+
+          {map && mapOpen && store.chart && <AirportMap chart={store.chart} view={map} />}
 
           <div className="log">
             {store.fatal && <div className="line line-error">{store.fatal}</div>}

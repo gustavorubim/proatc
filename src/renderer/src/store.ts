@@ -1,6 +1,6 @@
 // What the window shows, as a pure function of the messages received from the engine.
 
-import type { Debrief, EngineMessage, EngineState } from '../../shared/protocol'
+import type { Chart, Debrief, EngineMessage, EngineState } from '../../shared/protocol'
 
 export type LineKind = 'pilot' | 'atc' | 'atis' | 'note' | 'error' | 'coach' | 'chatter'
 
@@ -22,6 +22,8 @@ export interface Store {
   fatal: string | null
   savedLog: string | null
   debrief: Debrief | null
+  /** The map of the airport the aircraft is at, once the engine has sent it. */
+  chart: Chart | null
   /** A browser on another device: 'ask' for the pairing code, 'wrong' when the engine refused it. */
   pairing: 'no' | 'ask' | 'wrong'
   nextId: number
@@ -39,6 +41,7 @@ export const initialStore: Store = {
   fatal: null,
   savedLog: null,
   debrief: null,
+  chart: null,
   pairing: 'no',
   nextId: 1
 }
@@ -116,6 +119,8 @@ export function reduce(store: Store, action: Action): Store {
       return push(push(store, 'chatter', message.station, message.said), 'chatter', message.callsign, message.answered)
     case 'debrief':
       return { ...store, debrief: message }
+    case 'chart':
+      return { ...store, chart: message }
     case 'capture':
       return store
     default:

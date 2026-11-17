@@ -5,6 +5,7 @@ a sentence with a hole in it, a deadlock, a slow tick, memory that grows without
 choice is seeded, so a failure names the seed that reproduces it.
 """
 
+import json
 import random
 import threading
 import time
@@ -171,6 +172,7 @@ def one_flight(make, stations, seed: int, steps: int = 40) -> int:
                     check_text(clicked.text, f"{where} clicked")
         summary = engine.summary()
         assert all(value for value in summary.values()), where
+        json.dumps(engine.taxi_map(raw))  # the map never raises, whatever the flight's state
         if rng.random() < 0.03:
             engine.reset()
     return spoken
@@ -353,13 +355,14 @@ def test_the_app_server_survives_malformed_commands(tmp_path, monkeypatch):
     app.emit = seen.append
     rng = random.Random(3)
     names = ["set_key", "simbrief", "plan", "clear_plan", "tune", "settings", "capture_ptt", "explain", "what_next", "save_log",
-             "reset_cost", "ptt", "say", "click", "debrief", "new_flight", "nope", None, 5]  # fmt: skip
+             "reset_cost", "ptt", "say", "click", "debrief", "new_flight", "chart", "nope", None, 5]  # fmt: skip
     values = [None, "", "x" * 5000, 0, -1, 1e308, [], {}, {"a": {"b": []}}, True, "118.100", {"remote": {"enabled": "yes"}}]
     handled = (ValueError, KeyError, TypeError, AttributeError)  # what the connection handler reports to the user
     for _ in range(600):
         command = {"cmd": rng.choice(names)}
         for key in rng.sample(
-            ["key", "user", "destination", "cruise", "route", "mhz", "changes", "down", "text", "intent"], rng.randint(0, 4)
+            ["key", "user", "destination", "cruise", "route", "mhz", "changes", "down", "text", "intent", "ident"],
+            rng.randint(0, 4),
         ):
             command[key] = rng.choice(values)
         if command["cmd"] == "set_key":

@@ -11,6 +11,7 @@ Run it with `proatc verify-data` on a machine with X-Plane installed. Nothing is
 # ruff: noqa: B023  (every lambda here is called at once, inside the loop that makes it)
 from __future__ import annotations
 
+import json
 import math
 import random
 import re
@@ -118,6 +119,9 @@ def sweep(db: AirportDB, idents: list[str], progress=None) -> Report:
         said(ident, "atis", check(ident, "atis", lambda: compose(airport, weather, "K", 43200.0, 0.0)))
 
         engine = Engine(db, seed=1, **shared)
+        drawn = check(ident, "map", lambda: json.loads(json.dumps(engine.chart(ident))))
+        if drawn is not None and not all(math.isfinite(value) and abs(value) < 30_000 for value in drawn["bounds"]):
+            report.failures.append((ident, "map", f"bounds {drawn['bounds']}"))
         procedures = check(ident, "procedures", lambda: engine.procedures(ident))
         active = runways_in_use(airport, wind, 9)
         if procedures is not None:

@@ -63,6 +63,8 @@ class Route:
     crossings: list[str]  # other runways crossed on the way
     distance_m: float
     turns: list[str] = field(default_factory=list)  # "left" / "right" / "" onto each taxiway after the first
+    points: list[tuple[float, float]] = field(default_factory=list)  # (lat, lon) along the route, for the map
+    crossing_index: dict[str, int] = field(default_factory=dict)  # crossed runway -> where in `points` it is met
 
 
 def parse_taxi(lines: list[str]) -> TaxiNetwork:
@@ -129,6 +131,7 @@ def _shortest(net: TaxiNetwork, graph: dict[int, list[Edge]], start: int, target
 def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str | None) -> Route:
     crossings: list[str] = []
     steps: list[tuple[str, float]] = []  # (taxiway, direction of travel) per edge, goal first
+    path = [goal]
     distance = 0.0
     node = goal
     while node != start:
@@ -139,8 +142,15 @@ def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str
         if crossed and crossed not in crossings:
             crossings.append(crossed)
         node = prior
+        path.append(node)
     steps.reverse()
     crossings.reverse()
+    path.reverse()
+    crossing_index: dict[str, int] = {}
+    for index, node in enumerate(path[1:-1], start=1):
+        crossed = net.runway_of(node, excluding=target_runway)
+        if crossed and crossed not in crossing_index:
+            crossing_index[crossed] = index
     names: list[str] = []
     turns: list[str] = []
     heading = None
@@ -151,7 +161,7 @@ def _build(net: TaxiNetwork, previous, start: int, goal: int, target_runway: str
                 turns.append("right" if change > 25 else "left" if change < -25 else "")
             names.append(name)
         heading = direction
-    return Route(names, crossings, distance, turns)
+    return Route(names, crossings, distance, turns, [net.nodes[n] for n in path], crossing_index)
 
 
 def _route(net: TaxiNetwork, start: int, goals: dict[int, float], target_runway: str | None) -> Route | None:
@@ -232,5 +242,5 @@ def route_to_point(net: TaxiNetwork, lat: float, lon: float, target: tuple[float
     if start is None or goal is None:
         return None
     if start == goal:
-        return Route([], [], 0.0)
+        return Route([], [], 0.0, points=[net.nodes[start]])
     return _route(net, start, {goal: 0.0}, None)

@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
-from . import ifr, traffic, vfr
+from . import chart, ifr, traffic, vfr
 from . import phraseology as say
 from .atis import Issue, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
@@ -123,6 +123,8 @@ class Flight:
     # Taxi (see _taxi_out, _taxi_in)
     crossings: list[str] = field(default_factory=list)  # runways ("09R/27L") still to be crossed, each needing a clearance
     taxi_goal: tuple | None = None  # ("runway", ident) or ("stand", lat, lon, spoken name)
+    taxi_route: object | None = None  # taxi.Route last given, for the map
+    taxi_airport: str | None = None  # where that route is
     stand: object | None = None  # taxi.Parking assigned after landing
     go_arounds: int = 0
     diverting: bool = False  # on the way to another airport after a missed approach
@@ -178,6 +180,9 @@ class Engine:
         self.last_raw: dict = {}  # the latest sim snapshot the engine was shown
         self.lock = threading.RLock()
         self._networks: dict[str, TaxiNetwork] = {}
+        self._charts: dict[str, dict] = {}
+        self._map_airport: tuple[float, float, Airport | None] | None = None
+        self._rerouted_at: tuple[float, float] | None = None
         # The seed is kept, and saved with the flight log, so that a log can be replayed with the same
         # squawk codes, stands and delays.
         self.seed = seed if seed is not None else random.SystemRandom().randrange(2**31)
@@ -604,6 +609,7 @@ class Engine:
             route = route_to_runway(self.network(airport), raw["lat"], raw["lon"], runway, self._threshold(airport, runway))
         via = self._route_words(route)
         flight.taxi_goal, flight.crossings = ("runway", runway), list(route.crossings) if route else []
+        flight.taxi_route, flight.taxi_airport = route, airport.ident
         limit = self._limit()
         if faa:
             text = f"{callsign}, {hello}runway {say.runway(runway)}, taxi{via}{limit}{pressure_tail}"
@@ -630,7 +636,8 @@ class Engine:
                 stand = flight.stand or assign_stand(network, category, airline, (raw["lat"], raw["lon"]), self._rng)
                 stand = stand or nearest_parking(network, raw["lat"], raw["lon"])
             if stand:
-                route = route_to_point(network, raw["lat"], raw["lon"], (stand.lat, stand.lon))
+                route = self._route_to_stand(network, raw, (stand.lat, stand.lon))
+        flight.taxi_route, flight.taxi_airport = route, airport.ident
         named = stand and stand.name and len(stand.name) <= 12
         destination = f"{'gate' if faa else 'stand'} {say.stand(stand.name)}" if named else "parking"
         flight.stand = stand
@@ -708,17 +715,29 @@ class Engine:
             return self._crossing(station, raw, callsign, "", faa, asked=False)
         return None
 
+    @staticmethod
+    def _route_to_stand(network: TaxiNetwork, raw: dict, stand: tuple[float, float]):
+        route = route_to_point(network, raw["lat"], raw["lon"], stand)
+        if route:
+            route.points.append(stand)  # the last few metres, off the taxiway, are shown on the map too
+        return route
+
+    def _route_from(self, airport: Airport, raw: dict):
+        """The route to the flight's taxi goal from where the aircraft is now."""
+        goal = self.flight.taxi_goal
+        network = self.network(airport)
+        if goal[0] == "runway":
+            return route_to_runway(network, raw["lat"], raw["lon"], goal[1], self._threshold(airport, goal[1]))
+        return self._route_to_stand(network, raw, (goal[1], goal[2]))
+
     def _progressive(self, station: Station, raw: dict, callsign: str, hello: str, faa: bool) -> Reply | None:
         """The next part of the taxi route, from where the aircraft is now."""
         flight, airport = self.flight, station.airport
         goal = flight.taxi_goal
         if not goal or "lat" not in raw:
             return None
-        network = self.network(airport)
-        if goal[0] == "runway":
-            route = route_to_runway(network, raw["lat"], raw["lon"], goal[1], self._threshold(airport, goal[1]))
-        else:
-            route = route_to_point(network, raw["lat"], raw["lon"], (goal[1], goal[2]))
+        route = self._route_from(airport, raw)
+        flight.taxi_route, flight.taxi_airport = route, airport.ident
         where = self._goal_words(faa)
         if not route or not route.taxiways:
             return Reply(f"{callsign}, {hello}continue straight ahead to {where}")
@@ -885,7 +904,7 @@ class Engine:
             if flight.phase != Phase.LANDING_CLEARED and flight.phase != Phase.AIRBORNE:
                 # New airborne segment: the departure runway no longer applies.
                 flight.phase, flight.runway, flight.pending = Phase.AIRBORNE, None, None
-                flight.crossings, flight.taxi_goal = [], None
+                flight.crossings, flight.taxi_goal, flight.taxi_route = [], None, None
                 flight.told_leaving = False
                 flight.told_vacate = False
             flight.has_been_airborne = True
@@ -1131,6 +1150,78 @@ class Engine:
         if flight.cleared_ft > transition:
             return f"FL{flight.cleared_ft // 100:03d}"
         return f"{flight.cleared_ft:,} ft"
+
+    # ---- the airport map ----------------------------------------------------
+
+    def chart(self, ident: str) -> dict | None:
+        """The map of an airport: what does not change while taxiing."""
+        with self.lock:
+            if ident not in self._charts:
+                airport = self.db.airport(ident)
+                if airport is None:
+                    return None
+                self._charts[ident] = chart.build_chart(airport, self.db.record_lines(airport), self.network(airport))
+            return self._charts[ident]
+
+    def _airport_under(self, lat: float, lon: float) -> Airport | None:
+        """The airport the aircraft is standing on: the one whose runway is nearest, not whose reference point is."""
+        cached = self._map_airport
+        if cached and distance_nm(lat, lon, cached[0], cached[1]) < 0.3:
+            return cached[2]
+        best, best_nm = None, 99.0
+        for _, airport in self.db.nearest(lat, lon, 5, 6):
+            for runway in airport.runways:
+                middle = ((runway.lat1 + runway.lat2) / 2, (runway.lon1 + runway.lon2) / 2)
+                for point in ((runway.lat1, runway.lon1), (runway.lat2, runway.lon2), middle):
+                    gap = distance_nm(lat, lon, *point)
+                    if gap < best_nm:
+                        best, best_nm = airport, gap
+        self._map_airport = (lat, lon, best)
+        return best
+
+    def taxi_map(self, raw: dict) -> dict | None:
+        """Where the aircraft is on the airport's map, and the taxi route it was given: what is still ahead,
+        cleared as far as the next runway it must hold short of."""
+        if "lat" not in raw or not raw.get("on_ground"):
+            return None
+        with self.lock:
+            airport = self._airport_under(raw["lat"], raw["lon"])
+            if airport is None:
+                return None
+            origin = (airport.lat, airport.lon)
+            here = chart.project(origin, raw["lat"], raw["lon"])
+            view: dict = {"ident": airport.ident, "position": list(here), "heading": round(raw.get("heading_true", 0.0)) % 360}
+            flight = self.flight
+            taxiing = flight.phase in (Phase.TAXI_OUT, Phase.TAXI_IN) and flight.taxi_goal
+            if not taxiing or flight.taxi_airport != airport.ident:
+                return view
+            route = flight.taxi_route
+            path = [chart.project(origin, *point) for point in route.points] if route else []
+            moved = self._rerouted_at is None or distance_nm(raw["lat"], raw["lon"], *self._rerouted_at) * 1852 > 50
+            if moved and (not path or chart.next_point(path, here)[1] > chart.OFF_ROUTE_M):
+                # Off the route that was given (a wrong turn, or pushed back somewhere else): show the way from here.
+                self._rerouted_at = (raw["lat"], raw["lon"])
+                route = self._route_from(airport, raw)
+                if route:
+                    flight.taxi_route = route
+                    path = [chart.project(origin, *point) for point in route.points]
+            if not path:
+                return view
+            hold = route.crossing_index.get(flight.crossings[0]) if flight.crossings else None
+            cleared, beyond, stop = chart.split_route(path, here, hold)
+            goal = flight.taxi_goal
+            if goal[0] == "runway":
+                label = f"Holding point {goal[1]}"
+            else:
+                label = f"Stand {flight.stand.name}" if flight.stand and flight.stand.name else "Parking"
+            view["route"] = {
+                "cleared": [list(point) for point in cleared],
+                "beyond": [list(point) for point in beyond],
+                "goal": {"label": label, "at": list(path[-1])},
+            }
+            if stop:
+                view["route"]["hold"] = {"runway": flight.crossings[0].split("/")[0], "at": list(stop)}
+            return view
 
     def summary(self) -> dict:
         """What the engine knows, for the app and for the free-form fallback's context."""
