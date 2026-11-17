@@ -1,0 +1,28 @@
+-- Vectors, a request for another approach, the weather closes in
+PILOT -> Eastfield Approach: check_in altitude=7000
+  ATC      Speedbird one two three, Eastfield Approach, identified, route direct Iafne, descend altitude four thousand feet, Q N H one zero one three, cleared R NAV approach runway two seven via Iafne, report established
+           [phase=airborne  assigned_runway=27  cleared_level=4,000 ft  approach=R NAV runway 27]
+PILOT -> Eastfield Approach: request_approach approach=NDB
+  ATC      Speedbird one two three, unable, no N D B approach runway two seven, expect R NAV approach runway two seven
+           [phase=airborne  assigned_runway=27  cleared_level=4,000 ft  approach=R NAV runway 27]
+PILOT -> Eastfield Approach: request_visual
+  ATC      Speedbird one two three, unable visual approach, expect R NAV approach runway two seven
+           [phase=airborne  assigned_runway=27  cleared_level=4,000 ft  approach=R NAV runway 27]
+  ATC*     Speedbird one two three, contact Eastfield Tower one one niner decimal one
+           [phase=airborne  assigned_runway=27  cleared_level=4,000 ft  approach=R NAV runway 27]
+PILOT -> Eastfield Tower: established
+  ATC      Speedbird one two three, Eastfield Tower, runway two seven, cleared to land, wind two seven zero degrees one zero knots
+           [phase=cleared to land  assigned_runway=27  cleared_level=4,000 ft  approach=R NAV runway 27]
+
+-- Going around, back to approach, and a diversion
+PILOT -> Eastfield Tower: going_around
+  ATC      Speedbird one two three, roger, standard missed approach, climb altitude four thousand feet, contact Eastfield Approach one two four decimal three
+           [phase=airborne  assigned_runway=27  cleared_level=4,000 ft  approach=R NAV runway 27]
+PILOT -> Eastfield Approach: going_around
+  ATC      Speedbird one two three, turn right heading zero seven zero, expect R NAV approach runway two seven
+           [phase=airborne  assigned_runway=27  cleared_level=4,000 ft  approach=R NAV runway 27  heading=70]
+PILOT -> Eastfield Approach: request_diversion destination=EGXX
+  ATC      Speedbird one two three, roger, cleared to Westfield, fly heading two seven zero, climb flight level two four zero
+           [phase=airborne  cleared_level=FL240]
+  ATC*     Speedbird one two three, contact Eastland Control one three two decimal one
+           [phase=airborne  cleared_level=FL240]

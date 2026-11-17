@@ -176,7 +176,10 @@ class Engine:
         self.last_raw: dict = {}  # the latest sim snapshot the engine was shown
         self.lock = threading.RLock()
         self._networks: dict[str, TaxiNetwork] = {}
-        self._rng = random.Random(seed)
+        # The seed is kept, and saved with the flight log, so that a log can be replayed with the same
+        # squawk codes, stands and delays.
+        self.seed = seed if seed is not None else random.SystemRandom().randrange(2**31)
+        self._rng = random.Random(self.seed)
 
     # ---- helpers ------------------------------------------------------------
 
@@ -206,6 +209,7 @@ class Engine:
             plan = self.flight.plan
             self.flight = Flight(plan=plan)
             self._traffic_seen.clear()
+            self._rng = random.Random(self.seed)  # a new flight begins the same sequence again
 
     @staticmethod
     def active_runways(airport: Airport, issue: Issue | None) -> list[str]:

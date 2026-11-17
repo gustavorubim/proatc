@@ -168,7 +168,11 @@ def clearance(engine, station, issue, raw, callsign, hello, faa, atis_part, on_c
     destination = engine.db.airport(plan.destination)
     where = destination.spoken_name if destination else say.spoken_callsign(plan.destination)
 
-    initial = (sid.top_altitude() if sid else None) or (5000 if faa else 6000)
+    # The initial climb is to the first level the SID holds the flight down to on the legs it will fly;
+    # failing that, the SID's highest such restriction; failing that, a standard initial altitude.
+    flown = sid.chain("SID", runway, route_fixes(plan.route)) if sid else []
+    held = next((leg.altitude_ft for leg in flown if leg.altitude_ft and leg.alt_descr in ("", "@", "-", "B")), None)
+    initial = held or (sid.top_altitude() if sid else None) or (5000 if faa else 6000)
     if plan.cruise_ft:
         initial = min(initial, plan.cruise_ft)
     flight.rules, flight.destination, flight.runway = "IFR", where, runway
@@ -1049,6 +1053,8 @@ def tick(engine, station, issue, raw, variation, callsign):
             target = engine._handoff(destination, "approach") or engine._handoff(destination, "tower")
             if target:
                 return _reply(engine, f"{callsign}, contact {target[0]} {target[1]}", {"frequency": target[2]})
+        if flight.told_approach:
+            return None  # handed to approach: the flight is no longer this controller's to descend
         # An aircraft that has left the sector is the next controller's to climb or descend.
         if not station.center.contains(raw["lat"], raw["lon"]):
             return _centre_handoff(engine, raw, callsign, exclude=station.center)

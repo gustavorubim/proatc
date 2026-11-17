@@ -15,6 +15,7 @@ import queue
 import re
 import threading
 import time
+from dataclasses import asdict
 
 from .airspace import open_airspace
 from .atis import AtisBook
@@ -35,6 +36,7 @@ from .procedures import NavaidNames, route_fixes
 from .ptt import PushToTalk
 from .radio import AtisBroadcaster, SimClock, briefing, current_station, observe, station_voice
 from .radio_fx import radio_effect
+from .replay import snapshot
 from .stt import SpeechToText
 from .tts import TextToSpeech, download_models, models_present
 from .xpbridge import SimUnavailable, XPBridge, describe, magnetic_variation
@@ -117,6 +119,7 @@ class Session:
             "station": station.callsign if station else None,
             "aircraft": {key: state[key] for key in keep if key in state},
             "flight": self.engine.summary(),
+            "raw": snapshot(raw),  # what a replay of this log feeds back to the engine
         }
 
     # ---- start-up -----------------------------------------------------------
@@ -298,6 +301,8 @@ class Session:
     def save_log(self) -> None:
         extra = {"flight": self.engine.summary() if self.ready else None, "openrouter_usage": dict(self.usage),
                  "model": self.config.llm.model}  # fmt: skip
+        if self.ready:
+            extra["seed"] = self.engine.seed
         extra["debrief"] = review(self.log.records)
         extra["debrief_text"] = "\n" + as_text(extra["debrief"])
         if self.ready and self.engine.flight.plan:
@@ -476,6 +481,11 @@ def informational(text: str) -> bool:
     return not INSTRUCTION.search(text)
 
 
+def _fields(intent: Intent) -> dict:
+    """An intent as plain data, without what was not said: what the flight log keeps, to replay the call."""
+    return {key: value for key, value in asdict(intent).items() if value not in (None, False)}
+
+
 def known_names(engine) -> list[str]:
     """Identifiers this flight is likely to mention: its airports, its route's waypoints, its procedures."""
     flight, plan = engine.flight, engine.flight.plan
@@ -582,7 +592,7 @@ def _answer(transcript, intent, context, station_key, station, issue, raw, contr
     if station and engine and (intent is not None or parser):
         if intent is None:
             intent = parser.parse(transcript, engine.flight.last_said.get(station_key, ""), known_names(engine))
-        emit({"type": "understood", "intent": intent.intent})
+        emit({"type": "understood", "intent": intent.intent, "fields": _fields(intent)})
         reply = engine.handle(intent, station, issue, raw, magnetic_variation(raw))
         engine.flight.last_note = reply.note if reply is not None else ""
         engine.flight.last_event = reply.event if reply is not None else ""

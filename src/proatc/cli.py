@@ -158,6 +158,47 @@ def cmd_run(config) -> int:
     return 0
 
 
+def _real_engine(config, db, seed=None):
+    """An engine on this machine's X-Plane data, as the app builds it."""
+    from .airspace import open_airspace
+    from .centers import CenterIndex
+    from .engine import Engine
+    from .metar import MetarStore
+    from .navfix import open_navfix
+    from .procedures import NavaidNames
+
+    root = db.xplane_root
+    db.centers, db.metars = CenterIndex.open(root), MetarStore(root)
+    return Engine(
+        db, seed=seed, centers=db.centers, navaids=NavaidNames(root), navfix=open_navfix(root), metars=db.metars,
+        holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root),
+    )  # fmt: skip
+
+
+def cmd_replay(config, path: str) -> int:
+    import json
+    from pathlib import Path
+
+    from .navdata import AirportDB
+    from .replay import replay
+
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    db = AirportDB.open(config.sim.xplane_path)
+    result = replay(payload, db, lambda seed: _real_engine(config, db, seed))
+    print(result.summary())
+    return 1 if result.differences else 0
+
+
+def cmd_verify_data(config, count: int) -> int:
+    from .navdata import AirportDB
+    from .verify import pick_airports, sweep
+
+    db = AirportDB.open(config.sim.xplane_path)
+    report = sweep(db, pick_airports(db, count), progress=print)
+    print(report.summary())
+    return 1 if report.failures else 0
+
+
 def main() -> int:
     from .config import load_config
     from .tts import ModelsMissing
@@ -176,6 +217,10 @@ def main() -> int:
     atis.add_argument("--say", action="store_true")
     sub.add_parser("keytest", help="show the name of each key you press, to pick a push-to-talk key")
     sub.add_parser("run", help="start the push-to-talk voice loop")
+    replay = sub.add_parser("replay", help="run a saved flight log (.json) through the engine again and show what differs")
+    replay.add_argument("log")
+    verify = sub.add_parser("verify-data", help="run the engine over many real airports of this X-Plane and report problems")
+    verify.add_argument("--airports", type=int, default=300)
     server = sub.add_parser("serve", help="run the engine for the desktop app (started by the app itself)")
     server.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
@@ -189,6 +234,10 @@ def main() -> int:
 
             serve_app(config, args.port)
             return 0
+        if args.command == "replay":
+            return cmd_replay(config, args.log)
+        if args.command == "verify-data":
+            return cmd_verify_data(config, args.airports)
         if args.command == "airport":
             return cmd_airport(config, args.ident)
         if args.command == "atis":

@@ -1,0 +1,30 @@
+-- Out: across a runway, lost on the way, takeoff cancelled and given again
+PILOT -> Testfield Ground: request_clearance destination=Paris flight_rules=IFR
+  ATC      Speedbird one two three, Testfield Ground, cleared to Lima Foxtrot X-ray X-ray as filed, runway two seven right, climb altitude six thousand feet, squawk two one four one, information Charlie is current
+  ATC      Speedbird one two three, readback correct
+           [phase=parked  assigned_runway=27R  cleared_level=6,000 ft]
+PILOT -> Testfield Ground: request_taxi
+  ATC      Speedbird one two three, taxi to holding point runway two seven right via Charlie, Bravo and Bravo one, hold short runway zero niner right, Q N H one zero one three
+           [phase=taxiing out  assigned_runway=27R  cleared_level=6,000 ft  hold_short=09R]
+PILOT -> Testfield Ground: request_progressive
+  ATC      Speedbird one two three, continue on Charlie, then turn right onto Bravo, hold short runway zero niner right
+           [phase=taxiing out  assigned_runway=27R  cleared_level=6,000 ft  hold_short=09R]
+  ATC*     Speedbird one two three, cross runway zero niner right, continue to holding point runway two seven right
+           [phase=taxiing out  assigned_runway=27R  cleared_level=6,000 ft]
+PILOT -> Testfield Ground: request_progressive
+  ATC      Speedbird one two three, continue on Bravo, then turn left onto Bravo one
+           [phase=taxiing out  assigned_runway=27R  cleared_level=6,000 ft]
+PILOT -> Testfield Tower: ready_for_departure
+  ATC      Speedbird one two three, Testfield Tower, runway two seven right, cleared for takeoff, wind two seven zero degrees one zero knots
+           [phase=cleared for takeoff  assigned_runway=27R  cleared_level=6,000 ft]
+  ATC*     Speedbird one two three, hold position, cancel takeoff clearance, I say again, cancel takeoff clearance, traffic on the runway (takeoff_cancelled)
+           [phase=taxiing out  assigned_runway=27R  cleared_level=6,000 ft]
+  ATC*     Speedbird one two three, runway two seven right, cleared for takeoff, wind two seven zero degrees one zero knots
+           [phase=cleared for takeoff  assigned_runway=27R  cleared_level=6,000 ft]
+
+-- An incursion: a second flight that does not stop at the runway
+PILOT -> Testfield Ground: request_taxi
+  ATC      Speedbird one two three, Testfield Ground, taxi to holding point runway two seven right via Charlie, Bravo and Bravo one, hold short runway zero niner right, Q N H one zero one three
+           [phase=taxiing out  assigned_runway=27R  hold_short=09R]
+  ATC*     Speedbird one two three, you were to hold short of runway zero niner right, expedite crossing (runway_incursion)
+           [phase=taxiing out  assigned_runway=27R]

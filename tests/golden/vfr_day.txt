@@ -1,0 +1,64 @@
+-- Westfield tower: circuits, then away to the north
+PILOT -> Westfield Tower: request_circuits
+  ATC      Golf Alfa Bravo Charlie Delta, Westfield Tower, V F R circuits approved, departure runway two seven, left hand, squawk seven zero zero zero, Q N H one zero one three
+  ATC      Golf Alfa Bravo Charlie Delta, readback correct, report ready for departure
+           [phase=parked  assigned_runway=27]
+PILOT -> Westfield Tower: ready_for_departure
+  ATC      Golf Alfa Bravo Charlie Delta, runway two seven, cleared for takeoff, wind two seven zero degrees one zero knots, report downwind
+           [phase=cleared for takeoff  assigned_runway=27]
+PILOT -> Westfield Tower: position_report position=downwind
+  ATC      Golf Alfa Bravo Charlie Delta, number one, report final runway two seven
+           [phase=airborne  assigned_runway=27]
+PILOT -> Westfield Tower: position_report position=final touch_and_go=True
+  ATC      Golf Alfa Bravo Charlie Delta, runway two seven, cleared touch and go, wind two seven zero degrees one zero knots
+           [phase=cleared to land  assigned_runway=27]
+PILOT -> Westfield Tower: request_low_approach
+  ATC      Golf Alfa Bravo Charlie Delta, runway two seven, cleared low approach, wind two seven zero degrees one zero knots
+           [phase=airborne  assigned_runway=27]
+PILOT -> Westfield Tower: request_clearance atis=C flight_rules=VFR compass=north
+  ATC      Golf Alfa Bravo Charlie Delta, Westfield Tower, V F R departure approved, departure runway two seven, leave the control zone to the north, not above altitude two thousand feet, squawk seven zero zero zero, Q N H one zero one three
+  ATC      Golf Alfa Bravo Charlie Delta, readback correct, report ready for departure
+           [phase=parked  assigned_runway=27]
+PILOT -> Westfield Tower: ready_for_departure
+  ATC      Golf Alfa Bravo Charlie Delta, runway two seven, cleared for takeoff, wind two seven zero degrees one zero knots
+           [phase=cleared for takeoff  assigned_runway=27]
+  ATC*     Golf Alfa Bravo Charlie Delta, leaving the control zone, frequency change approved
+           [phase=airborne]
+
+-- A radar service, and controlled airspace ahead
+PILOT -> Westfield Radar: request_flight_following service=traffic
+  ATC      Golf Alfa Bravo Charlie Delta, Westfield Radar, squawk two one four one, identified, traffic service, Q N H one zero one three
+           [phase=airborne  service=traffic]
+  ATC*     Golf Alfa Bravo Charlie Delta, control zone five miles ahead, for entry contact Westfield Tower one one eight decimal one, otherwise remain outside
+           [phase=airborne  service=traffic]
+  ATC*     Golf Alfa Bravo Charlie Delta, caution, restricted area three miles ahead on your present track
+           [phase=airborne  service=traffic]
+PILOT -> Westfield Tower: request_transit
+  ATC      Golf Alfa Bravo Charlie Delta, cleared to transit the control zone, V F R, not above altitude two thousand feet, Q N H one zero one three, report leaving
+           [phase=airborne  service=traffic]
+
+-- Below minima; an airfield with nobody there; an information service
+PILOT -> Westfield Tower: inbound flight_rules=VFR
+  ATC      Golf Alfa Bravo Charlie Delta, the weather is below V F R minima, special V F R is available, say intentions
+           [phase=airborne  assigned_runway=27  service=traffic]
+PILOT -> Westfield Tower: request_special_vfr
+  ATC      Golf Alfa Bravo Charlie Delta, cleared to transit the control zone, V F R, not above altitude two thousand feet, Q N H one zero zero five, report leaving
+           [phase=airborne  assigned_runway=27  service=traffic]
+PILOT -> Grassfield Traffic: traffic_call
+  ATC      (silent: No controller at Grassfield: your call went out to other traffic on the frequency.)
+           [phase=airborne  assigned_runway=27]
+PILOT -> Grassfield Traffic: request_weather
+  ATC      (silent: No controller at Grassfield: your call went out to other traffic on the frequency.)
+           [phase=airborne  assigned_runway=27]
+PILOT -> Fjordby Information: request_taxi
+  ATC      Golf Alfa Bravo Charlie Delta, Fjordby Information, roger, taxi to parking at your discretion
+           [phase=taxiing in  assigned_runway=27]
+PILOT -> Fjordby Information: ready_for_departure
+  ATC      Golf Alfa Bravo Charlie Delta, no reported traffic, wind two seven zero degrees one zero knots, take off at your discretion
+           [phase=cleared for takeoff  assigned_runway=27]
+PILOT -> Fjordby Information: inbound
+  ATC      Golf Alfa Bravo Charlie Delta, runway two seven, right hand circuit, Q N H one zero one three, no reported traffic, report downwind
+           [phase=airborne  assigned_runway=27]
+PILOT -> Fjordby Information: position_report position=final
+  ATC      Golf Alfa Bravo Charlie Delta, runway free, wind two seven zero degrees one zero knots, land at your discretion
+           [phase=cleared to land  assigned_runway=27]
