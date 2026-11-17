@@ -220,14 +220,15 @@ def test_touch_and_go_keeps_the_flight_in_the_circuit(db):
     assert engine.tick(tower, ISSUE, state(51.0, -0.99, speed=10)) is None
 
 
-def test_uncovered_requests_return_none_for_the_free_form_fallback(db):
+def test_only_unforeseen_speech_is_left_to_the_free_form_fallback(db):
     engine = Engine(db, seed=1)
     tower = db.station(118100, *STAND)
     assert engine.handle(Intent("other"), tower, ISSUE, state()) is None
-    assert engine.handle(Intent("say_again"), tower, ISSUE, state()) is None  # nothing said yet
+    nothing_said = engine.handle(Intent("say_again"), tower, ISSUE, state())
+    assert nothing_said.text == "Golf Alfa Bravo Charlie Delta, Testfield Tower, no instructions for you"
     assert (
         engine.handle(Intent("request_taxi"), tower, ISSUE, state()).text
-        == "Golf Alfa Bravo Charlie Delta, Testfield Tower, contact Testfield Ground one two one decimal seven"
+        == "Golf Alfa Bravo Charlie Delta, contact Testfield Ground one two one decimal seven"  # named itself already
     )
     assert engine.summary() == {"phase": "parked", "next_frequency": "121.700"}  # the hand-off is offered as a one-click tune
 
@@ -281,7 +282,7 @@ def test_suggested_calls_follow_the_flight_and_carry_their_intent(db):
 
     engine.handle(Intent("request_taxi"), ground, ISSUE, here)
     engine.handle(Intent("readback", runway="27"), ground, ISSUE, here)
-    assert labels(ground) == ["Ready for departure", "Progressive taxi", "Say again", "Radio check"]
+    assert labels(ground) == ["Ready for departure", "Progressive taxi", "Return to stand", "Say again", "Radio check"]
     ready = [item for item in engine.suggestions(tower, ISSUE, here) if item["label"] == "Ready for departure"][0]
     assert ready["text"] == "Testfield Tower, Golf Alfa Bravo Charlie Delta, holding short runway two seven, ready for departure"
 

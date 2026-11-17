@@ -39,7 +39,7 @@ INTENTS = {
     "request_crossing": "on the ground, holding short of a runway or asking to cross it",
     "request_progressive": "asks for progressive taxi instructions, or is unsure where to taxi",
     "request_transit": "airborne, asks to cross or transit a control zone or controlled airspace without landing",
-    "report_leaving": "reports leaving or clear of the zone, or asks for a frequency change",
+    "report_leaving": "reports leaving or clear of the zone, or asks for a frequency change or to leave the frequency for a while",
     "request_special_vfr": "asks for special V F R",
     "request_circuits": "asks for circuits, closed traffic, or to remain in the pattern",
     "request_low_approach": "asks for a low approach or a low pass",
@@ -48,9 +48,24 @@ INTENTS = {
     "going_around": "going around / missed approach",
     "runway_vacated": "reports the runway vacated / clear of the runway",
     "readback": "mainly repeats the controller's last instruction back",
-    "say_again": "asks the controller to repeat",
+    "say_again": "asks the controller to repeat (with item set when only one thing is to be repeated: 'say again the heading')",
+    "request_information": (
+        "asks for, or to confirm or verify, one piece of information (set item): the cleared level, heading, speed, "
+        "squawk, runway (assigned, expected or in use), frequency, Q N H or altimeter, clearance limit, taxi route, "
+        "approach (expected or in use), A T I S letter, distance to touchdown, or a wind check"
+    ),
+    "acknowledge": "only roger, wilco, thank you, good day, standby, disregard or cancel my request, with no instruction to read back",
+    "unable": "says unable to comply with the controller's last instruction",
+    "request_delay": "not ready yet, or asks to wait a few minutes before the clearance, push, taxi or takeoff",
+    "request_return": "asks to return: to the stand or gate on the ground, or to the departure airport once airborne",
+    "request_runway": "asks for a particular or a different runway, for departure or for landing",
     "other": "anything else",
 }
+# What a request for information, or a "say again", can be about.
+ITEMS = (
+    "altitude", "heading", "speed", "squawk", "runway", "frequency", "qnh", "clearance", "route", "approach", "atis",
+    "distance", "wind",
+)  # fmt: skip
 
 PROMPT = """You convert one pilot radio transmission from a flight simulator into JSON. Output only a JSON object, no other text.
 
@@ -73,14 +88,19 @@ Keys:
 - "compass": a direction of flight or of the aircraft from the airfield, as "north", "north east", "east", "south east", "south", "south west", "west" or "north west", or null
 - "approach": the type of approach asked for or read back: "ILS", "LOC", "RNAV", "VOR", "NDB" or "visual", or null
 - "touch_and_go": true if a touch and go is requested or read back, else false
+- "item": for "request_information" or "say_again", the one thing asked about: one of {items}; or null. "Confirm cleared level" is "altitude", "runway in use" or "expected runway" is "runway", "current approach in use" is "approach", "track miles" is "distance"
 
 Rules:
 - The speech-to-text may contain errors; pick the most plausible aviation meaning.
 - "niner" is 9, "tree" is 3, "fife" is 5, "decimal" or "point" separates a frequency.
 - If the transmission repeats back the controller's last instruction (given below), the intent is "readback", and you still fill runway, squawk, qnh, frequency, altitude and heading with what the PILOT said, even if it differs from the instruction.
-- A pilot who reports "final" or asks for landing clearance is "position_report" with position "final"."""
+- A pilot who reports "final" or asks for landing clearance is "position_report" with position "final".
+- "Roger" or "wilco" after an instruction is "readback"; with no instruction to repeat it is "acknowledge"."""
 
-SYSTEM = PROMPT.format(intents="; ".join(f'"{name}" ({meaning})' for name, meaning in INTENTS.items()))
+SYSTEM = PROMPT.format(
+    intents="; ".join(f'"{name}" ({meaning})' for name, meaning in INTENTS.items()),
+    items=", ".join(f'"{item}"' for item in ITEMS),
+)
 
 
 @dataclass
@@ -103,6 +123,7 @@ class Intent:
     approach: str | None = None
     service: str | None = None
     compass: str | None = None
+    item: str | None = None  # what a request for information is about: one of ITEMS
 
     @classmethod
     def from_dict(cls, data: dict) -> Intent:
@@ -166,6 +187,10 @@ def _clean(data: dict) -> Intent:
     if points.strip() in ("north", "north east", "east", "south east", "south", "south west", "west", "north west"):
         intent.compass = points.strip()
     intent.touch_and_go = data.get("touch_and_go") is True
+    item = str(data.get("item", "")).lower().strip()
+    item = {"level": "altitude", "cleared level": "altitude", "altimeter": "qnh", "pressure": "qnh", "taxi": "route",
+            "taxi route": "route", "clearance limit": "clearance", "track miles": "distance", "information": "atis"}.get(item, item)  # fmt: skip
+    intent.item = item if item in ITEMS else None
     for key, low, high in (("altitude", 0, 60000), ("heading", 0, 360)):
         try:
             value = float(data[key]) if key in data else None

@@ -284,7 +284,8 @@ def test_mayday_is_acknowledged_and_the_landing_is_cleared_at_once(tmp_path):
         "emergency services standing by"
     )
     assert engine.handle(Intent("cancel_emergency"), tower, ISSUE, far_out).text == f"{CALLSIGN}, roger, emergency cancelled"
-    assert engine.handle(Intent("cancel_emergency"), tower, ISSUE, far_out) is None and "emergency" not in engine.summary()
+    assert engine.handle(Intent("cancel_emergency"), tower, ISSUE, far_out).text == f"{CALLSIGN}, roger"  # nothing to cancel
+    assert "emergency" not in engine.summary()
     assert (
         engine.handle(Intent("pan_pan"), tower, ISSUE, far_out).text
         == f"{CALLSIGN}, roger pan pan, squawk seven seven zero zero, say intentions"
@@ -365,7 +366,7 @@ def test_vfr_flight_following(tmp_path):
     assert engine.handle(Intent("cancel_flight_following"), west, None, cruising).text == (
         f"{CALLSIGN}, radar service terminated, squawk seven zero zero zero, frequency change approved"
     )
-    assert engine.handle(Intent("cancel_flight_following"), west, None, cruising) is None
+    assert engine.handle(Intent("cancel_flight_following"), west, None, cruising).text == f"{CALLSIGN}, roger"
 
 
 # ---- traffic ----------------------------------------------------------------

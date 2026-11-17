@@ -132,7 +132,8 @@ def ctaf(engine, intent, station, issue, raw, variation, callsign, kind: str):
         flight.runway = active[0]
     if not flight.rules:
         flight.rules = "VFR"
-    if kind == "unicom" and intent.intent in ("request_weather", "radio_check", "initial_call"):
+    # An operator, not a controller: a question of any kind gets the airport advisory.
+    if kind == "unicom" and intent.intent in ("request_weather", "radio_check", "initial_call", "request_information"):
         if intent.intent == "radio_check":
             return Reply(f"{callsign}, {place} unicom, loud and clear")
         faa = uses_faa_style(airport.ident)

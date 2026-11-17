@@ -13,10 +13,10 @@ import random
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
-from . import chart, ifr, traffic, vfr
+from . import answers, chart, ifr, traffic, vfr
 from . import phraseology as say
 from .atis import Issue, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
@@ -107,6 +107,9 @@ class Flight:
     direct_to: str | None = None
     next_frequency: str | None = None  # the frequency of the last hand-off, until a call is made on it
     handoffs: int = 0  # how many hand-offs have been given: the same frequency given twice is two hand-offs
+    next_contact: tuple[str, str] | None = None  # (station, "Eastfield Tower one one niner decimal one"): that hand-off
+    requested_runway: tuple[str, str] | None = None  # (airport, runway) the pilot asked for and was granted
+    requested_approach: str | None = None  # the approach family asked for before reaching approach ("RNAV")
     star_procedure: object | None = None  # procedures.Procedure
     constraints: list | None = None  # restrictions.Constraint along the STAR; None until looked up
     deviating: bool = False  # off track around weather
@@ -284,8 +287,15 @@ class Engine:
             return f"altimeter {say.digits(f'{round(inches * 100):04d}')}", inches
         return say.qnh(issue.weather.qnh_hpa), float(int(issue.weather.qnh_hpa))
 
+    def requested_runway(self, airport: Airport) -> str | None:
+        """The runway the pilot asked for at this airport and was granted."""
+        asked = self.flight.requested_runway
+        return asked[1] if asked and asked[0] == airport.ident else None
+
     def _departure_runway(self, airport: Airport, issue: Issue | None, raw: dict) -> str | None:
-        """The departure runway whose threshold is nearest the aircraft."""
+        """The runway the pilot asked for, else the departure runway whose threshold is nearest the aircraft."""
+        if self.requested_runway(airport):
+            return self.requested_runway(airport)
         active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
         active = split_runways(active)[1]
         if not active:
@@ -433,9 +443,15 @@ class Engine:
             self._observe(raw)
             key = station.key
             callsign = self._callsign(raw, intent)
+            intent = self._meaning(intent, station, raw)
             if intent.intent == "say_again":
                 previous = self.flight.last_said.get(key)
-                return Reply(previous, self.flight.pending.expect if self.flight.pending else {}) if previous else None
+                if previous:
+                    return Reply(previous, self.flight.pending.expect if self.flight.pending else {})
+                if station.airport is None or vfr.service(station) not in ("ctaf", "unicom"):
+                    return Reply(f"{callsign}, {self._greeting(station)}no instructions for you")
+            if intent.intent == "acknowledge":
+                return Reply("")  # "thank you", "good day", "standby": nothing to answer
             if intent.intent in ("mayday", "pan_pan", "cancel_emergency"):
                 reply = self._emergency(intent, station, callsign)
                 if reply and reply.text:
@@ -451,6 +467,10 @@ class Engine:
                     contacted = set(self.flight.contacted)
                     reply = self._decide(intent, station, issue, raw, variation, callsign)
                     if reply is None:
+                        # No rule for this call: the controller still says who can help, or what it can do.
+                        self.flight.contacted = set(contacted)
+                        reply = answers.way_out(self, intent, station, raw, callsign, self._greeting(station))
+                    if reply is None:
                         self.flight.contacted = contacted  # the free-form fallback will do the greeting
             if reply is None:
                 return None
@@ -461,6 +481,54 @@ class Engine:
             if reply.text:
                 self.flight.last_said[key] = reply.text
             return reply
+
+    def _meaning(self, intent: Intent, station: Station, raw: dict) -> Intent:
+        """Calls that mean another call where the aircraft is: 'request delay' in the air is a hold,
+        'request return' in the air a diversion back, a check-in on the ground a first call."""
+        name, airborne = intent.intent, not bool(raw.get("on_ground", True))
+        if name == "say_again" and intent.item:
+            return replace(intent, intent="request_information")
+        if name == "acknowledge" and self.flight.pending:
+            return replace(intent, intent="readback")  # "wilco" to an instruction: it is still to be read back
+        if name == "check_in" and not airborne:
+            return replace(intent, intent="initial_call")
+        if name == "request_delay" and airborne:
+            return replace(intent, intent="request_hold")
+        if name == "request_return" and airborne:
+            if station.kind in ifr.RADAR_KINDS:
+                return replace(intent, intent="request_diversion", destination=self.flight.origin_ident)
+            return replace(intent, intent="inbound")
+        if name == "request_return" and vfr.service(station) == "afis":
+            return replace(intent, intent="runway_vacated")  # to parking at the pilot's discretion
+        return intent
+
+    def _common(self, intent: Intent, station: Station, issue: Issue | None, raw: dict, variation: float, callsign: str):
+        """Calls every controller answers alike: a radio check, a question, 'unable', a runway, 'not ready yet'."""
+        name, on_ground = intent.intent, bool(raw.get("on_ground", True))
+        faa = answers.faa_for(station)
+        if name not in ("radio_check", "request_information", "unable", "request_runway", "request_delay", "report_leaving",
+                        "request_return"):  # fmt: skip
+            return None
+        if name in ("request_delay", "report_leaving", "request_return") and not on_ground:
+            return None
+        if name == "request_return":
+            kinds = {freq.kind for freq in station.airport.freqs} if station.airport else set()
+            if not station.airport or station.kind != "ground" and (station.kind != "tower" or "ground" in kinds):
+                return None  # another controller's: the way out sends the pilot there
+            self.flight.runway, self.flight.waiting_takeoff = None, False
+            return self._taxi_in(station, raw, callsign, f"{self._greeting(station)}roger, ", faa)
+        hello = self._greeting(station)
+        if name == "radio_check":
+            return Reply(f"{callsign}, {hello}reading you five")
+        if name == "request_information":
+            return answers.information(self, intent, station, issue, raw, variation, callsign, hello)
+        if name == "unable":
+            return answers.unable(self, station, raw, callsign, hello, faa)
+        if name == "request_runway":
+            return answers.runway_request(self, intent, station, issue, raw, callsign, hello, faa)
+        if name == "request_delay":
+            return answers.delay(self, station, raw, callsign, hello, faa)
+        return answers.leave_frequency(self, station, raw, callsign, hello, faa)
 
     def on_runway(self, airport: Airport, raw: dict) -> bool:
         """Whether the aircraft is on one of the airport's runways (within its length, near the centreline)."""
@@ -490,7 +558,7 @@ class Engine:
         flight = self.flight
         if intent.intent == "cancel_emergency":
             if not flight.emergency:
-                return None
+                return Reply(f"{callsign}, {self._greeting(station)}roger")  # nothing declared: nothing to cancel
             flight.emergency = None
             return Reply(f"{callsign}, roger, emergency cancelled")
         flight.emergency = "mayday" if intent.intent == "mayday" else "pan pan"
@@ -521,11 +589,17 @@ class Engine:
         if "frequency" in reply.expect:
             flight.next_frequency = reply.expect["frequency"]  # offered in the app as a one-click tune
             flight.handoffs += 1
+            told = re.search(r"contact ([^,]+)", reply.text)
+            flight.next_contact = (key, told.group(1)) if told else None
         flight.pending, flight.pending_key, flight.pending_at, flight.reminded = reply, key, self.now(), False
 
     def _decide(
         self, intent: Intent, station: Station, issue: Issue | None, raw: dict, variation: float, callsign: str
     ) -> Reply | None:
+        if station.airport is None or vfr.service(station) not in ("ctaf", "unicom"):
+            common = self._common(intent, station, issue, raw, variation, callsign)
+            if common is not None:
+                return common
         if station.kind in ifr.RADAR_KINDS and not bool(raw.get("on_ground", True)):
             return ifr.handle(self, intent, station, issue, raw, variation, callsign, self._greeting(station))
         if station.kind == "center":
@@ -855,7 +929,16 @@ class Engine:
         if intent.intent == "request_transit":
             return vfr.transit(self, intent, station, issue, raw, callsign, hello, faa)
         if intent.intent == "report_leaving":
-            return vfr.leaving(self, station, raw, callsign, faa, asked=True)
+            left = vfr.leaving(self, station, raw, callsign, faa, asked=True)
+            if left:
+                return left
+            if flight.rules == "IFR" and airport.ident == flight.origin_ident and not flight.told_departure:
+                # An instrument departure asking to change: the hand-off to departure that was coming anyway.
+                target = ifr.after_takeoff(self, airport, raw)
+                if target:
+                    flight.told_departure = True
+                    return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]}", {"frequency": target[2]})
+            return answers.leave_frequency(self, station, raw, callsign, hello, faa)
         runway = self._landing_runway(airport, issue, raw, intent)
         if not runway:
             return None
@@ -911,6 +994,8 @@ class Engine:
         active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
         if not active:
             return None
+        if self.requested_runway(airport):
+            return self.requested_runway(airport)
         if self.flight.runway in active:
             return self.flight.runway
         if intent.runway in active:
@@ -1136,6 +1221,8 @@ class Engine:
                 return items
             if station.kind in ifr.RADAR_KINDS:
                 ifr.suggestions(self, station, raw, add, callsign)
+                if flight.pending:
+                    add("Unable", "unable", "unable")  # the controller cancels the instruction or gives another
                 if flight.last_said.get(key):
                     add("Say again", "say again", "say_again")
                 add("Radio check", "radio check", "radio_check")
@@ -1156,7 +1243,8 @@ class Engine:
                             "request_clearance", flight_rules="IFR", needs="destination")  # fmt: skip
                     add("Request VFR departure", f"{information}request V F R departure", "request_clearance", flight_rules="VFR")
                 handles_ground = station.kind == "ground" or (station.kind == "tower" and "ground" not in kinds)
-                if handles_ground and flight.phase == Phase.PARKED:
+                back_at_stand = flight.phase == Phase.TAXI_IN  # returned to the stand before departing
+                if handles_ground and (flight.phase == Phase.PARKED or back_at_stand):
                     add("Request push and start", "request push and start", "request_pushback")
                     add("Request taxi", "request taxi", "request_taxi")
                 if (handles_ground and flight.phase == Phase.TAXI_OUT) or station.kind == "tower":
@@ -1173,6 +1261,11 @@ class Engine:
                     add("Holding short", f"holding short runway {short}, request crossing", "request_crossing")
                 if flight.taxi_goal and flight.phase in (Phase.TAXI_OUT, Phase.TAXI_IN):
                     add("Progressive taxi", "request progressive taxi", "request_progressive")
+                handles_ground = station.kind == "ground" or (station.kind == "tower" and "ground" not in kinds)
+                if handles_ground and flight.phase == Phase.TAXI_OUT and not flight.has_been_airborne:
+                    faa = uses_faa_style(airport.ident)
+                    add(f"Return to {'gate' if faa else 'stand'}", f"request return to {'the gate' if faa else 'stand'}",
+                        "request_return")  # fmt: skip
             elif station.kind == "tower":
                 runway = f" runway {say.runway(flight.runway)}" if flight.runway else ""
                 if flight.arrival and flight.arrival.stage == "tower":
@@ -1182,9 +1275,12 @@ class Engine:
                 add("Final", f"final{runway}", "position_report", position="final")
                 add("Touch and go", "request touch and go", "request_touch_and_go", touch_and_go=True)
                 add("Going around", "going around", "going_around")
+                add("Wind check", "request wind check", "request_information", item="wind")
 
             if station.kind == "tower":
                 vfr.tower_suggestions(self, station, issue, raw, add)
+            if flight.pending:
+                add("Unable", "unable", "unable")  # the controller cancels the instruction or gives another
             if flight.last_said.get(key):
                 add("Say again", "say again", "say_again")
             add("Radio check", "radio check", "radio_check")
