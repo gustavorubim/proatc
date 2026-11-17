@@ -340,11 +340,13 @@ def cmd_verify_data(config, count: int) -> int:
     return 1 if report.failures else 0
 
 
-def cmd_verify_flights(config, count: int, show: str | None) -> int:
+def cmd_verify_flights(config, count: int, show: str | None, full: bool = False) -> int:
     from .flights import fly, pick_flights, shared_data, sweep_flights
     from .navdata import AirportDB
 
     db = AirportDB.open(config.sim.xplane_path)
+    if full:
+        return _verify_full(db, count, show)
     if show:
         problems, said = fly(db, shared_data(db), *show.upper().split("-")[:2])
         print("\n".join(said))
@@ -353,6 +355,24 @@ def cmd_verify_flights(config, count: int, show: str | None) -> int:
     report = sweep_flights(db, pick_flights(db, count), progress=print)
     print(report.summary().replace(" airports,", " flights,", 1))
     return 1 if report.failures else 0
+
+
+def _verify_full(db, count: int, show: str | None) -> int:
+    """Gate to gate: clearance, taxi, takeoff, the climb, the cruise, the approach, landing and taxi to a stand."""
+    from .flights import fly_full, full_summary, pick_flights, shared_data, sweep_full
+
+    sys.stdout.reconfigure(errors="replace")  # station names in any language, to a console that may not have them
+    if show:
+        problems, said = fly_full(db, shared_data(db), *show.upper().split("-")[:2])
+        print("\n".join(said))
+        print("problems:" if problems else "problems: none")
+        for kind, detail in problems:
+            print(f"  {kind}: {detail}")
+        return 1 if problems else 0
+    # Both ends need a tower: the flight starts and ends on the ground, with someone to talk to there.
+    results, seconds = sweep_full(db, pick_flights(db, count, towered=True), progress=print)
+    print(full_summary(results, seconds))
+    return 1 if any(problems for _, problems, _ in results) else 0
 
 
 def main() -> int:
@@ -406,6 +426,9 @@ def main() -> int:
     flights = sub.add_parser("verify-flights", help="fly whole flights between real airports worldwide and report what broke")
     flights.add_argument("--flights", type=int, default=300)
     flights.add_argument("--show", help="print one flight's radio work, e.g. KBOS-KIAD")
+    flights.add_argument(
+        "--full", action="store_true", help="fly gate to gate: from a stand at the origin to a stand at the destination"
+    )
     server = sub.add_parser("serve", help="run the engine for the desktop app (started by the app itself)")
     server.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
@@ -448,7 +471,7 @@ def main() -> int:
             right, total, _ = bench_intents(Controller(config.llm, key))
             return 0 if right >= total * 0.9 else 1
         if args.command == "verify-flights":
-            return cmd_verify_flights(config, args.flights, args.show)
+            return cmd_verify_flights(config, args.flights, args.show, args.full)
         if args.command == "verify-data":
             return cmd_verify_data(config, args.airports)
         if args.command == "airport":

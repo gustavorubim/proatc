@@ -174,6 +174,7 @@ def parse_atc(lines) -> list[Center]:
 class CenterIndex:
     def __init__(self, centers: list[Center]):
         self.centers = centers
+        self._working: dict[int, list[Center]] = {}  # frequency -> the centres that work it: asked every second
 
     @classmethod
     def open(cls, xplane_root: Path | None, cache: Path = CACHE) -> CenterIndex:
@@ -204,15 +205,16 @@ class CenterIndex:
 
     def on_frequency(self, khz: int, lat: float, lon: float) -> CenterStation | None:
         """A centre that covers this position and works this frequency."""
-        working = [c for c in self.centers if c.has_frequency(khz)]
-        inside = [c for c in working if c.contains(lat, lon)]
-        inside = [c for c in inside if c.name == _HELD.get(khz)] or inside  # two centres on one frequency: no switching
-        if not inside:
-            # A radio does not stop at a line on the map: just across the boundary the last centre still
-            # answers, and sends the flight to the next one. Several centres can work one frequency: the
-            # one that was being talked to is the one that answers.
-            # Only the centre that was being talked to: one the aircraft was never inside does not answer.
-            inside = [c for c in working if c.name == _HELD.get(khz) and c.near(lat, lon, BEYOND_BOUNDARY_DEG)]
+        if khz not in self._working:
+            self._working[khz] = [c for c in self.centers if c.has_frequency(khz)]
+        working = self._working[khz]
+        # A radio does not stop at a line on the map. Several centres can work one frequency: the one that was
+        # being talked to, or that the flight was sent to, answers just across its boundary too, and before
+        # another centre that also works the frequency where the aircraft is.
+        inside = [
+            c for c in working if c.name == _HELD.get(khz) and (c.contains(lat, lon) or c.near(lat, lon, BEYOND_BOUNDARY_DEG))
+        ]
+        inside = inside or [c for c in working if c.contains(lat, lon)]
         best = min(inside, key=lambda c: c.area, default=None)
         if best:
             _HELD[khz] = best.name

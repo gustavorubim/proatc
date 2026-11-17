@@ -31,7 +31,7 @@ from . import holding, restrictions, traffic, vfr
 from . import phraseology as say
 from .atis import uses_faa_style
 from .intents import Intent
-from .navdata import Airport, bearing, distance_nm
+from .navdata import Airport, bearing, distance_nm, expect_station
 from .procedures import choose_approach, choose_sid, choose_star, circling_approach, route_fixes, spoken_name
 from .vectors import CLOSE_NM, FINAL_NM, established, locate, next_vector, turn_direction
 
@@ -41,6 +41,7 @@ CHECK_IN = ("check_in", "initial_call", "position_report", "inbound")
 TO_APPROACH = (*CHECK_IN, "request_descent", "request_approach", "request_visual", "request_vectors", "other", "unknown")
 DEPARTURE_TOP_FT = 24000  # the departure controller's highest level
 DEPARTURE_HANDOFF_NM = 30
+DEPARTURE_LOOK_NM = 40  # a tower with no centre over its airport hands a departure to the one this far ahead
 APPROACH_HANDOFF_NM = 45
 STEP_FT = 10000  # the size of one climb or descent clearance
 STEP_LEAD_NM = 5  # the next step down comes this far before a three degree path leaves the cleared level
@@ -166,6 +167,8 @@ def _fix_word(engine, fix: str, lat: float, lon: float) -> str:
     if len(fix) <= 3:
         name = engine.navaids.name(fix, lat, lon) if engine.navaids else None
         return name or " ".join(say.PHONETIC[c] for c in fix if c in say.PHONETIC)
+    if any(c.isdigit() for c in fix):
+        return " ".join(say.PHONETIC[c] for c in fix.upper() if c in say.PHONETIC)  # "AA690" is spelled, not read as a word
     return fix.title()
 
 
@@ -190,7 +193,9 @@ def clearance(engine, station, issue, raw, callsign, hello, faa, atis_part, on_c
     # failing that, the SID's highest such restriction; failing that, a standard initial altitude.
     flown = sid.chain("SID", runway, route_fixes(plan.route)) if sid else []
     held = next((leg.altitude_ft for leg in flown if leg.altitude_ft and leg.alt_descr in ("", "@", "-", "B")), None)
-    initial = held or (sid.top_altitude() if sid else None) or (5000 if faa else 6000)
+    # The standard altitude is above the airport: at a field 5,500 ft high, 5,000 ft would be under the runway.
+    standard = max(5000 if faa else 6000, int(math.ceil((airport.elev_ft + 3000) / 1000) * 1000))
+    initial = held or (sid.top_altitude() if sid else None) or standard
     if plan.cruise_ft:
         initial = min(initial, plan.cruise_ft)
     flight.rules, flight.destination, flight.runway = "IFR", where, runway
@@ -640,7 +645,7 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
             approach, flown, runway = other, other.runway, other.runway
         elif issue is not None and not _weather_allows(issue, VISUAL_VISIBILITY_SM, VISUAL_CEILING_FT):
             unavailable = True
-    platform = approach.platform_ft if approach and approach.platform_ft else int(math.ceil((airport.elev_ft + 3000) / 500) * 500)
+    platform = _platform(approach, airport)
     course = next(heading for rw in airport.runways for ident, heading in rw.ends() if ident == flown)
     # Final is joined no closer than a three degree path from the joining altitude allows.
     join = max(engine._rng.choice(JOIN_NM), math.ceil((platform - airport.elev_ft) / 320))
@@ -652,6 +657,15 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
         procedure=approach,
     )  # fmt: skip
     return flight.arrival
+
+
+def _platform(approach, airport: Airport) -> int:
+    """The altitude final is joined at: the approach's own, else 3,000 ft above the airport. Never less than
+    1,500 ft above it: procedure data that does not match the airport's elevation would put the flight in the ground."""
+    floor = int(math.ceil((airport.elev_ft + 1500) / 100) * 100)
+    if approach and approach.platform_ft:
+        return max(approach.platform_ft, floor)
+    return int(math.ceil((airport.elev_ft + 3000) / 500) * 500)
 
 
 def _tailwind_kt(airport: Airport, runway: str, issue) -> float:
@@ -713,7 +727,10 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
         and traffic.on_final(raw, airport, arrival.flown, arrival.final_nm + 4) is not None
     )
     inbound = arrival.stage in (None, "descend")
-    vector = next_vector(position, arrival.course_true, arrival.platform_ft, _feet(raw), safe, arrival.final_nm, extend, inbound)
+    on_base, vectored = arrival.stage == "base", arrival.stage in ("downwind", "base")
+    vector = next_vector(
+        position, arrival.course_true, arrival.platform_ft, _feet(raw), safe, arrival.final_nm, extend, inbound, on_base, vectored
+    )
     if (
         extend
         and arrival.stage == "downwind"
@@ -782,6 +799,8 @@ def _initial_fix(engine, airport, arrival, raw, position):
         out = distance_nm(*where, *arrival.threshold)
         if out < 5 or position.distance_nm < out - 3:
             continue  # too close in to be a way in, or already behind the aircraft
+        if locate(*where, arrival.threshold, arrival.course_true).along_nm < 3:
+            continue  # beyond the runway: the way in from there turns back over the airport, which is not watched here
         miles = distance_nm(raw["lat"], raw["lon"], *where)
         if best is None or miles < best[0]:
             best = (miles, fix, altitude, where)
@@ -797,7 +816,9 @@ def _via_initial_fix(engine, station, issue, raw, callsign, lead, position, safe
     fix, crossing_ft, where = found
     word = _fix_word(engine, fix, *where)
     arrival.stage, arrival.via, arrival.heading, flight.direct_to = "procedure", fix, None, fix
-    altitude = max(crossing_ft or arrival.platform_ft, int(math.ceil(safe / 100) * 100))
+    # A published crossing altitude is the procedure's own, designed for the terrain on its way in: the minimum
+    # sector altitude (the highest within 25 miles, a mountain behind the airport) is only for when there is none.
+    altitude = crossing_ft or max(arrival.platform_ft, int(math.ceil(safe / 100) * 100))
     parts = [f"{'proceed' if faa else 'route'} direct {word}"]
     expect: dict = {}
     cleared = flight.cleared_ft if flight.cleared_ft is not None else _feet(raw)
@@ -820,7 +841,7 @@ def _via_initial_fix(engine, station, issue, raw, callsign, lead, position, safe
 def _to_tower(engine, station, callsign):
     arrival = engine.flight.arrival
     arrival.stage = "tower"
-    target = engine._handoff(station.airport, "tower")
+    target = engine._handoff(station.airport, "tower", to_aircraft=True)
     if not target:
         return None
     return _reply(engine, f"{callsign}, contact {target[0]} {target[1]}", {"frequency": target[2]})
@@ -911,7 +932,7 @@ def _visual(engine, station, issue, raw, callsign, lead: str):
     arrival.threshold, arrival.stage = engine._threshold(airport, arrival.runway), "tower"
     text = f"{callsign}, {lead}cleared visual approach runway {say.runway(arrival.runway)}"
     expect = {"runway": arrival.runway}
-    target = engine._handoff(airport, "tower")
+    target = engine._handoff(airport, "tower", to_aircraft=True)
     if target:
         text += f", contact {target[0]} {target[1]}"
         expect["frequency"] = target[2]
@@ -936,7 +957,7 @@ def _other_approach(engine, intent, station, callsign, lead: str):
     # The next tick starts again for this approach: by its initial fix if it has one, otherwise by vectors.
     arrival.stage, arrival.heading = ("descend" if arrival.stage else None), None
     if found.platform_ft:
-        arrival.platform_ft = found.platform_ft
+        arrival.platform_ft = _platform(found, station.airport)
     return _reply(engine, f"{callsign}, {lead}roger, expect {arrival.words()}")
 
 
@@ -958,7 +979,7 @@ def _runway_change(engine, station, issue, raw, callsign):
     """The runway in use has changed under an arrival that is not yet on final: a new approach, new vectors."""
     flight = engine.flight
     old = flight.arrival
-    flight.runway = None
+    flight.runway, flight.arrival = None, None  # chosen afresh, not kept from the arrival being replaced
     new = _setup_arrival(engine, station, issue, raw, Intent())
     if new is None or new.runway == old.runway:
         flight.arrival, flight.runway = old, old.runway
@@ -1088,7 +1109,7 @@ def go_around(engine, station, callsign):
     """Tower's reply to an instrument flight going around: climb, back to approach for new vectors."""
     flight, airport = engine.flight, station.airport
     arrival = flight.arrival
-    target = engine._handoff(airport, "approach")
+    target = engine._handoff(airport, "approach", to_aircraft=True)
     if not arrival or not target:
         return None
     faa = uses_faa_style(airport.ident)
@@ -1116,14 +1137,30 @@ def go_around(engine, station, callsign):
 def after_takeoff(engine, airport: Airport, raw: dict):
     """Who the tower hands a departing IFR flight to: departure, else approach, else the centre."""
     for kind in ("departure", "approach"):
-        target = engine._handoff(airport, kind)
+        target = engine._handoff(airport, kind, raw)
         if target:
             return target
-    center = engine.centers.at(raw["lat"], raw["lon"], _feet(raw)) if engine.centers and "lat" in raw else None
+    center = None
+    if engine.centers and "lat" in raw:
+        # The centre here, or where no centre covers the airport, the one the flight is climbing into.
+        place = _centre_place(engine, raw)
+        center = engine.centers.at(*place, _feet(raw)) if place else None
     if center:
         station = engine.centers.station_for(center)
+        engine.centers.expect(station.khz, center)
+        expect_station(station.khz, station.key)
         return station.callsign, say.frequency(station.khz), f"{station.khz / 1000:.3f}"
     return None
+
+
+def _centre_place(engine, raw: dict) -> tuple[float, float] | None:
+    """Where to look for the centre to hand a departure to: where the aircraft is, or, where no centre covers that
+    (the sim's data has holes), the first place ahead on its heading that one does."""
+    if not engine.centers or "lat" not in raw:
+        return None
+    here = (raw["lat"], raw["lon"])
+    places = [here, *(_ahead(raw, miles) for miles in range(10, DEPARTURE_LOOK_NM + 1, 10))]
+    return next((place for place in places if engine.centers.at(*place, _feet(raw))), None)
 
 
 def _ahead(raw: dict, miles: float | None = None) -> tuple[float, float]:
@@ -1181,8 +1218,26 @@ def _centre_handoff(engine, raw, callsign, exclude=None, where=None):
     engine.flight.sector_ahead = center.name if where else None
     station = engine.centers.station_for(center)
     engine.centers.expect(station.khz, center)
+    expect_station(station.khz, station.key)  # and not an airport's controller that shares the frequency
     text = f"{callsign}, contact {station.callsign} {say.frequency(station.khz)}"
     return _reply(engine, text, {"frequency": f"{station.khz / 1000:.3f}"})
+
+
+def _descent_due(engine, station, raw, callsign, destination, remaining: float, gate: float, faa: bool):
+    """The first descent, or the next step down, when a three degree path to the hand-off needs it; else None."""
+    flight = engine.flight
+    cleared = flight.cleared_ft or 0
+    goal = _descent_target(engine, destination, raw)
+    if not flight.descent_given:
+        # Three degrees is about 300 ft per mile; ten miles in hand for slowing down.
+        if remaining <= (_feet(raw) - goal) / 300 + gate + 10:
+            return _descent(engine, station, raw, callsign, "", faa)
+    elif cleared > goal and _near_cleared(engine, raw):
+        # The next step waits for the distance too: an aircraft that came down quickly is held at its
+        # level until a three degree path needs the next one, not sent lower a hundred miles out.
+        if remaining <= (cleared - goal) / 300 + gate + 10 + STEP_LEAD_NM:
+            return _descend(engine, _next_level(cleared, _feet(raw), goal), destination.ident, faa, callsign, "")
+    return None
 
 
 def _crossing_missed(engine, crossing, raw, ident: str, faa: bool, callsign: str):
@@ -1242,16 +1297,18 @@ def _watch(engine, station, raw, callsign):
     feet, rate, cleared = _feet(raw), raw.get("vs_fpm", 0.0), flight.cleared_ft
     faa = _faa(station)
     ident = station.airport.ident if station.airport else None
+    # Cleared for the approach, the aircraft descends below its last level on the approach's own profile.
+    cleared_approach = arrival is not None and arrival.stage in (*ON_APPROACH, "tower")
     if cleared is not None and flight.bust_called_for != cleared:
         climbing_through = feet > cleared + BUST_FT and rate > 300
-        descending_through = feet < cleared - BUST_FT and rate < -300
+        descending_through = feet < cleared - BUST_FT and rate < -300 and not cleared_approach
         if climbing_through or descending_through:
             flight.bust_called_for = cleared
             text = f"{callsign}, check your {'altitude' if faa else 'level'}, cleared {_level(engine, cleared, ident, faa)}"
             return _reply(engine, text, event="level_bust")  # a prompt to correct, not an instruction to read back
     height = raw["agl_m"] / 0.3048 if "agl_m" in raw else None
     if height is not None:
-        on_approach = arrival is not None and arrival.stage in ("intercept", "tower")
+        on_approach = cleared_approach
         if height > 2.5 * LOW_AGL_FT:
             flight.low_altitude_called = False
         elif height < LOW_AGL_FT and rate < -500 and not on_approach and not flight.low_altitude_called:
@@ -1293,8 +1350,13 @@ def tick(engine, station, issue, raw, variation, callsign):
         # the flight comes within its range while still on the oceanic frequency.
         landing = engine.db.airport(plan.destination) if plan and plan.destination else None
         if landing and not flight.arrival and (not flight.told_approach or _approach_missed(engine, station)):
-            if distance_nm(raw["lat"], raw["lon"], landing.lat, landing.lon) <= _handoff_nm(engine, landing):
+            remaining, gate = distance_nm(raw["lat"], raw["lon"], landing.lat, landing.lon), _handoff_nm(engine, landing)
+            if remaining <= gate:
                 return _to_approach(engine, station, landing, raw, callsign)
+            # Without radar the descent is still given, or the flight reaches its destination in the cruise.
+            descent = _descent_due(engine, station, raw, callsign, landing, remaining, gate, _centre_faa(station))
+            if descent:
+                return descent
         if not station.center.contains(raw["lat"], raw["lon"]):
             return _centre_handoff(engine, raw, callsign, exclude=station.center)
         return None
@@ -1318,7 +1380,7 @@ def tick(engine, station, issue, raw, variation, callsign):
             # A short diversion never reaches a centre: straight to the other airport's approach.
             other = engine.db.airport(plan.destination)
             if other and distance_nm(raw["lat"], raw["lon"], other.lat, other.lon) <= APPROACH_HANDOFF_NM + 10:
-                target = engine._handoff(other, "approach", raw) or engine._handoff(other, "tower")
+                target = engine._handoff(other, "approach", raw) or engine._handoff(other, "tower", raw)
                 if target and distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon) > 8:
                     flight.told_approach = True
                     return _reply(engine, f"{callsign}, contact {target[0]} {target[1]}", {"frequency": target[2]})
@@ -1328,7 +1390,9 @@ def tick(engine, station, issue, raw, variation, callsign):
         if cleared < top and _near_cleared(engine, raw) and away <= DEPARTURE_HANDOFF_NM:
             return _climb(engine, _next_level(cleared, _feet(raw), top), airport.ident, faa, callsign, "")
         if away > DEPARTURE_HANDOFF_NM or (cleared >= top and _feet(raw) >= cleared - 1500):
-            return _centre_handoff(engine, raw, callsign)
+            place = _centre_place(engine, raw)
+            here = place == (raw["lat"], raw["lon"])
+            return _centre_handoff(engine, raw, callsign, where=None if here or place is None else place)
         return None
 
     if part == "passing":
@@ -1412,17 +1476,7 @@ def tick(engine, station, issue, raw, variation, callsign):
             if any(not c.passed for c in flight.constraints):
                 return None  # the arrival's restrictions set the pace
         if destination:
-            goal = _descent_target(engine, destination, raw)
-            if not flight.descent_given:
-                # Three degrees is about 300 ft per mile; ten miles in hand for slowing down.
-                start_nm = (_feet(raw) - goal) / 300 + gate + 10
-                if remaining <= start_nm:
-                    return _descent(engine, station, raw, callsign, "", faa)
-            elif cleared > goal and _near_cleared(engine, raw):
-                # The next step waits for the distance too: an aircraft that came down quickly is held at its
-                # level until a three degree path needs the next one, not sent lower a hundred miles out.
-                if remaining <= (cleared - goal) / 300 + gate + 10 + STEP_LEAD_NM:
-                    return _descend(engine, _next_level(cleared, _feet(raw), goal), destination.ident, faa, callsign, "")
+            return _descent_due(engine, station, raw, callsign, destination, remaining, gate, faa)
         return None
 
     arrival = flight.arrival
@@ -1434,7 +1488,10 @@ def tick(engine, station, issue, raw, variation, callsign):
         return None
     if arrival.stage in ON_APPROACH:
         position = locate(raw["lat"], raw["lon"], arrival.threshold, arrival.course_true)
-        if established(position, arrival.final_nm) or 0 < position.along_nm < arrival.final_nm - 4:
+        # Inside the joining point counts only near the centreline: abeam the airport, forty miles to the side, the
+        # flight is not on final, and the tower is out of range.
+        inside = 0 < position.along_nm < arrival.final_nm - 4 and position.cross_nm < CLOSE_NM
+        if established(position, arrival.final_nm) or inside:
             return _to_tower(engine, station, callsign)
         return None
     asked = engine.requested_runway(station.airport)

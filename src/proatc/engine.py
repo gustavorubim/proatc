@@ -53,6 +53,7 @@ REPOSITION_AIRBORNE_NM = 10.0  # on the ground, then airborne this far away
 ON_RUNWAY_NM = 0.022  # this close to a runway's centreline is on it
 HOLDING_SHORT_NM = 0.075  # stopped this close to a runway to be crossed: holding short of it
 CROSSING_FINAL_NM = 3.0  # an aircraft on final this close in keeps a crossing waiting
+RELEASE_DEPARTURE_NM = 25  # the tower hands a departure on within this distance (its own range is 30)
 
 
 class Phase(Enum):
@@ -301,6 +302,22 @@ class Engine:
         if self.requested_runway(airport):
             return self.requested_runway(airport)
         active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
+        # A runway the airport's taxiways do not reach (a grass strip beside the main runway, a closed one) is
+        # not given for departure while one that they reach is in use.
+        network = self.network(airport)
+        if network.usable and issue:
+            taxi = network.taxi_nodes()
+            entered = [name for name, nodes in network.runway_nodes.items() if nodes & taxi]  # a taxiway joins it
+
+            def reached(ident: str) -> bool:
+                return any(ident in name.split("/") for name in entered)
+
+            taxied_to = [ident for ident in active if reached(ident)]
+            if not taxied_to:
+                # None of the runways in use: the best of those the taxiways do reach.
+                served = replace(airport, runways=[r for r in airport.runways if reached(r.end1) or reached(r.end2)])
+                taxied_to = runways_in_use(served, issue.weather.wind_dir_true, issue.weather.wind_kt)
+            active = taxied_to or active
         active = split_runways(active)[1]
         if not active:
             return None
@@ -317,9 +334,12 @@ class Engine:
                 return runway.lat2, runway.lon2
         return airport.lat, airport.lon
 
-    def _handoff(self, airport: Airport, kind: str, raw: dict | None = None) -> tuple[str, str, str] | None:
+    def _handoff(
+        self, airport: Airport, kind: str, raw: dict | None = None, to_aircraft: bool = False
+    ) -> tuple[str, str, str] | None:
         """(spoken callsign, spoken frequency, 'nnn.nnn') of the airport's station of this kind. With the
-        aircraft's position, the sector that works its side of the airport."""
+        aircraft's position, the sector that works its side of the airport. With the position or `to_aircraft`,
+        the flight is being sent there: on that frequency it is this station that answers."""
         bearing_from = None
         if raw and "lat" in raw:
             variation = raw.get("heading_mag", 0.0) - raw.get("heading_true", 0.0) if "heading_true" in raw else 0.0
@@ -327,9 +347,9 @@ class Engine:
         station = self.db.station_of(airport, kind, bearing_from)
         if not station:
             return None
-        if raw is not None:
-            # Said to an aircraft in flight: on that frequency it is this station that answers, even where
-            # a centre or another airport shares it.
+        if raw is not None or to_aircraft:
+            # Said to an aircraft: on that frequency it is this station that answers, even where a centre,
+            # another airport or another of this airport's controllers shares it.
             expect_station(station.khz, station.key)
         return station.callsign, say.frequency(station.khz), f"{station.khz / 1000:.3f}"
 
@@ -662,7 +682,9 @@ class Engine:
         if intent.intent in ("request_circuits", "request_special_vfr") and on_ground:
             # Both are VFR departure clearances with something extra.
             if not gives_clearance and station.kind in ("ground", "tower"):
-                target = self._handoff(airport, "delivery") or self._handoff(airport, "ground")
+                target = self._handoff(airport, "delivery", to_aircraft=True) or self._handoff(
+                    airport, "ground", to_aircraft=True
+                )
                 return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]} for clearance", {"frequency": target[2]})
             if gives_clearance:
                 flight.runway = self._departure_runway(airport, issue, raw)
@@ -673,7 +695,9 @@ class Engine:
                 )  # fmt: skip
         if intent.intent == "request_clearance" and on_ground:
             if station.kind in ("ground", "tower") and not gives_clearance:
-                target = self._handoff(airport, "delivery") or self._handoff(airport, "ground")
+                target = self._handoff(airport, "delivery", to_aircraft=True) or self._handoff(
+                    airport, "ground", to_aircraft=True
+                )
                 return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]} for clearance", {"frequency": target[2]})
             if not gives_clearance:
                 return None
@@ -683,7 +707,7 @@ class Engine:
             has_plan = bool(flight.plan and flight.plan.destination)
             visual = intent.flight_rules == "VFR" or (intent.flight_rules is None and not intent.destination and not has_plan)
             flight.runway = runway
-            next_station = self._handoff(airport, "ground") if station.kind == "delivery" else None
+            next_station = self._handoff(airport, "ground", to_aircraft=True) if station.kind == "delivery" else None
             on_correct = "readback correct" + (
                 f", contact {next_station[0]} {next_station[1]} when ready for push and start"
                 if next_station
@@ -719,7 +743,7 @@ class Engine:
 
         if station.kind == "delivery":
             if intent.intent in ("request_pushback", "request_taxi", "ready_for_departure"):
-                target = self._handoff(airport, "ground") or self._handoff(airport, "tower")
+                target = self._handoff(airport, "ground", to_aircraft=True) or self._handoff(airport, "tower", to_aircraft=True)
                 if target:
                     return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]}", {"frequency": target[2]})
             return None
@@ -894,17 +918,21 @@ class Engine:
             return None
         arrived = flight.has_been_airborne
         if intent.intent == "request_pushback" and not arrived:
-            approved = "push back and start approved" if not faa else "push back approved"
-            return Reply(f"{callsign}, {hello}{approved}{pressure_tail}")
+            return self._pushback(callsign, hello, faa, pressure_tail)
         if intent.intent == "runway_vacated" or (intent.intent == "request_taxi" and arrived):
             return self._taxi_in(station, raw, callsign, hello, faa)
         if intent.intent == "request_taxi":
             return self._taxi_out(station, issue, raw, callsign, hello, faa, pressure_tail)
         if intent.intent == "ready_for_departure":
-            target = self._handoff(airport, "tower")
+            target = self._handoff(airport, "tower", to_aircraft=True)
             if target:
                 return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]}", {"frequency": target[2]})
         return None
+
+    @staticmethod
+    def _pushback(callsign: str, hello: str, faa: bool, pressure_tail: str) -> Reply:
+        approved = "push back and start approved" if not faa else "push back approved"
+        return Reply(f"{callsign}, {hello}{approved}{pressure_tail}")
 
     # ---- tower --------------------------------------------------------------
 
@@ -918,13 +946,16 @@ class Engine:
         if on_ground:
             arrived = flight.has_been_airborne and flight.phase in (Phase.LANDED, Phase.TAXI_IN, Phase.LANDING_CLEARED)
             if intent.intent == "runway_vacated" or (intent.intent == "request_taxi" and arrived):
-                target = self._handoff(airport, "ground")
+                target = self._handoff(airport, "ground", to_aircraft=True)
                 if target:
                     return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]}", {"frequency": target[2]})
                 return self._taxi_in(station, raw, callsign, hello, faa)
             if intent.intent in ("request_pushback", "request_taxi") and "ground" in kinds:
-                target = self._handoff(airport, "ground")
+                target = self._handoff(airport, "ground", to_aircraft=True)
                 return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]}", {"frequency": target[2]})
+            if intent.intent == "request_pushback" and not flight.has_been_airborne:
+                # No ground controller: the tower works the apron too, and offers this call.
+                return self._pushback(callsign, hello, faa, pressure_tail)
             if intent.intent == "request_taxi":
                 return self._taxi_out(station, issue, raw, callsign, hello, faa, pressure_tail)
             if intent.intent == "ready_for_departure":
@@ -1019,6 +1050,11 @@ class Engine:
             return None
         if self.requested_runway(airport):
             return self.requested_runway(airport)
+        arrival = self.flight.arrival
+        if arrival is not None and arrival.airport == airport.ident:
+            # The runway approach brought the flight to, even one not in use: straight in to the other end with
+            # little tailwind, where the runway in use has no approach.
+            return arrival.runway
         if self.flight.runway in active:
             return self.flight.runway
         if intent.runway in active:
@@ -1181,16 +1217,19 @@ class Engine:
                 flight.phase == Phase.AIRBORNE
                 and flight.rules == "IFR"
                 and not flight.told_departure
+                and airport.ident == flight.origin_ident  # a departure: not an arrival at another tower
                 and raw.get("agl_m", 0.0) > 300
-                and distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon) < 15
+                and distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon) < RELEASE_DEPARTURE_NM
             ):
-                flight.told_departure = True
+                # Where no centre covers the airport itself, the tower keeps looking as the flight climbs out, and
+                # hands it over once it is in a centre's airspace, rather than letting it fly out of range unheard.
                 target = ifr.after_takeoff(self, airport, raw)
                 if target:
+                    flight.told_departure = True
                     reply = Reply(f"{callsign}, contact {target[0]} {target[1]}", {"frequency": target[2]})
             elif flight.phase == Phase.LANDED and not flight.told_vacate and raw.get("groundspeed_ms", 99.0) < 20:
                 flight.told_vacate = True
-                target = self._handoff(airport, "ground")
+                target = self._handoff(airport, "ground", to_aircraft=True)
                 tail = f", when vacated contact {target[0]} {target[1]}" if target else " and taxi to parking"
                 reply = Reply(f"{callsign}, vacate at the next available exit{tail}", {"frequency": target[2]} if target else {})
             if reply:
