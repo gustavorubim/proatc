@@ -188,6 +188,60 @@ def cmd_replay(config, path: str) -> int:
     return 1 if result.differences else 0
 
 
+def _journal_folders() -> list:
+    """Where journals are written: this checkout (or PROATC_HOME), then the installed app's data folder."""
+    import os
+    from pathlib import Path
+
+    from .config import PROJECT_DIR
+
+    if sys.platform == "win32":
+        app = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    elif sys.platform == "darwin":
+        app = Path.home() / "Library" / "Application Support"
+    else:
+        app = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return [PROJECT_DIR / "logs" / "journal", app / "Pro ATC" / "engine" / "logs" / "journal"]
+
+
+def cmd_health(config, path: str | None) -> int:
+    from pathlib import Path
+
+    from .health import as_text, check
+    from .replay import load
+
+    if path is None:
+        found = [journal for folder in _journal_folders() for journal in folder.glob("session-*.jsonl")]
+        if not found:
+            print("No journal found in:", *_journal_folders(), sep="\n  ")
+            return 2
+        target = max(found, key=lambda journal: journal.stat().st_mtime)
+    else:
+        target = Path(path)
+    print(f"Journal: {target}\n")
+    findings = check(load(target)["events"], _airport_locator(config))
+    print(as_text(findings), end="")
+    return 1 if findings else 0
+
+
+def _airport_locator(config):
+    """An airport's position from this machine's X-Plane data; None without X-Plane, and then the
+    distance to the destination is judged from where the aircraft landed."""
+    from .navdata import AirportDB
+
+    try:
+        db = AirportDB.open(config.sim.xplane_path)
+    except Exception:
+        print("(X-Plane's airport data was not found: distances are judged from the landing, if any.)\n")
+        return None
+
+    def locate(ident: str):
+        airport = db.airport(ident)
+        return (airport.lat, airport.lon) if airport else None
+
+    return locate
+
+
 def cmd_verify_data(config, count: int) -> int:
     from .navdata import AirportDB
     from .verify import pick_airports, sweep
@@ -233,6 +287,8 @@ def main() -> int:
     sub.add_parser("run", help="start the push-to-talk voice loop")
     replay = sub.add_parser("replay", help="run a saved flight log (.json) through the engine again and show what differs")
     replay.add_argument("log")
+    health = sub.add_parser("health", help="report what went wrong on the radio in a flight's journal (default: the newest)")
+    health.add_argument("journal", nargs="?")
     speech = sub.add_parser("bench-speech", help="measure speech recognition on spoken radio calls (needs the speech models)")
     speech.add_argument("--quick", action="store_true")
     speech.add_argument("--engine", choices=("kokoro", "phonon"), help="the voice engine to measure (default: the one in use)")
@@ -257,6 +313,8 @@ def main() -> int:
             return 0
         if args.command == "replay":
             return cmd_replay(config, args.log)
+        if args.command == "health":
+            return cmd_health(config, args.journal)
         if args.command == "bench-speech":
             from .bench import bench_speech
             from .stt import SpeechToText

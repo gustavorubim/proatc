@@ -146,6 +146,15 @@ export interface EngineState {
   suggestions: Suggestion[]
 }
 
+/** Something that went wrong on the radio's side of the flight, found in its journal (health.py). */
+export interface HealthFinding {
+  time: string
+  kind: string
+  title: string
+  text: string
+  detail: string
+}
+
 export interface Debrief {
   type: 'debrief'
   minutes: number
@@ -158,6 +167,7 @@ export interface Debrief {
   score: number | null
   verdict: string
   notes?: string
+  health: HealthFinding[]
 }
 
 export type EngineEvent =

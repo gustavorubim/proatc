@@ -28,6 +28,7 @@ from .debrief import as_text, review
 from .engine import Engine
 from .events import Emit, console
 from .flightlog import WITH_CONTEXT, FlightLog
+from .health import check, for_app
 from .intents import Intent, IntentParser
 from .joystick import JoystickButtons
 from .llm import Controller, LlmError
@@ -37,6 +38,7 @@ from .navfix import open_navfix
 from .procedures import NavaidNames, route_fixes
 from .ptt import PushToTalk
 from .radio import AtisBroadcaster, SecondRadio, SimClock, briefing, current_station, observe, station_voice, transmit
+from .replay import load as load_log
 from .replay import snapshot
 from .stt import SpeechToText
 from .tts import TextToSpeech, download_models, models_present
@@ -399,8 +401,26 @@ class Session:
                 result["notes"] = self.controller.complete(DEBRIEFER, json.dumps(facts), max_tokens=260, temperature=0.3)
             except LlmError:
                 pass  # the counts stand on their own
+        result["health"] = self.health()
         self.emit({"type": "debrief", **result})
         return result
+
+    def health(self) -> list[dict]:
+        """What went wrong on the radio that the pilot did not cause (health.py), also noted in the journal."""
+        try:
+            records = list(self.log.records)
+            if self.log.journal is not None:
+                records = load_log(self.log.journal)["events"]  # the trace is only on disk
+            findings = check(records, self._locate if self.ready else None)
+        except Exception as error:  # the report must never break the debrief
+            self.emit({"type": "error", "text": f"health report: {type(error).__name__}: {error}"})
+            return []
+        self.log.note("health", findings=findings)
+        return for_app(findings)
+
+    def _locate(self, ident: str) -> tuple[float, float] | None:
+        airport = self.db.airport(ident)
+        return (airport.lat, airport.lon) if airport else None
 
     def save_log(self) -> None:
         extra = {"flight": self.engine.summary() if self.ready else None, "openrouter_usage": dict(self.usage),
@@ -678,6 +698,8 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
         return
     label = context["station"]["you_are"] if "station" in context else "ATC"
     event = {"type": "atc", "station": label, "text": answer, "unprompted": False}
+    if context.get("fallback"):
+        event["fallback"] = True  # the rules engine had no answer: the health report counts these (health.py)
     if engine is not None and engine.flight.last_event:
         event["event"] = engine.flight.last_event
         engine.flight.last_event = ""
@@ -715,6 +737,7 @@ def _answer(transcript, intent, context, station_key, station, issue, raw, contr
         # The rules engine has no answer. The model may inform or decline; it may not clear or instruct,
         # because nothing it says would be known to the engine or checked against the airport's data.
         text = controller.reply(transcript, context, station_key, inform_only=True)
+        context["fallback"] = True  # set after the model has read the context: it is for the journal
         # A controller without an instruction to give is a dead end for the pilot: say what would work here.
         calls = [call for call in engine.suggestions(station, issue, raw) if call["label"] not in GENERIC_CALLS]
         if calls:

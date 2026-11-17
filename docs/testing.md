@@ -96,6 +96,38 @@ To look into a report: open the newest journal, find the time, and read the `tra
 uv run proatc replay "path/to/session-20261117-201500.jsonl"
 ```
 
+### Health report
+
+Before reading a journal line by line, let it be read for you:
+
+```bash
+uv run proatc health
+```
+
+```bash
+uv run proatc health "path/to/session-20261117-201500.jsonl"
+```
+
+Without a path it takes the newest journal, from the project folder or the installed app's data folder. It prints what went wrong on the radio's side of the flight, grouped, with the time, the frequency, the stations and the position for each, and exits with 1 when there is anything to report. The app shows the same list under "Flight health" in the debrief, and writes it into the journal as a `health` line.
+
+What it looks for (`src/proatc/health.py`):
+
+| Finding | What it means |
+|---|---|
+| Nobody answered on the tuned frequency | Airborne for over a minute on a frequency with `"station": null` |
+| Controller had no answer | The free-form fallback said "unable, say again your request", "say intentions" or "standby" (new journals mark those replies `"fallback": true`; older ones are read by their words) |
+| Station changed on the same frequency | Mid-conversation and airborne, a different station started answering on the same frequency |
+| Hand-off not followed | "Contact X on 128.525" in flight, and 128.525 was not tuned within two minutes |
+| Hand-offs close together | Two hand-offs under thirty seconds apart |
+| Readback trouble | Three or more corrected or repeated readbacks, or three or more "say again" |
+| Never reached approach or tower | Landed without talking to an approach or tower controller near the destination |
+| Approach reached late | The first call to approach was inside 15 NM of the destination |
+| Errors | Errors the app reported during the flight |
+
+Each was found on a real flight. A false alarm costs more than a missed fault, so these are not reported: a parked aircraft, a paused sim, the time the app was closed, an ATIS frequency, the seconds between a hand-off and its tuning, a hand-off on the ground, a station that changes when nobody is talking on the frequency. Distance to the destination needs X-Plane's airport data; without it, it is judged from where the aircraft landed.
+
+When a new kind of fault is found in a journal, add a detector and a test for it, including one for the ordinary flight it must stay quiet about.
+
 ## Stress tests: whole flights
 
 Unit tests hand the engine the station they mean. A real flight does not: the station is whatever answers on the tuned frequency where the aircraft is. Every serious fault found in flight so far lived in that gap: a centre that fell silent at its boundary, a neighbouring airport's approach controller answering and giving vectors to the wrong runway, two hand-offs seconds apart, runways whose approach was never found. `flights.fly` flies a flight the way the radio loop and a copilot do, and a flight has a problem when it is:
