@@ -138,5 +138,6 @@ def test_a_flight_between_taxied_airports_crosses_a_runway_and_flies_the_publish
     assert problems == []
     text = "\n".join(said)
     assert "cross runway zero eight" in text  # out, between the apron and the parallel taxiway
-    assert "cleared I L S approach runway two seven" in text and "cleared to land" in text
+    published = ("cleared I L S approach runway two seven", "cleared V O R D M E approach runway zero niner")
+    assert any(approach in text for approach in published) and "cleared to land" in text  # which one: the wind's
     assert "taxi to stand" in text and said[-1].endswith("parked")

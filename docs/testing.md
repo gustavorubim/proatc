@@ -231,7 +231,16 @@ The ones left: a route across the date line near the pole (Siberia to Alaska), a
 
 ### Gate to gate
 
-`fly` starts in the climb and stops at the destination controller's first instruction. `flights.fly_full` flies the whole flight, from a stand at the origin to a stand at the destination, as a competent pilot with a copilot: the engine's suggested calls are the menu, every instruction is read back with the "Read back" call, every hand-off is tuned and checked in on, and the aircraft does what it is told. It asks for the IFR clearance, push and start, and taxi; taxis along the route the controller gave, stopping short of each runway to be crossed until it is cleared; lines up and takes off when cleared; flies the SID's track, climbs to each cleared level, follows the STAR once it is given, flies each heading and descent approach gives, intercepts final or flies an R NAV approach from its initial fix, contacts the tower, lands when cleared, vacates, and taxis to the stand it is given. Without an approach controller it flies its own approach to the runway the tower gave and reports final. The aircraft is a simple model: it moves along its heading at a plausible speed, turns at rate one and climbs or descends toward its cleared level.
+`fly` starts in the climb and stops at the destination controller's first instruction. `flights.fly_full` flies the whole flight, from a stand at the origin to a stand at the destination, as a competent pilot with a copilot: the engine's suggested calls are the menu, every instruction is read back with the "Read back" call, every hand-off is tuned and checked in on, and the aircraft does what it is told. It asks for the IFR clearance, push and start, and taxi; taxis along the route the controller gave, stopping short of every runway on the way until it is cleared to cross; lines up at the end of the route and takes off when cleared; flies the SID's track, climbs to each cleared level, flies each heading and descent approach gives, intercepts final or flies an R NAV approach from its initial fix, contacts the tower, lands when cleared, vacates onto the taxiways, and taxis to the stand it is given. Without an approach controller it flies its own approach to the runway the tower gave and reports final. The aircraft is a simple model: it moves along its heading at a plausible speed, turns at rate one and climbs or descends toward its cleared level.
+
+The pilot cannot hide a fault of the engine:
+
+- it acts only on what it hears: headings, levels, speeds, the approach and its runway, the circling runway, the landing clearance and every frequency come from the controllers' words and readback items, never from the engine's state; it reads charts only for what a pilot has them for (the taxi route on the map, an approach's fixes, the minimum safe altitudes);
+- it tunes by frequency, from what it was told or from the chart, and never tells the engine who should answer;
+- it stops at every runway its route goes onto unless it was cleared to cross it, and does not move the aircraft by magic (only circling to another runway is not flown);
+- every descent is checked against the minimum safe altitude where the aircraft is (the sector altitude within 25 miles of the airport, or an altitude an approach to the runway publishes; the terrain below further out), and every intercept against where it joins final and how high above a three degree path;
+- each flight has one of six winds, light to a 30 knot crosswind, and one in three has a different wind from the middle of the flight on;
+- it stops at the first fault in a hand-off rather than finding its own way.
 
 A flight has a problem, named with the stage of the flight it happened in and the last radio work, when:
 
@@ -239,10 +248,10 @@ A flight has a problem, named with the stage of the flight it happened in and th
 - a suggested call is not answered (the app would fall back to the language model), or no call moves the flight on;
 - a correct readback is refused, or the controller says the pilot erred (a level bust, a heading not flown, a runway incursion, a low altitude alert, off the route) although it did as it was told;
 - it is handed to a frequency nobody answers on, or another controller answers there, or it is left on a silent one in a centre's airspace;
-- it is vectored to another airport, to a runway that is not there, or the vectors never bring it to final (more than 12 headings, or 150 miles with the destination's controllers);
+- it is vectored to another airport, cleared below the minimum safe altitude, given an intercept that joins final too close or too high, or the vectors never bring it to final (more than 12 headings, or 150 miles with the destination's controllers);
 - it is never handed to the destination's controller, or not to the tower by four miles out;
-- it lands without a landing clearance, is cleared to land on another runway than the one it was vectored to, is not told to vacate, or cannot land (over the threshold high or off the centreline);
-- a clearance is below the airport, there is no taxi route, a route does not reach its runway or stand, or the flight does not end parked.
+- it lands without a landing clearance, is cleared to land on another runway than the one its approach clearance named, is not told to vacate, or cannot land (over the threshold high or off the centreline);
+- there is no taxi route, a route crosses a runway the controller did not name, a route does not reach its runway or stand, or the flight does not end parked.
 
 ```bash
 uv run proatc verify-flights --full --flights 300
@@ -252,36 +261,53 @@ uv run proatc verify-flights --full --flights 300
 uv run proatc verify-flights --full --show KBOS-KIAD
 ```
 
-Both ends of each flight have a tower that controls traffic (not an information service). In CI, `tests/test_world_full.py` flies 24 flights gate to gate across test_world's made-up world (about 15 seconds), with taxiway networks and stands added to half its towered airports, a short runway that the way to the main one crosses, and published procedures at one airport. `PROATC_STRESS=1` flies every pair, 278 flights in about three minutes. `tests/test_gate.py` holds a test for each fault below.
+Both ends of each flight have a tower that controls traffic (not an information service). In CI, `tests/test_world_full.py` flies 24 flights gate to gate across test_world's made-up world (about 20 seconds), with taxiway networks and stands added to half its towered airports, a short runway that the way to the main one crosses, and published procedures at one airport. `PROATC_STRESS=1` flies every pair, 278 flights. `tests/test_gate.py` holds a test for each fault below.
 
-When this was first run, nearly nine flights in ten had a problem (the table below). The engine faults it found, all fixed as general rules:
+Engine faults found, all fixed as general rules:
 
 - a tower with no ground controller offered "request push and start" and did not answer it;
-- on the ground, a departure or approach controller that shares the tower's frequency answered a parked aircraft; in the air, a flight sent to the tower, the departure controller, a centre or another centre on a shared frequency was answered by whoever else works it;
-- an information service listed as a tower ("Landshut Info") was called "Tower", and the flight was handed to it instead of the airport's real tower;
+- on the ground, a departure or approach controller that shares the tower's frequency answered a parked aircraft; in the air, a flight sent to the tower, the departure controller, a centre or another centre on a shared frequency was answered by whoever else works it; who a flight was sent to was not forgotten when a new flight began;
+- "Landshut Info" was called "Tower"; "BREMEN INFO", listed at an airport, is Bremen Information, and flights are handed to the airport's real tower;
 - the initial climb was below the runway at a high airport (5,000 ft at an airport 5,500 ft high);
-- a tower or departure controller whose airport no centre covers never handed a departure on (now to the centre ahead); a tower handed an arrival to a centre as if it were a departure; an oceanic sector never gave a descent, so flights reached their destination in the cruise;
-- runways the taxiways do not reach were given for departure; taxiways that meet only on a runway had no route at all (now along the runway, with a clearance as for a crossing); where two runways meet on a route only one was a crossing; stands far from any taxiway were assigned; taxiways the scenery names "None" were spoken, and stand names with doubled spaces read wrong;
-- a level bust and a low altitude alert were called on the glide path, after the approach clearance;
-- a base leg that drifted in, and a downwind leg flown wide beyond thirty miles, never got the next vector; a dogleg was given from far to the side, through the centreline past the runway;
-- the approach handed a flight to the tower abeam the airport forty miles out, where the tower is out of range;
-- an R NAV approach was cleared via an initial fix on the far side of the airport, or raised from its published altitude to the sector altitude of a mountain behind the airport; a waypoint with digits ("AA690") was read as a word;
-- the tower cleared a flight to land on the runway in use when approach had brought it straight in to the other end;
-- procedure data whose altitudes do not fit the airport's elevation put the approach below the field.
+- a tower or departure controller whose airport no centre covers never handed a departure on (now to the centre ahead on the way to the destination, never one the climb-out only points at; a centre gives no level outside its airspace); a tower handed an arrival to a centre as if it were a departure; an oceanic sector never gave a descent;
+- a runway the scenery's taxi network writes "04R" was not found for the airport's "4R"; a runway the network does not tag was crossed without a clearance; where two runways meet on a route only one was a crossing; with no taxiway to the threshold there was no departure at all (now from an entry in the nearer half of the runway); a route started on the runway the aircraft had just left; a runway the scenery shows no taxiway joining was given for departure; stands no taxiway reaches were assigned; taxiways named "None" and stand names with doubled spaces read wrong;
+- base was turned so close in that the 30 degree intercept joined final a mile or two from the runway, far above the glide path; a base leg that drifted in, and a wide downwind beyond thirty miles, never got the next vector; a dogleg was given from far to the side; no vector beyond 25 miles now goes below the terrain there;
+- approach handed a flight to the tower abeam the airport forty miles out, or while it was flying away over final toward an initial fix;
+- an R NAV approach was cleared via an initial fix on the far side of the airport, or one nobody could get down from; a waypoint with digits ("AA690") was read as a word; final was joined closer in than the joining altitude allows;
+- the approach altitude could be below the field, or, with nothing published, below the sector altitude;
+- the tower cleared a flight to land on the runway in use when approach had brought it straight in to the other end.
 
-| Run (0.14 data, real X-Plane, `verify-flights --full`) | Flights with a problem |
+Two attempts to fix faults were wrong and were taken back after review: taxi routes along a runway (a backtrack needs its own clearance from the tower, read back and checked against traffic, which is not modelled), and an initial fix cleared at its own published altitude below the sector altitude, up to 45 miles out. An airport whose taxiways reach a runway only along it has no taxi route, as before.
+
+| Run (0.14 data, real X-Plane, `verify-flights --full`, 300 flights) | Flights with a problem |
 |---|---|
 | `--flights 100`, before the engine fixes (the model pilot as it is now) | 87 |
 | `--flights 100`, after | 3 |
 | `--flights 300`, after | 5 |
 | 1,000 other flights (`pick_flights(db, 1000, seed=2, towered=True)`), after | 16 (27 before the last round of fixes) |
 | `--flights 300`, 0.15 as released (after the review's safety fixes and the level-bust fix below) | 70, of which 49 "no taxi route" and 14 "not parked" (no route along a runway without a backtrack clearance, a known limit), 5 too high to land over high ground, 3 stands too far from a taxiway, 1 the date-line flight. No level busts, no hand-off faults. |
+| First run, the first model pilot (100 flights) | 88 of 100 |
+| First model pilot, after the first engine fixes | 5 |
+| First model pilot, after the fixes from review | 77 (49 of them no taxi route once routes along runways were taken back) |
+| The pilot that acts only on what it hears, first run | 105 |
+| The same pilot, after the engine faults it showed were fixed | 55 |
+
+On 1,000 flights (`verify-flights --full --flights 1000`, the pilot that acts only on what it hears):
+
+| Run | With a problem | No taxi route | No way to land | Intercept too high | Crossing not given |
+|---|---|---|---|---|---|
+| These fixes, before their review | 218 | 165 | 26 | 15 | 3 |
+| After the review's fixes (0.17) | 291 | 251 | 22 | 7 | 1 |
+
+The review's fixes made the count worse on purpose. An intersection departure must now leave the runway the aircraft needs (1,800 m for a jet). The 86 more flights with no taxi route were jets that had been sent off part-way along a short runway with less than that ahead. At a real airport like those, the aircraft enters the runway and backtracks to the threshold. A backtrack needs its own clearance, which is not modelled yet. A final may now be joined up to 30 miles out, so an arrival held at a high sector altitude is less often too high. Where the vectors still turn it in at about 20 miles, it is up to 2,500 ft above the path (7 flights, all with a sector altitude well above the airport).
+
+For comparison, 0.16 as released, flown by the earlier model pilot (which took the runway and the approach from the engine, so it saw fewer faults): 189 of 1,000 with a problem, 166 of them no taxi route. From the climb to the destination's controller (`verify-flights --flights 1000`), 0.16 and 0.17 both have 2 problems in 1,000 flights, both on the same flight across the date line near the pole.
 
 An independent review of the first version of these fixes found that some were unsafe: taxi routes along the departure runway with no clearance for it, an initial approach fix cleared below the minimum safe altitude, altitude alerts silenced however far out once cleared for the approach, intercepts that could not be flown. They were reverted to the safe behaviour. Fixing the alerts then made the controller call a correct descent a level bust 24 times in 300 flights; past the initial fix of a cleared procedure, or on the localizer on a long final at or above the glide path, it no longer does.
 
-A flight stops at its first serious problem, so the "before" count hides faults behind the first one. What is left, not fixed: stands that no taxiway comes within 300 to 1,400 metres of, or taxiways that reach no runway at all (KADW, KCSG), which is the scenery's data; arrivals that reach their destination too high to land, over high ground (Himalaya, Alps: the vectoring altitude is the highest sector altitude within 25 miles) or after a stretch with no centre in the sim's data; a few flights left on a silent frequency where centres' boundaries leave a gap; and a flight across the date line near the pole whose destination tower is not found on the far side (as in `fly`). The model pilot does not fly holds, circling, missed approaches or speed restrictions on the STAR; it flies with no wind and no other traffic, and takes its next heading, level, approach and runway from the replies and the engine's state rather than from hearing them.
+The first model pilot hid faults: it took the approach and the runway from the engine, tuned with the engine's own hand-off lookup, teleported to the threshold and from the runway, flew in one wind, and found its own way after a hand-off fault. The 5 of 300 it reported were not the truth.
 
-The model pilot had faults of its own, found the same way and fixed in `flights.py`, not counted above: it checked in on an oceanic frequency with "Check in" instead of a position report, vacated onto another runway's surface, took the far side of the airport for final, never descended where no controller covers the sky, and could not get down from the initial fix of an R NAV approach. The first run, before any of that, had 88 of 100 flights with a problem.
+What is left, not fixed (on 300 flights, before the review fixes): 40 flights from or to an airport whose taxiways reach the runway in use only along a runway (no backtrack clearance, see above); 14 arrivals over high ground (the Andes, the Himalaya, the Alps) where, with only the sector altitude to vector by, final is joined too high to land; 3 stands that no taxiway comes within 300 metres of. Not modelled by the pilot: holds, circling (it is put on the circling runway's threshold), missed approaches, STAR speed restrictions, wind drift and other traffic.
 
 ## Timing tests: two things at once
 
