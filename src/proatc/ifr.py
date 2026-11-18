@@ -33,7 +33,7 @@ from .atis import uses_faa_style
 from .intents import Intent
 from .navdata import Airport, bearing, distance_nm, expect_station
 from .procedures import choose_approach, choose_sid, choose_star, circling_approach, route_fixes, spoken_name
-from .vectors import CLOSE_NM, FINAL_NM, VECTOR_RANGE_NM, established, locate, next_vector, turn_direction
+from .vectors import CLOSE_NM, FINAL_NM, established, locate, next_vector, turn_direction
 
 RADAR_KINDS = ("departure", "approach", "center")
 CHECK_IN = ("check_in", "initial_call", "position_report", "inbound")
