@@ -867,12 +867,20 @@ class Engine:
         flight.runway, flight.phase = runway, Phase.TAXI_OUT
         route = None
         if "lat" in raw:
-            route = route_to_runway(self.network(airport), raw["lat"], raw["lon"], runway, self._threshold(airport, runway))
-            self._airport_names(airport, route, exclude=runway)
+            category = aircraft_category(raw.get("aircraft_type"), self._airline() is not None)
+            route = route_to_runway(
+                self.network(airport), raw["lat"], raw["lon"], runway, self._threshold(airport, runway), category
+            )
+            self._airport_names(airport, route, exclude=runway, start=(raw["lat"], raw["lon"]))
         via = self._route_words(route)
         flight.taxi_goal, flight.crossings = ("runway", runway), list(route.crossings) if route else []
         flight.taxi_route, flight.taxi_airport = route, airport.ident
         limit = self._limit()
+        # From an intersection, the pilot is told so and how much runway is left: they may refuse it.
+        if route and route.available_m and route.taxiways:
+            entry = say.taxiway(route.taxiways[-1])
+            left = f"{round(route.available_m / 0.3048, -2):,.0f} feet" if faa else f"{round(route.available_m, -1):,.0f} metres"
+            limit = f", intersection departure at {entry}, {left} available{limit}"
         if faa:
             text = f"{callsign}, {hello}runway {say.runway(runway)}, taxi{via}{limit}{pressure_tail}"
         else:
@@ -891,9 +899,7 @@ class Engine:
             if home:
                 stand = nearest_parking(network, *home)
             else:
-                plan = flight.plan
-                filed = plan.callsign.upper() if plan and plan.callsign else ""
-                airline = filed[:3] if say.airline_callsign(filed) else None
+                airline = self._airline()
                 category = aircraft_category(raw.get("aircraft_type"), bool(airline))
                 stand = flight.stand or assign_stand(network, category, airline, (raw["lat"], raw["lon"]), self._rng)
                 stand = stand or nearest_parking(network, raw["lat"], raw["lon"])
@@ -902,8 +908,9 @@ class Engine:
             if stand and route is None and not home:
                 # No way there over the taxiways from where the aircraft left the runway: the nearest stand that
                 # fits and that it can taxi to.
-                stand, route = self._reachable_stand(network, raw, stand) or (stand, None)
-            self._airport_names(airport, route)
+                category = aircraft_category(raw.get("aircraft_type"), self._airline() is not None)
+                stand, route = self._reachable_stand(network, raw, stand, category) or (stand, None)
+            self._airport_names(airport, route, start=(raw["lat"], raw["lon"]))
         flight.taxi_route, flight.taxi_airport = route, airport.ident
         named = stand and stand.name and len(stand.name) <= 12
         destination = f"{'gate' if faa else 'stand'} {say.stand(stand.name)}" if named else "parking"
@@ -984,9 +991,16 @@ class Engine:
             return self._crossing(station, raw, callsign, "", faa, asked=False)
         return None
 
-    def _airport_names(self, airport: Airport, route, exclude: str | None = None):
+    def _airline(self) -> str | None:
+        """The filed airline's ICAO code ('BAW' of BAW123), or None for a registration."""
+        plan = self.flight.plan
+        filed = plan.callsign.upper() if plan and plan.callsign else ""
+        return filed[:3] if say.airline_callsign(filed) else None
+
+    def _airport_names(self, airport: Airport, route, exclude: str | None = None, start=None):
         """The runways a route crosses, named as the airport names them ('4R/22L', said "four right"), not as its
-        taxi network may write them ('04R/22L')."""
+        taxi network may write them ('04R/22L'). `start` is where the aircraft is: a runway between it and where
+        the route begins is crossed too, and the runway it is standing on is not."""
         if route is None:
             return None
         renamed = {}
@@ -998,10 +1012,12 @@ class Engine:
         # A runway the scenery's taxi network does not tag as one is crossed all the same where the route goes over it.
         for runway in airport.runways:
             name = f"{runway.end1}/{runway.end2}"
-            if name not in route.crossing_index and (exclude is None or exclude not in (runway.end1, runway.end2)):
-                index = self._passes_over(runway, route.points)
+            excluded = exclude is not None and end_key(exclude) in (end_key(runway.end1), end_key(runway.end2))
+            if name not in route.crossing_index and not excluded:
+                points = [start, *route.points] if start else route.points
+                index = self._passes_over(runway, points)
                 if index is not None:
-                    route.crossing_index[name] = index
+                    route.crossing_index[name] = max(index - 1, 0) if start else index
         route.crossings = sorted(route.crossing_index, key=route.crossing_index.get)
         return route
 
@@ -1009,6 +1025,9 @@ class Engine:
     def _passes_over(runway, points: list) -> int | None:
         """Where a route first goes onto or across a runway (not counting where it starts or ends), or None."""
         heading, length = runway.ends()[0][1], runway.length_m / 1852
+        first = locate(*points[0], (runway.lat2, runway.lon2), heading) if points else None
+        if first and -0.05 < first.along_nm < length + 0.05 and first.cross_nm < ON_RUNWAY_NM:
+            return None  # starting on it: leaving the runway is not crossing it
         before = None
         for index, (lat, lon) in enumerate(points[:-1]):
             position = locate(lat, lon, (runway.lat2, runway.lon2), heading)
@@ -1018,9 +1037,9 @@ class Engine:
             before = position.side if abeam else None
         return None
 
-    def _reachable_stand(self, network: TaxiNetwork, raw: dict, given):
-        """(stand, route) for the nearest stand of the same kind that a route reaches, or None."""
-        alike = [p for p in network.parking if p.name and p.kind == given.kind and p.categories & given.categories]
+    def _reachable_stand(self, network: TaxiNetwork, raw: dict, given, category: str):
+        """(stand, route) for the nearest stand of the same kind, that takes this aircraft, that a route reaches."""
+        alike = [p for p in network.parking if p.name and p.kind == given.kind and category in p.categories]
         alike.sort(key=lambda p: distance_nm(raw["lat"], raw["lon"], p.lat, p.lon))
         for stand in alike[:REACHABLE_TRIES]:
             route = self._route_to_stand(network, raw, (stand.lat, stand.lon))

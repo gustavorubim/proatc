@@ -492,19 +492,83 @@ def test_a_runway_the_taxi_network_writes_with_a_leading_zero_is_still_found_and
 
 
 def test_without_a_taxiway_to_the_threshold_a_departure_starts_from_an_intersection_in_the_near_half():
+    # A 2,750 m runway; taxiway A joins it 480 m from the threshold of 27, B at its far end.
     rows = """1201 52.0000 -1.0000 both 0 apron
-1201 52.0010 -0.9955 both 1 middle
+1201 52.0010 -0.9970 both 1 near
 1201 52.0010 -0.9900 both 2 east_end
-1201 52.0010 -1.0000 both 3 west_end
+1201 52.0010 -1.0300 both 3 west_end
 1202 0 1 twoway taxiway_E A
 1202 0 3 twoway taxiway_E B
 1202 3 1 twoway runway 09/27
 1202 1 2 twoway runway 09/27""".splitlines()
     route = route_to_runway(parse_taxi(rows), 52.0, -1.0, "27", (52.001, -0.99))
-    assert route.taxiways == ["A"] and route.points[-1] == (52.001, -0.9955)  # was: no route at all
+    assert route.taxiways == ["A"] and route.points[-1] == (52.001, -0.997)  # was: no route at all
+    assert 2200 < route.available_m < 2300  # the runway left ahead, which the controller says
     # The west end leaves no runway ahead for 27: never an entry there.
     far = [row for row in rows if "taxiway_E A" not in row]
     assert route_to_runway(parse_taxi(far), 52.0, -1.0, "27", (52.001, -0.99)) is None
+
+
+def test_an_intersection_departure_leaves_the_runway_the_aircraft_needs():
+    # A 2,750 m runway entered a little before half way along: about 1,400 m left. Enough for a light aircraft, not for a jet.
+    rows = """1201 52.0000 -1.0090 both 0 apron
+1201 52.0010 -1.0090 both 1 middle
+1201 52.0010 -0.9900 both 2 east_end
+1201 52.0010 -1.0300 both 3 west_end
+1202 0 1 twoway taxiway_E A
+1202 3 1 twoway runway 09/27
+1202 1 2 twoway runway 09/27""".splitlines()
+    net = parse_taxi(rows)
+    assert route_to_runway(net, 52.0, -1.009, "27", (52.001, -0.99), "props") is not None
+    assert route_to_runway(net, 52.0, -1.009, "27", (52.001, -0.99), "jets") is None
+
+
+def test_an_intersection_departure_is_said_with_the_runway_left(tmp_path):
+    rows = [line for line in CROSSING if not line.startswith("1202 3 4")]  # no way round to 27R's threshold
+    # Taxiway C meets 27L a little before half way along (exactly half way is a rounding from either side).
+    rows = [line.replace("1201 51.0000 -1.0000 both 2 on_27L", "1201 51.0000 -0.9990 both 2 on_27L") for line in rows]
+    (tmp_path / "i.dat").write_text("\n".join(rows), encoding="utf-8")
+    build_index(tmp_path / "i.dat", tmp_path / "i.sqlite")
+    db = AirportDB(tmp_path / "i.sqlite")
+    engine = Engine(db, seed=1, procedures=lambda ident: parse_cifp([]))
+    engine.flight.runway = "27L"  # entered from taxiway C: about 1,470 m of 2,800 left, enough for a light type
+    raw = {**taxiing(*APRON), "aircraft_type": "C172"}
+    taxi = engine.handle(Intent("request_taxi"), db.station(121700, *APRON), None, raw)
+    assert "intersection departure at Charlie, 1,470 metres available" in taxi.text, taxi.text
+
+
+def test_a_taxi_route_from_beside_a_runway_does_not_start_on_its_far_side():
+    # Holding short of 09/27 on taxiway A, 67 m north of it: the node south of the runway is a little nearer than the
+    # one behind the aircraft. Starting there would cross the runway with no hold short.
+    rows = """1201 52.0030 -1.0000 both 0 north_apron
+1201 52.0020 -1.0000 both 1 north_A
+1201 52.0000 -1.0000 both 2 on_rwy
+1201 51.9993 -1.0000 both 3 south_A
+1201 51.9970 -1.0000 both 4 south_apron
+1201 52.0000 -1.0100 both 5 w_end
+1201 52.0000 -0.9900 both 6 e_end
+1202 0 1 twoway taxiway_E A
+1202 1 2 twoway taxiway_E A
+1202 2 3 twoway taxiway_E A
+1202 3 4 twoway taxiway_E A
+1202 5 2 twoway runway 09/27
+1202 2 6 twoway runway 09/27""".splitlines()
+    route = route_to_point(parse_taxi(rows), 52.0006, -1.0, (51.9969, -1.0001))
+    assert route.crossings == ["09/27"]  # was: none, from the node beyond the runway
+    # An aircraft on the runway, vacating, is not told to hold short of it.
+    engine = Engine(None, seed=1)
+    from proatc.navdata import Runway, distance_nm
+
+    runway = Runway("09", 52.0, -1.01, "27", 52.0, -0.99, distance_nm(52.0, -1.01, 52.0, -0.99) * 1852, 1)
+    off = route_to_point(parse_taxi(rows), 52.0, -1.0005, (51.9969, -1.0001))
+    off.crossings, off.crossing_index = [], {}
+    named = engine._airport_names(SimpleNamespace(runways=[runway]), off, start=(52.0, -1.0005))
+    assert named.crossings == []
+    # Beside it, with the taxi network not tagging the runway, the route is still a crossing.
+    behind = route_to_point(parse_taxi(rows), 52.0006, -1.0, (51.9969, -1.0001))
+    behind.crossings, behind.crossing_index = [], {}
+    named = engine._airport_names(SimpleNamespace(runways=[runway]), behind, start=(52.0006, -1.0))
+    assert named.crossings == ["09/27"]
 
 
 def test_a_runway_the_taxi_network_does_not_tag_is_still_a_crossing(tmp_path):
@@ -530,8 +594,10 @@ def test_after_landing_a_stand_is_given_that_the_taxiways_reach_from_the_exit(tm
     network = parse_taxi(rows)
     engine = Engine(None, seed=1)
     near = next(stand for stand in network.parking if stand.name == "NEAR")
-    stand, route = engine._reachable_stand(network, {"lat": 52.0, "lon": -1.0}, near)
+    stand, route = engine._reachable_stand(network, {"lat": 52.0, "lon": -1.0}, near, "jets")
     assert stand.name == "REACHED" and route.taxiways == ["A"]
+    # Only a stand that takes the aircraft: a heavy is not moved to a stand for smaller jets.
+    assert engine._reachable_stand(network, {"lat": 52.0, "lon": -1.0}, near, "heavy") is None
 
 
 def test_a_taxi_route_starts_off_the_runway_the_aircraft_has_just_left():
