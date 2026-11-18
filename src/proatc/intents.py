@@ -15,7 +15,7 @@ INTENTS = {
     "request_clearance": "asks for IFR or VFR departure clearance",
     "request_pushback": "asks for push back, start-up, or both",
     "request_taxi": "asks to taxi (for departure, or to parking after landing)",
-    "ready_for_departure": "ready for departure / ready for takeoff / holding short ready",
+    "ready_for_departure": "ready for departure / ready for takeoff / holding short ready / lined up",
     "inbound": "airborne first call wanting to land or join the circuit, or established on an approach",
     "position_report": "reports downwind, base or final, or asks for landing clearance or whether it is cleared to land",
     "check_in": "first call to a departure, approach or en-route controller, giving altitude or level",

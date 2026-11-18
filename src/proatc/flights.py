@@ -365,7 +365,8 @@ class GateToGate:
         self.crossing_cleared: set[str] = set()  # runways the controller cleared it to cross
         self.departure_runway: str | None = None  # as said in the taxi clearance
         self.takeoff_cleared = False
-        self.backtrack_in = False  # told to backtrack after landing: done once the aircraft has stopped
+        self.backtrack_in: bool | str = False  # told to backtrack after landing (via the taxiway said): once stopped
+        self.backtrack_said: bool | str = False
         self.approach_runway: str | None = None  # the runway of the approach it was cleared for, as said
         self.landing_runway: str | None = None  # the runway it is to land on, as said (a circling runway, say)
         self.expected_runway: str | None = None  # "expect ... approach runway X"
@@ -736,7 +737,9 @@ class GateToGate:
             self.takeoff_cleared = True
             self.set_stage("takeoff")
         elif self.stage == "landing roll" and re.search(r"\b(?:backtrack runway|back-taxi runway)\b", text):
-            self.backtrack_in = True  # once stopped: back along the runway to the taxiway said, and off it there
+            # Once stopped: back along the runway to the taxiway said ("via Charlie"), or the first one, and off there.
+            said = re.search(r"\b(?:vacate|exit) via ([A-Za-z ]+?)(?:,|$)", text)
+            self.backtrack_in = said.group(1).strip() if said else True
         elif self.stage == "landing roll" and "vacate" in text:
             self._vacate()
         elif self.stage == "vacated" and "taxi to" in text:
@@ -905,7 +908,10 @@ class GateToGate:
         """Cleared to backtrack: onto the runway and along it to the threshold, then turned round to wait."""
         runway = self.departure_runway
         self.crossing_cleared.add(self._runway_name(self.origin, runway))
-        self.lateral = ("path", [self.engine._threshold(self.origin, runway)])
+        # Turned round on the runway a little way in from its end, as on a turn pad: not exactly on the threshold.
+        threshold = self.engine._threshold(self.origin, runway)
+        turn = _moved(*threshold, _runway_course(self.origin, runway), TURN_PAD_NM)
+        self.lateral = ("path", [turn])
         self.set_stage("backtracking")
 
     def _line_up(self) -> None:
@@ -936,7 +942,7 @@ class GateToGate:
             plane.knots = max(0.0, plane.knots - 5.0 * self.step)
             return
         if self.backtrack_in:
-            self.backtrack_in = False
+            self.backtrack_said, self.backtrack_in = self.backtrack_in, False
             self._backtrack_to_exit()
             return
         if self.stopped_at is None:
@@ -950,6 +956,8 @@ class GateToGate:
         name = next((n for n in network.runway_nodes if self.landing_cleared in n.split("/")
                      or any(end.lstrip("0") == self.landing_cleared.lstrip("0") for end in n.split("/"))), None)  # fmt: skip
         nodes = [n for n in network.runway_nodes.get(name, ()) if n in network.taxi_nodes()]
+        if isinstance(self.backtrack_said, str):  # only where the taxiway the tower named leaves the runway
+            nodes = [n for n in nodes if any(say.taxiway(e.name) == self.backtrack_said for e in network.both_ways.get(n, []))]
         behind = [
             n for n in nodes if abs((bearing(plane.lat, plane.lon, *network.nodes[n]) - plane.heading + 180) % 360 - 180) > 90
         ]
@@ -1214,6 +1222,9 @@ class GateToGate:
         self.lateral = ("hold", None)
         self.note("pilot", f"landed runway {runway}")
         self.set_stage("landing roll")
+
+
+TURN_PAD_NM = 0.08  # where the pilot turns round at the end of a backtrack: 150 m in from the threshold
 
 
 def fly_full(db: AirportDB, shared: dict, origin_ident: str, destination_ident: str) -> tuple[list[tuple[str, str]], list[str]]:

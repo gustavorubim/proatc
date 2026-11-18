@@ -136,3 +136,90 @@ def test_landed_with_an_exit_still_ahead_it_is_the_next_available_one(tmp_path):
     flight.contacted.add(tower.key)
     reply = engine.tick(tower, ISSUE, jet(51.0, -0.99, heading=270.0, speed=12.0))  # taxiway C still ahead
     assert "vacate at the next available exit" in reply.text
+
+
+ON_27L = {"tcas_lat": [0.0, 51.0], "tcas_lon": [0.0, -1.01], "tcas_ele_m": [0.0, 30.0], "tcas_heading": [0.0, 270.0],
+          "tcas_on_ground": [0, 1]}  # fmt: skip
+THREE_MILE_FINAL = {"tcas_lat": [0.0, 51.0], "tcas_lon": [0.0, -0.905], "tcas_ele_m": [0.0, 300.0],
+                   "tcas_heading": [0.0, 270.0], "tcas_on_ground": [0, 0]}  # fmt: skip
+
+
+def backtracking(tmp_path):
+    db, engine = airport(tmp_path)
+    engine.traffic_enabled = True
+    engine.handle(Intent("request_taxi"), db.station(GROUND, *APRON), ISSUE, jet(*APRON))
+    tower = db.station(TOWER, *APRON)
+    engine.handle(Intent("ready_for_departure"), tower, ISSUE, jet(50.9993, -0.999))
+    assert engine.flight.backtracking
+    return engine, tower
+
+
+def test_lined_up_with_an_aircraft_on_the_runway_there_is_no_takeoff_clearance(tmp_path):
+    engine, tower = backtracking(tmp_path)
+    assert engine.tick(tower, ISSUE, jet(*THRESHOLD_27L, heading=270.0, **ON_27L)) is None  # was: cleared for takeoff
+    assert "cleared for takeoff" in engine.tick(tower, ISSUE, jet(*THRESHOLD_27L, heading=270.0)).text
+
+
+def test_lined_up_with_traffic_on_final_the_pilot_is_told_to_hold_position_and_cleared_once(tmp_path):
+    engine, tower = backtracking(tmp_path)
+    held = engine.handle(Intent("ready_for_departure"), tower, ISSUE, jet(*THRESHOLD_27L, heading=270.0, **THREE_MILE_FINAL))
+    assert held.text.endswith("hold position, traffic on a three mile final")  # was: "hold short", on the runway
+    cleared = engine.tick(tower, ISSUE, jet(*THRESHOLD_27L, heading=270.0))
+    assert "cleared for takeoff" in cleared.text and not engine.flight.waiting_takeoff
+    rolling = jet(51.0, -0.99, heading=270.0, speed=20.0)
+    assert engine.tick(tower, ISSUE, rolling) is None  # was: cleared for takeoff a second time, on the roll
+
+
+def test_lined_up_a_little_way_in_from_the_threshold_is_lined_up(tmp_path):
+    engine, tower = backtracking(tmp_path)
+    turn_pad = jet(51.0, -0.9845, heading=270.0)  # about 300 m in
+    assert "cleared for takeoff" in engine.tick(tower, ISSUE, turn_pad).text
+    (tmp_path / "far").mkdir()
+    engine, tower = backtracking(tmp_path / "far")
+    halfway = jet(51.0, -0.992, heading=270.0)  # 840 m in: the tower waits, but the pilot may say lined up
+    assert engine.tick(tower, ISSUE, halfway) is None
+    assert "cleared for takeoff" in engine.handle(Intent("ready_for_departure"), tower, ISSUE, halfway).text
+
+
+def test_a_backtrack_is_not_cleared_to_an_aircraft_at_the_threshold_already(tmp_path):
+    db, engine = airport(tmp_path)
+    engine.handle(Intent("request_taxi"), db.station(GROUND, *APRON), ISSUE, jet(*APRON))
+    assert engine.flight.backtrack
+    at_threshold = jet(50.9995, -0.981)  # holding short there, where the taxi network has no taxiway
+    reply = engine.handle(Intent("ready_for_departure"), db.station(TOWER, *APRON), ISSUE, at_threshold)
+    assert "cleared for takeoff" in reply.text and "backtrack" not in reply.text
+
+
+def test_a_backtrack_waits_for_traffic_on_final_for_the_other_end_too(tmp_path):
+    db, engine = airport(tmp_path)
+    engine.traffic_enabled = True
+    engine.handle(Intent("request_taxi"), db.station(GROUND, *APRON), ISSUE, jet(*APRON))
+    # Six miles out on final for 09R, head on to an aircraft backtracking down 27L.
+    head_on = {"tcas_lat": [0.0, 51.0], "tcas_lon": [0.0, -1.153], "tcas_ele_m": [0.0, 500.0],
+               "tcas_heading": [0.0, 90.0], "tcas_on_ground": [0, 0]}  # fmt: skip
+    held = engine.handle(Intent("ready_for_departure"), db.station(TOWER, *APRON), ISSUE, jet(50.9993, -0.999, **head_on))
+    assert "hold short runway two seven left, traffic on a six mile final" in held.text
+
+
+def test_an_intersection_with_runway_enough_comes_before_a_backtrack():
+    rows = """1201 52.0000 -0.9800 both 0 apron
+1201 52.0010 -1.0000 both 1 west_end
+1201 52.0010 -0.9600 both 2 east_end
+1201 52.0010 -0.9700 both 3 near
+1202 0 3 twoway taxiway_E A
+1202 1 3 twoway runway 09/27
+1202 3 2 twoway runway 09/27""".splitlines()
+    route = route_to_runway(parse_taxi(rows), 52.0, -0.98, "27", (52.001, -0.96))  # 690 m in: 2,060 m left for a jet
+    assert not route.backtrack and route.available_m > 1800
+
+
+def test_after_landing_the_backtrack_is_read_back_and_traffic_behind_is_said(tmp_path):
+    db, engine = airport(tmp_path)
+    engine.traffic_enabled = True
+    tower = db.station(TOWER, *APRON)
+    flight = engine.flight
+    flight.has_been_airborne, flight.phase, flight.runway = True, Phase.LANDED, "27L"
+    flight.contacted.add(tower.key)
+    reply = engine.tick(tower, ISSUE, jet(51.0, -1.012, heading=270.0, speed=12.0, **THREE_MILE_FINAL))
+    assert "vacate via Charlie, expedite, traffic on a three mile final" in reply.text
+    assert reply.expect["runway"] == "27L"

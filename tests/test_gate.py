@@ -618,3 +618,20 @@ def test_approach_hands_a_flight_to_tower_only_when_it_flies_in_along_final(worl
     assert ifr.tick(engine, approach, ISSUE, outbound, 0.0, CALLSIGN) is None  # was: "contact Eastfield Tower"
     inbound = at(51.0, 5.50, feet=1800, heading=270)
     assert ifr.tick(engine, approach, ISSUE, inbound, 0.0, CALLSIGN).text.startswith(f"{CALLSIGN}, contact Eastfield Tower")
+
+
+def test_a_taxiway_passing_just_beyond_a_runway_end_does_not_cross_it():
+    # Found replaying a real flight at Boston: the route to 33L passes 28 m beyond the end of 4L, and 0.17 called that
+    # a crossing ("hold short runway four left", then a runway incursion). On the runway itself, it is one.
+    from proatc.navdata import Runway, distance_nm
+
+    engine = Engine(None, seed=1)
+    runway = Runway("09", 52.0, -1.01, "27", 52.0, -0.99, distance_nm(52.0, -1.01, 52.0, -0.99) * 1852, 1)
+    beyond = [
+        (51.999, -0.9896),
+        (52.001, -0.9896),
+        (52.002, -0.9896),
+    ]  # 28 m east of the end of 27's runway, north across the line
+    assert engine._passes_over(runway, [(51.998, -0.9896), *beyond]) is None
+    on_it = [(51.999, -0.9902), (52.001, -0.9902), (52.002, -0.9902)]  # 14 m inside the end
+    assert engine._passes_over(runway, [(51.998, -0.9902), *on_it]) is not None
