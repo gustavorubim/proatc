@@ -298,8 +298,11 @@ On 1,000 flights (`verify-flights --full --flights 1000`, the pilot that acts on
 |---|---|---|---|---|---|
 | These fixes, before their review | 218 | 165 | 26 | 15 | 3 |
 | After the review's fixes (0.17) | 291 | 251 | 22 | 7 | 1 |
+| With backtrack clearances (0.18) | 86 | 33 | 25 | 11 | 2 |
 
-The review's fixes made the count worse on purpose. An intersection departure must now leave the runway the aircraft needs (1,800 m for a jet). The 86 more flights with no taxi route were jets that had been sent off part-way along a short runway with less than that ahead. At a real airport like those, the aircraft enters the runway and backtracks to the threshold. A backtrack needs its own clearance, which is not modelled yet. A final may now be joined up to 30 miles out, so an arrival held at a high sector altitude is less often too high. Where the vectors still turn it in at about 20 miles, it is up to 2,500 ft above the path (7 flights, all with a sector altitude well above the airport).
+The review's fixes made the count worse on purpose. An intersection departure must now leave the runway the aircraft needs (1,800 m for a jet). The 86 more flights with no taxi route were jets that had been sent off part-way along a short runway with less than that ahead. At a real airport like those, the aircraft enters the runway and backtracks to the threshold; 0.18 clears that ("backtrack runway two seven left, line up and wait"), which took the count from 291 to 86. The 33 departures still without a taxi route are the scenery's: a runway its taxi network leaves out altogether (UAUU 15R, CYUL 28), or one no taxiway touches (the dry-lakebed runways at KEDW). A final may now be joined up to 30 miles out, so an arrival held at a high sector altitude is less often too high. Where the vectors still turn it in at about 20 miles, it is up to 2,500 ft above the path (7 flights, all with a sector altitude well above the airport).
+
+Also found by the 0.18 work, from a kept real flight: 0.17 called a taxiway passing 28 m beyond the end of Boston's runway 4L a crossing ("hold short runway four left", then a runway incursion). A route now crosses a runway only on its pavement, up to 15 m past an end; the test pilot holds short where told.
 
 For comparison, 0.16 as released, flown by the earlier model pilot (which took the runway and the approach from the engine, so it saw fewer faults): 189 of 1,000 with a problem, 166 of them no taxi route. From the climb to the destination's controller (`verify-flights --flights 1000`), 0.16 and 0.17 both have 2 problems in 1,000 flights, both on the same flight across the date line near the pole.
 
@@ -307,7 +310,7 @@ An independent review of the first version of these fixes found that some were u
 
 The first model pilot hid faults: it took the approach and the runway from the engine, tuned with the engine's own hand-off lookup, teleported to the threshold and from the runway, flew in one wind, and found its own way after a hand-off fault. The 5 of 300 it reported were not the truth.
 
-What is left, not fixed (on 300 flights, before the review fixes): 40 flights from or to an airport whose taxiways reach the runway in use only along a runway (no backtrack clearance, see above); 14 arrivals over high ground (the Andes, the Himalaya, the Alps) where, with only the sector altitude to vector by, final is joined too high to land; 3 stands that no taxiway comes within 300 metres of. Not modelled by the pilot: holds, circling (it is put on the circling runway's threshold), missed approaches, STAR speed restrictions, wind drift and other traffic.
+What was left before backtracks (on 300 flights, before the review fixes): 40 flights from or to an airport whose taxiways reach the runway in use only along a runway (cleared as a backtrack since 0.18); 14 arrivals over high ground (the Andes, the Himalaya, the Alps) where, with only the sector altitude to vector by, final is joined too high to land; 3 stands that no taxiway comes within 300 metres of. Not modelled by the pilot: holds, circling (it is put on the circling runway's threshold), missed approaches, STAR speed restrictions, wind drift and other traffic.
 
 ## Timing tests: two things at once
 
