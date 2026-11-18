@@ -955,13 +955,15 @@ class Engine:
         ends = {end_key(end) for end in name.split("/")}  # the network's '04R/22L' is the airport's '4R'
         return next((r for r in airport.runways if end_key(r.end1) in ends or end_key(r.end2) in ends), None)
 
-    def _offset_nm(self, airport: Airport, name: str, raw: dict) -> float | None:
-        """Distance from the centreline of this runway, while abeam it; None when not beside it."""
+    def _offset_nm(self, airport: Airport, name: str, raw: dict, beyond_nm: float = 0.05) -> float | None:
+        """Distance from the centreline of this runway, while abeam it (or no further than `beyond_nm` past an end);
+        None when not beside it. To tell whether a point is on the runway, `RUNWAY_END_NM`: beyond its end there is
+        at most a blast pad, which is not runway."""
         runway = self._runway_named(airport, name)
         if not runway or "lat" not in raw:
             return None
         position = locate(raw["lat"], raw["lon"], (runway.lat2, runway.lon2), runway.ends()[0][1])
-        if not -0.05 < position.along_nm < runway.length_m / 1852 + 0.05:
+        if not -beyond_nm < position.along_nm < runway.length_m / 1852 + beyond_nm:
             return None
         return position.cross_nm
 

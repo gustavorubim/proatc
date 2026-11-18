@@ -32,7 +32,7 @@ from . import phraseology as say
 from .airways import open_airways
 from .atis import Issue
 from .centers import CenterIndex
-from .engine import ON_RUNWAY_NM, Engine
+from .engine import ON_RUNWAY_NM, RUNWAY_END_NM, Engine
 from .flightplan import FlightPlan
 from .intents import Intent
 from .navdata import AirportDB, bearing, distance_nm
@@ -863,7 +863,10 @@ class GateToGate:
                 continue
             if self.stage in ("lining up", "backtracking"):
                 break  # cleared onto the runway: along it, wherever other runways meet it there
-            onto = engine._offset_nm(airport, name, {"lat": target[0], "lon": target[1]})
+            # A runway the controller said to hold short of is held short of wherever its end is; any other is
+            # entered only on its pavement (not a blast pad beyond its end).
+            beyond = 0.05 if name in self.hold_short_said else RUNWAY_END_NM
+            onto = engine._offset_nm(airport, name, {"lat": target[0], "lon": target[1]}, beyond)
             if onto is None or onto > ON_RUNWAY_NM:
                 continue  # the route does not go onto this runway here
             after = engine._offset_nm(airport, name, {"lat": lat, "lon": lon})
