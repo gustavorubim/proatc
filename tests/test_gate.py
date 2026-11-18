@@ -213,11 +213,11 @@ SPLIT = """1201 52.0000 -1.0000 both 0 apron
 
 
 def test_a_taxi_route_is_never_made_along_a_runway():
-    # Backtracking needs its own clearance from the tower, read back and checked against traffic: not modelled, so
-    # where the taxiways meet only on the runway there is no route (the airport is a known limit), as before.
+    # Along a runway is the tower's to clear, as a backtrack (test_backtrack.py): a taxi route ends where it is entered.
     network = parse_taxi(SPLIT)
     assert route_to_point(network, 52.0, -1.0, (52.0, -0.9899)) is None
-    assert route_to_runway(network, 52.0, -1.0, "27", (52.001, -0.99)) is None  # not along 09/27 to its far end
+    to_27 = route_to_runway(network, 52.0, -1.0, "27", (52.001, -0.99))
+    assert to_27.backtrack and to_27.points[-1] == (52.001, -1.0)  # entered at its far end, not taxied along it
 
 
 def test_a_taxiway_the_scenery_names_none_is_not_spoken_as_none():
@@ -506,7 +506,7 @@ def test_without_a_taxiway_to_the_threshold_a_departure_starts_from_an_intersect
     assert 2200 < route.available_m < 2300  # the runway left ahead, which the controller says
     # The west end leaves no runway ahead for 27: never an entry there.
     far = [row for row in rows if "taxiway_E A" not in row]
-    assert route_to_runway(parse_taxi(far), 52.0, -1.0, "27", (52.001, -0.99)) is None
+    assert route_to_runway(parse_taxi(far), 52.0, -1.0, "27", (52.001, -0.99)).backtrack  # a backtrack from there
 
 
 def test_an_intersection_departure_leaves_the_runway_the_aircraft_needs():
@@ -520,7 +520,7 @@ def test_an_intersection_departure_leaves_the_runway_the_aircraft_needs():
 1202 1 2 twoway runway 09/27""".splitlines()
     net = parse_taxi(rows)
     assert route_to_runway(net, 52.0, -1.009, "27", (52.001, -0.99), "props") is not None
-    assert route_to_runway(net, 52.0, -1.009, "27", (52.001, -0.99), "jets") is None
+    assert route_to_runway(net, 52.0, -1.009, "27", (52.001, -0.99), "jets").backtrack
 
 
 def test_an_intersection_departure_is_said_with_the_runway_left(tmp_path):

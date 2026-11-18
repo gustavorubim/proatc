@@ -38,6 +38,10 @@ READBACK_WAIT_S = 30  # how long an instruction waits for a readback before it i
 CONTINUE_BEYOND_NM = 5  # further out than this, tower says "continue approach"
 CLEAR_TO_LAND_NM = 4.5
 GO_AROUND_NM = 1.0  # still no landing clearance this close in: go around
+BACKTRACK_BLOCKS_NM = 8  # traffic on final this close keeps a backtrack off the runway: it holds it for minutes
+LINED_UP_NM = 0.15  # this near the threshold, on the centreline and pointing down the runway, is lined up
+LINED_UP_DEG = 20
+EXIT_AHEAD_NM = 0.03  # a taxiway joining the runway this far ahead of the aircraft is still a way off it
 LATE_GO_AROUND_NM = 2.0  # a runway that becomes occupied after the landing clearance: go around from this close in
 # What must be read back. A readback that leaves one of these out is asked for once more.
 CRITICAL = ("runway", "squawk", "frequency", "altitude", "heading", "hold_short", "crossing")
@@ -132,6 +136,8 @@ class Flight:
     services_told: bool = False
     following: bool = False  # VFR flight following
     waiting_takeoff: bool = False  # held short for traffic; the takeoff clearance follows
+    backtrack: bool = False  # the taxi route ends where the runway is entered: the tower clears a backtrack first
+    backtracking: bool = False  # cleared to backtrack and line up: the takeoff clearance comes at the threshold
     go_around_told: bool = False
     sid_constraints: list | None = None  # restrictions.Constraint: the SID's 'at or above' crossings
     atis_seen: dict[str, str] = field(default_factory=dict)  # airport -> information letter last heard
@@ -636,6 +642,7 @@ class Engine:
             if self.flight.phase != Phase.TAXI_OUT or self.flight.has_been_airborne:
                 return None  # cleared for takeoff (the tower's to cancel), or arrived: the way out answers
             self.flight.runway, self.flight.waiting_takeoff = None, False
+            self.flight.backtrack = self.flight.backtracking = False
             return self._taxi_in(station, raw, callsign, f"{self._greeting(station)}roger, ", faa)
         hello = self._greeting(station)
         if name == "radio_check":
@@ -875,7 +882,10 @@ class Engine:
         via = self._route_words(route)
         flight.taxi_goal, flight.crossings = ("runway", runway), list(route.crossings) if route else []
         flight.taxi_route, flight.taxi_airport = route, airport.ident
+        flight.backtrack, flight.backtracking = bool(route and route.backtrack), False
         limit = self._limit()
+        if flight.backtrack:
+            limit = f"{limit}, expect {'back-taxi' if faa else 'backtrack'}"  # the tower clears it at the runway
         # From an intersection, the pilot is told so and how much runway is left: they may refuse it.
         if route and route.available_m and route.taxiways:
             entry = say.taxiway(route.taxiways[-1])
@@ -1100,6 +1110,58 @@ class Engine:
                 return Reply(f"{callsign}, {hello}contact {target[0]} {target[1]}", {"frequency": target[2]})
         return None
 
+    def _backtrack(self, airport: Airport, runway: str, raw: dict, callsign: str, hello: str, faa: bool) -> Reply:
+        """Onto the runway where the taxiways reach it, and along it to the threshold: cleared only with nobody on
+        final for long enough to do it, and the takeoff clearance once the aircraft has turned round (`tick`)."""
+        flight = self.flight
+        flight.runway = runway
+        if self.traffic_enabled:
+            final = traffic.on_final(raw, airport, runway, BACKTRACK_BLOCKS_NM)
+            if final is not None or traffic.on_runway(raw, airport, runway):
+                flight.waiting_takeoff = True
+                why = f"traffic on a {traffic.miles_word(final)} mile final" if final is not None else "traffic on the runway"
+                return Reply(f"{callsign}, {hello}hold short runway {say.runway(runway)}, {why}", {"runway": runway})
+        flight.waiting_takeoff, flight.backtracking = False, True
+        spoken = say.runway(runway)
+        words = f"runway {spoken}, back-taxi, line up and wait" if faa else f"backtrack runway {spoken}, line up and wait"
+        return Reply(f"{callsign}, {hello}{words}", {"runway": runway})
+
+    def _exit_behind(self, airport: Airport, raw: dict) -> str | None:
+        """After landing, when no taxiway leaves the runway ahead of the aircraft: the name of the nearest one behind
+        it ('' when it has none). None when there is a way off ahead, or nothing is known about the taxiways."""
+        runway, network = self.flight.runway, self.network(airport)
+        if not runway or "lat" not in raw or not network.usable:
+            return None
+        name = next((n for n in network.runway_nodes if end_key(runway) in map(end_key, n.split("/"))), None)
+        course = next((heading for rw in airport.runways for ident, heading in rw.ends() if ident == runway), None)
+        if name is None or course is None:
+            return None
+        threshold = self._threshold(airport, runway)
+        here = locate(raw["lat"], raw["lon"], threshold, course).along_nm
+        exits = {node: locate(*network.nodes[node], threshold, course).along_nm for node in network.runway_nodes[name]}
+        exits = {node: along for node, along in exits.items() if node in network.taxi_nodes()}
+        # `along` is measured out from the threshold as on final: past it, down the runway, it falls below zero.
+        if not exits or any(along < here - EXIT_AHEAD_NM for along in exits.values()):
+            return None
+        last = min(exits, key=exits.get)  # the nearest behind
+        return next((edge.name for edge in network.both_ways.get(last, []) if not edge.runway and edge.name), "")
+
+    def _lined_up(self, airport: Airport, runway: str, raw: dict) -> bool:
+        """At the threshold of `runway` and pointing down it, stopped: where a backtrack ends."""
+        if "lat" not in raw:
+            return False
+        course = next((heading for rw in airport.runways for ident, heading in rw.ends() if ident == runway), None)
+        if course is None:
+            return False
+        position = locate(raw["lat"], raw["lon"], self._threshold(airport, runway), course)
+        heading = raw.get("heading_true", course)
+        return (
+            abs(position.along_nm) < LINED_UP_NM
+            and position.cross_nm < ON_RUNWAY_NM
+            and abs((heading - course + 180) % 360 - 180) < LINED_UP_DEG
+            and raw.get("groundspeed_ms", 0.0) < 3.0
+        )
+
     @staticmethod
     def _pushback(callsign: str, hello: str, faa: bool, pressure_tail: str) -> Reply:
         approved = "push back and start approved" if not faa else "push back approved"
@@ -1133,6 +1195,10 @@ class Engine:
                 runway = flight.runway or self._departure_runway(airport, issue, raw)
                 if not runway:
                     return None
+                if flight.backtracking and not self._lined_up(airport, runway, raw):
+                    return Reply(f"{callsign}, {hello}roger, report lined up")
+                if flight.backtrack and not flight.backtracking:
+                    return self._backtrack(airport, runway, raw, callsign, hello, faa)
                 if self.traffic_enabled:
                     final = traffic.on_final(raw, airport, runway, traffic.FINAL_BLOCKS_NM)
                     if final is not None or traffic.on_runway(raw, airport, runway):
@@ -1144,6 +1210,7 @@ class Engine:
                         )
                         return Reply(f"{callsign}, {hello}hold short runway {say.runway(runway)}, {why}", {"runway": runway})
                 flight.runway, flight.phase, flight.waiting_takeoff = runway, Phase.TAKEOFF_CLEARED, False
+                flight.backtrack = flight.backtracking = False
                 after = ", report downwind" if flight.circuits else ""
                 return Reply(
                     f"{callsign}, {hello}runway {say.runway(runway)}, cleared for takeoff{wind_tail}{after}", {"runway": runway}
@@ -1389,6 +1456,22 @@ class Engine:
                 elif miles <= GO_AROUND_NM and not flight.go_around_told:
                     flight.awaiting_landing, flight.go_around_told = False, True
                     reply = Reply(f"{callsign}, go around, I say again, go around, traffic on the runway", event="go_around")
+            elif flight.backtracking and not airborne and flight.runway and self._lined_up(airport, flight.runway, raw):
+                # Backtracked and turned round at the threshold: the takeoff clearance, as for any departure.
+                clear = not self.traffic_enabled or traffic.on_final(raw, airport, flight.runway, traffic.FINAL_BLOCKS_NM) is None
+                if clear:
+                    flight.backtrack = flight.backtracking = False
+                    flight.phase = Phase.TAKEOFF_CLEARED
+                    reply = Reply(
+                        f"{callsign}, runway {say.runway(flight.runway)}, cleared for takeoff{wind_tail}",
+                        {"runway": flight.runway},
+                    )
+            elif flight.waiting_takeoff and not airborne and flight.runway and flight.backtrack:
+                clear = traffic.on_final(raw, airport, flight.runway, BACKTRACK_BLOCKS_NM) is None and not traffic.on_runway(
+                    raw, airport, flight.runway
+                )
+                if clear:
+                    reply = self._backtrack(airport, flight.runway, raw, callsign, "", uses_faa_style(airport.ident))
             elif flight.waiting_takeoff and not airborne and flight.runway:
                 clear = traffic.on_final(raw, airport, flight.runway, traffic.FINAL_BLOCKS_NM) is None and not traffic.on_runway(
                     raw, airport, flight.runway
@@ -1417,7 +1500,17 @@ class Engine:
                 flight.told_vacate = True
                 target = self._handoff(airport, "ground", to_aircraft=True)
                 tail = f", when vacated contact {target[0]} {target[1]}" if target else " and taxi to parking"
-                reply = Reply(f"{callsign}, vacate at the next available exit{tail}", {"frequency": target[2]} if target else {})
+                behind = self._exit_behind(airport, raw)
+                if behind is None:
+                    vacate = "vacate at the next available exit"
+                else:
+                    # No way off the runway ahead: back along it to the last taxiway passed.
+                    spoken, via = say.runway(flight.runway), f" {say.taxiway(behind)}" if behind else ""
+                    faa = uses_faa_style(airport.ident)
+                    vacate = f"back-taxi runway {spoken}, exit{via or ' behind you'}" if faa else (
+                        f"backtrack runway {spoken}, vacate{' via' + via if via else ' behind you'}"
+                    )  # fmt: skip
+                reply = Reply(f"{callsign}, {vacate}{tail}", {"frequency": target[2]} if target else {})
             if reply:
                 flight.last_said[key] = reply.text
                 if reply.expect:
@@ -1512,7 +1605,10 @@ class Engine:
                     holding = (
                         f"holding short runway {say.runway(flight.runway)}, " if flight.runway and station.kind == "tower" else ""
                     )
-                    add("Ready for departure", f"{holding}ready for departure", "ready_for_departure")
+                    if flight.backtracking and station.kind == "tower":
+                        add("Lined up", f"lined up runway {say.runway(flight.runway)}", "ready_for_departure")
+                    else:
+                        add("Ready for departure", f"{holding}ready for departure", "ready_for_departure")
             elif arrived:
                 if station.kind in ("tower", "ground"):
                     add("Runway vacated", "runway vacated", "runway_vacated")
