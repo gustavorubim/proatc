@@ -15,6 +15,7 @@ from proatc.config import Config
 from proatc.engine import Engine
 from proatc.flightplan import FlightPlan
 from proatc.intents import Intent
+from proatc.llm import LlmError
 from proatc.navdata import AirportDB, build_index, prefer_airports
 from proatc.procedures import Approach, Procedure, Procedures, choose_approach, parse_cifp, use_airport_runway_names
 from proatc.radio import current_station
@@ -220,6 +221,11 @@ def test_procedures_take_the_runway_names_of_the_airport(city):
 
 
 class Model:
+    histories: dict = {}  # noqa: RUF012 - no conversation kept
+
+    def complete(self, *args, **kwargs):  # the second reading: no model here, so the free answer takes the call
+        raise LlmError("no model")
+
     def __init__(self, answer):
         self.answer = answer
 

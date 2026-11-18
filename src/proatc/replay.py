@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from .atis import AtisBook
 from .intents import Intent
 from .radio import current_station, observe
+from .resolver import HARMLESS
 from .xpbridge import magnetic_variation
 
 # What the log keeps of the sim's state with each call: enough to find the station and decide the answer.
@@ -236,7 +237,13 @@ class _Replay:
         if station is None:
             self.result.skipped += 1
             return
-        reply = self.engine.handle(self.intent(event), station, issue, raw, magnetic_variation(raw))
+        intent = self.intent(event)
+        reply = None
+        doubtful = event.get("resolved") == "confirm"  # understood on a second reading, and asked back (resolver.py)
+        if doubtful:
+            reply = self.engine.confirm_request(intent, station, raw)
+        if reply is None and (not doubtful or intent.intent in HARMLESS):  # as voice_loop._second_reading
+            reply = self.engine.handle(intent, station, issue, raw, magnetic_variation(raw))
         self.result.calls += 1
         now = reply.text if reply is not None else "(no rule: free-form reply)"
         logged = _answer_after(self.events, index)

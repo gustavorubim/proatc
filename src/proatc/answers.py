@@ -609,6 +609,48 @@ def _owner(engine, intent, station, raw, gives_clearance: bool):
     return found if found and found[0] != station.callsign else None
 
 
+# How a controller asks back about a call it is not sure of: "confirm you …".
+DECLARING = {"mayday": "you are declaring a mayday", "pan_pan": "you are declaring a pan pan",
+             "cancel_emergency": "you are cancelling the emergency", "going_around": "you are going around",
+             "cancel_flight_following": "you are cancelling radar service",
+             "report_leaving": "you request to leave the frequency"}  # fmt: skip
+
+
+def confirm_words(engine, intent, station, raw) -> str:
+    """What the controller asks the pilot to confirm, in its own words: "you request descent to flight level two
+    zero zero". Only values the call carries are said. Empty when the call cannot be put as a request."""
+    name = intent.intent
+    if name in DECLARING:
+        return DECLARING[name]
+    faa, ident = faa_for(station), _level_ident(engine, station)
+    if name in ("request_climb", "request_descent") and intent.altitude:
+        verb = "climb" if name == "request_climb" else "descent"
+        return f"you request {verb} to {ifr._level(engine, int(intent.altitude), ident, faa)}"
+    if name == "request_runway" and intent.runway:
+        return f"you request runway {say.runway(intent.runway)}"
+    # Nothing the model wrote is spoken as it came: a waypoint is said only when it is on the flight's route, an
+    # airport only by the name the scenery gives it. Otherwise the request is asked about without it.
+    if name == "request_direct":
+        fix, plan = (intent.fix or "").upper(), engine.flight.plan
+        known = (set(ifr.route_fixes(plan.route)) | {name for name, _, _ in engine.route()}) if plan else set()
+        if fix in known:
+            here = (raw.get("lat", 0.0), raw.get("lon", 0.0))
+            return f"you request direct {ifr._fix_word(engine, fix, *here)}"
+        return "you request a direct routing"
+    if name == "request_diversion":
+        asked = (intent.destination or "").strip().upper()
+        target = engine.db.airport(asked) if len(asked) == 4 and asked.isalnum() else None
+        return f"you request a diversion to {target.spoken_name}" if target else "you request a diversion"
+    if name == "request_approach" and intent.approach in ifr.FAMILY_WORDS:
+        return f"you request the {ifr.FAMILY_WORDS[intent.approach]} approach"
+    if name == "request_deviation" and intent.direction in ("left", "right"):
+        return f"you request a deviation {intent.direction} of track"
+    if name == "request_return":
+        return "you request to return"
+    words = WORDS.get(name)
+    return f"you request {words}" if words else ""
+
+
 def way_out(engine, intent, station, raw, callsign, hello):
     """No rule covers this call. The controller says who can help, or 'unable' and what it can do: never nothing."""
     from .vfr import service

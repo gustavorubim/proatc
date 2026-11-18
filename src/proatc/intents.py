@@ -17,7 +17,7 @@ INTENTS = {
     "request_taxi": "asks to taxi (for departure, or to parking after landing)",
     "ready_for_departure": "ready for departure / ready for takeoff / holding short ready",
     "inbound": "airborne first call wanting to land or join the circuit, or established on an approach",
-    "position_report": "reports downwind, base or final, or asks for landing clearance",
+    "position_report": "reports downwind, base or final, or asks for landing clearance or whether it is cleared to land",
     "check_in": "first call to a departure, approach or en-route controller, giving altitude or level",
     "request_climb": "asks for a higher level",
     "request_descent": "asks for descent",
@@ -30,7 +30,7 @@ INTENTS = {
     "cancel_flight_following": "cancels flight following or radar service, or leaves the frequency V F R",
     "request_hold": "asks to hold, or for a delay before the approach",
     "cancel_hold": "in a hold, says ready for the approach or asks to leave the hold",
-    "request_weather": "asks for the wind, the Q N H or altimeter, or the weather at an airport",
+    "request_weather": "asks for the wind, the Q N H or altimeter, or the weather at an airport, in any words",
     "request_deviation": "asks to deviate left or right of track, usually to avoid weather",
     "clear_of_weather": "reports clear of weather or able to resume navigation",
     "request_approach": "asks for a particular type of instrument approach (I L S, R NAV, V O R, localiser, N D B)",
@@ -77,9 +77,11 @@ ITEMS = (
     "distance", "wind", "transition",
 )  # fmt: skip
 
-PROMPT = """You convert one pilot radio transmission from a flight simulator into JSON. Output only a JSON object, no other text.
-
-Keys:
+INTRO = (
+    "You convert one pilot radio transmission from a flight simulator into JSON. Output only a JSON object, no other text.\n\n"
+)
+# The keys of a call and how to fill them: the first reading uses them, and so does the second (resolver.py).
+FIELDS_TEMPLATE = """Keys:
 - "intent": one of: {intents}
 - "callsign": the aircraft callsign as spoken, or null
 - "runway": runway mentioned, digits plus optional L/R/C, e.g. "27L", or null
@@ -104,15 +106,19 @@ Rules:
 - The speech-to-text may contain errors; pick the most plausible aviation meaning.
 - "niner" is 9, "tree" is 3, "fife" is 5, "decimal" or "point" separates a frequency.
 - If the transmission repeats back the controller's last instruction (given below), the intent is "readback", and you still fill runway, squawk, qnh, frequency, altitude and heading with what the PILOT said, even if it differs from the instruction.
-- A pilot who reports "final" or asks for landing clearance is "position_report" with position "final".
+- A pilot who reports "final" or asks for landing clearance ("are we cleared to land", "good to land?") is "position_report" with position "final".
+- "How's the weather at <airport>" is "request_weather", not "request_information".
 - "Roger" or "wilco" after an instruction is "readback"; with no instruction to repeat it is "acknowledge".
 - When the controller's last transmission asks something ("confirm ...", "say intentions", "advise when able", "check your level"), a yes is "affirm" and a no is "negative"; a no that asks for a way back is "request_vectors" or "request_direct".
 - A question about the runway, the approach or how to join it is "request_information", never "request_runway" or "request_approach"."""
 
-SYSTEM = PROMPT.format(
-    intents="; ".join(f'"{name}" ({meaning})' for name, meaning in INTENTS.items()),
-    items=", ".join(f'"{item}"' for item in ITEMS),
-)
+PROMPT = INTRO + FIELDS_TEMPLATE
+_NAMES = {
+    "intents": "; ".join(f'"{name}" ({meaning})' for name, meaning in INTENTS.items()),
+    "items": ", ".join(f'"{item}"' for item in ITEMS),
+}
+SYSTEM = PROMPT.format(**_NAMES)
+FIELDS = FIELDS_TEMPLATE.format(**_NAMES)
 
 
 @dataclass
@@ -229,9 +235,12 @@ class IntentParser:
     def __init__(self, controller):
         self.controller = controller  # reuses the OpenRouter client, retries and fallback models
 
-    def parse(self, transcript: str, last_instruction: str = "", known: list[str] | None = None) -> Intent:
-        """`known` lists waypoint and airport identifiers of this flight, so a misheard name can be matched."""
+    def parse(self, transcript: str, last_instruction: str = "", known: list[str] | None = None, situation: str = "") -> Intent:
+        """`known` lists waypoint and airport identifiers of this flight, so a misheard name can be matched.
+        `situation` is where the flight is and what was said before (resolver.brief): what the words refer to."""
         user = f"Controller's last instruction: {last_instruction or '(none)'}\nPilot transmission: {transcript}"
+        if situation:
+            user = f"{situation}\n{user}"
         if known:
             user = f"Waypoints and airports of this flight: {' '.join(known[:40])}\n{user}"
         return parse_json(self.controller.complete(SYSTEM, user, max_tokens=200, temperature=0))

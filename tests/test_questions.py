@@ -15,6 +15,7 @@ from proatc.config import Config
 from proatc.engine import Reply
 from proatc.flightplan import FlightPlan
 from proatc.intents import INTENTS, ITEMS, Intent, parse_json
+from proatc.llm import LlmError
 from proatc.voice_loop import Session
 from tests.deadends import ISSUE, PLAN, at, build_world, read_back
 from tests.test_answers import climbing_with_departure, vectored
@@ -413,6 +414,11 @@ def test_the_hint_after_an_unforeseen_call_is_the_answer_to_the_question(tmp_pat
     engine, radar, _ = off_track(tmp_path)
 
     class Model:
+        histories: dict = {}  # noqa: RUF012
+
+        def complete(self, *args, **kwargs):
+            raise LlmError("no model")
+
         def reply(self, transcript, context, station_key="free", inform_only=False):
             return f"{CALLSIGN}, say again"
 

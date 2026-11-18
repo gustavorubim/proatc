@@ -420,6 +420,9 @@ def main() -> int:
     speech = sub.add_parser("bench-speech", help="measure speech recognition on spoken radio calls (needs the speech models)")
     speech.add_argument("--quick", action="store_true")
     speech.add_argument("--engine", choices=("kokoro", "phonon"), help="the voice engine to measure (default: the one in use)")
+    sub.add_parser(
+        "bench-off-script", help="measure how off-script calls are understood, with the second reading (uses the model)"
+    )
     sub.add_parser("bench-intents", help="measure how well the language model understands a fixed set of calls (uses the model)")
     verify = sub.add_parser("verify-data", help="run the engine over many real airports of this X-Plane and report problems")
     verify.add_argument("--airports", type=int, default=300)
@@ -459,6 +462,17 @@ def main() -> int:
                 config.tts.engine = args.engine
             bench_speech(TextToSpeech(config.tts), SpeechToText(config.stt), args.quick)
             return 0
+        if args.command == "bench-off-script":
+            from .bench import bench_off_script
+            from .config import openrouter_key
+            from .llm import Controller
+
+            key = openrouter_key()
+            if not key and config.llm.provider != "local":
+                print("No OpenRouter key and no local model: nothing to measure.")
+                return 1
+            counts = bench_off_script(Controller(config.llm, key))
+            return 1 if counts["wrong_act"] else 0
         if args.command == "bench-intents":
             from .bench import bench_intents
             from .config import openrouter_key

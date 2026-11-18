@@ -13,7 +13,7 @@ import random
 import re
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 
 from . import answers, chart, ifr, questions, traffic, vfr
@@ -488,6 +488,10 @@ class Engine:
             self._observe(raw)
             key = station.key
             callsign = self._callsign(raw, intent)
+            intent = self._runway_as_written(intent, station)
+            intent, instead = questions.confirmed(self, intent, station, callsign)
+            if instead is not None:
+                return self._said(instead, key)
             intent = self._meaning(intent, station, raw)
             self.flight.calls += 1
             if self.flight.away_from == key:
@@ -538,6 +542,40 @@ class Engine:
                 return reply  # the original instruction stays pending and is what "say again" repeats
             questions.settle(self, intent, station)
             return self._said(reply, key)
+
+    def confirm_request(self, intent: Intent, station: Station, raw: dict) -> Reply | None:
+        """'Confirm you request descent to flight level two zero zero': asked when a call was understood only on a
+        second reading (resolver.py). None when the call cannot be put as a question; the caller then answers
+        as it would have without it."""
+        with self.lock:
+            intent = self._runway_as_written(intent, station)
+            words = answers.confirm_words(self, intent, station, raw)
+            if not words:
+                return None
+            callsign = self._callsign(raw, intent)
+            reply = Reply(f"{callsign}, {self._greeting(station)}confirm {words}")
+            said = {key: value for key, value in asdict(intent).items() if value is not None and value is not False}
+            reply.asks = {"intent": {key: value for key, value in said.items() if value != ""}}
+            return self._said(reply, station.key)
+
+    def _runway_as_written(self, intent: Intent, station: Station) -> Intent:
+        """A runway the pilot said, written the way the airport writes it. The language model writes '04R' and '09';
+        an airport in the United States calls them '4R' and '9'. Compared as they came, a correct readback of
+        "runway four right" was refused and a request for it was not found."""
+        if not intent.runway:
+            return intent
+        plan = self.flight.plan
+        idents = [station.airport.ident] if station.airport else []
+        idents += [ident for ident in (plan.destination, plan.origin) if ident] if plan else []
+        if self.flight.arrival:
+            idents.append(self.flight.arrival.airport)
+        for ident in dict.fromkeys(idents):
+            airport = self.db.airport(ident) if not (station.airport and station.airport.ident == ident) else station.airport
+            for runway in airport.runways if airport else []:
+                for end in (runway.end1, runway.end2):
+                    if _end(end) == _end(intent.runway):
+                        return replace(intent, runway=end) if end != intent.runway else intent
+        return intent
 
     def _said(self, reply: Reply, key: str) -> Reply:
         """What the controller said is remembered: for a readback, for "say again", and as a question to answer."""

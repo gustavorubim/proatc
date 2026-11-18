@@ -11,13 +11,14 @@ drives the terminal and the desktop app.
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import re
 import threading
 import time
 from dataclasses import asdict
 
-from . import phrasing, questions, soundcheck, system_check
+from . import phrasing, questions, resolver, soundcheck, system_check
 from . import report as problem_report
 from .airspace import open_airspace
 from .airways import open_airways
@@ -45,6 +46,8 @@ from .replay import snapshot
 from .stt import SpeechToText
 from .tts import TextToSpeech, download_models, models_present
 from .xpbridge import SimUnavailable, XPBridge, describe, magnetic_variation, same_channel, transmit_radio, tuned_khz
+
+log = logging.getLogger(__name__)
 
 MIN_SECONDS = 0.4
 
@@ -825,7 +828,7 @@ def informational(text: str) -> bool:
 
 def _fields(intent: Intent) -> dict:
     """An intent as plain data, without what was not said: what the flight log keeps, to replay the call."""
-    return {key: value for key, value in asdict(intent).items() if value not in (None, False)}
+    return {key: value for key, value in asdict(intent).items() if value is not None and value is not False}
 
 
 def known_names(engine) -> list[str]:
@@ -947,14 +950,48 @@ def _respond(transcript, source, intent, started, config, bridge, db, book, tts,
     return True
 
 
+def _second_reading(transcript, station_key, station, issue, raw, controller, engine, emit: Emit):
+    """A call the first reading could not place, read again with the whole conversation and the flight's state
+    (resolver.py). The engine still decides the answer: the reading only says what the pilot asked for."""
+    history = controller.histories.get(station_key, [])
+    try:
+        about = resolver.situation(engine, station, issue, raw, history)
+    except Exception:  # without the situation there is nothing to read the call against: the free answer takes it
+        log.exception("could not describe the situation for the second reading")
+        return None
+    reading = resolver.read(controller, about, transcript)
+    if reading.intent is None:
+        if reading.why:
+            emit({"type": "coach", "text": f"The controller could not tell what you meant ({reading.why})."})
+        return None
+    # A second "understood" for the same call: what it was taken to mean, and how sure the reading was. A replay
+    # of the journal repeats it the same way (replay.py).
+    emit({"type": "understood", "intent": reading.intent.intent, "fields": _fields(reading.intent), "resolved": reading.decision})
+    if reading.decision == "confirm":
+        asked = engine.confirm_request(reading.intent, station, raw)
+        if asked is not None or reading.intent.intent not in resolver.HARMLESS:
+            return asked  # a doubtful call that cannot be asked about is not made: the free answer takes it
+    return engine.handle(reading.intent, station, issue, raw, magnetic_variation(raw))
+
+
 def _answer(transcript, intent, context, station_key, station, issue, raw, controller, engine, parser, emit: Emit) -> str:
     """The controller's words: from the rules engine when it covers the request, else a free-form reply."""
     # A clicked call carries its own intent: it needs no language model at all.
     if station and engine and (intent is not None or parser):
         if intent is None:
-            intent = parser.parse(transcript, engine.flight.last_said.get(station_key, ""), known_names(engine))
+            # The first reading is given the situation too: what the flight is doing, the controller's open question,
+            # the last few exchanges. "We'll head back" after a mayday is a return, not a request for vectors.
+            history = controller.histories.get(station_key, []) if controller is not None else []
+            try:
+                about = resolver.brief(resolver.situation(engine, station, issue, raw, history))
+            except Exception:  # the context is a help, not a condition: the call is still read without it
+                log.exception("could not describe the situation for the first reading")
+                about = ""
+            intent = parser.parse(transcript, engine.flight.last_said.get(station_key, ""), known_names(engine), about)
         emit({"type": "understood", "intent": intent.intent, "fields": _fields(intent)})
         reply = engine.handle(intent, station, issue, raw, magnetic_variation(raw))
+        if reply is None and intent.intent == "other" and controller is not None:
+            reply = _second_reading(transcript, station_key, station, issue, raw, controller, engine, emit)
         engine.flight.last_note = reply.note if reply is not None else ""
         engine.flight.last_event = reply.event if reply is not None else ""
         if reply is not None:

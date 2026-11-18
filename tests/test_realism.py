@@ -634,3 +634,21 @@ def test_a_runway_the_airport_calls_9r_is_found_in_a_taxi_network_that_calls_it_
     to_27r = route_to_runway(net, *APRON, "27R", (51.004, -0.98))
     assert to_27r.crossings == ["9R/27L"]  # the runway crossed on the way is still known as one
     assert use_airport_runway_names(as_written, ["09L", "27R"]) is as_written  # nothing to rename: untouched
+
+
+def test_a_runway_read_back_as_the_model_writes_it_is_the_runway_the_airport_calls_9r(tmp_path):
+    # The language model writes "09R"; an airport in the United States writes "9R". A correct voice readback of
+    # "runway niner right" was answered "negative" because the two were compared as text.
+    american = [line.replace(" 09R ", " 9R ").replace(" 09L ", " 9L ") if line.startswith("100 ") else line for line in CROSSING]
+    apt = tmp_path / "american.dat"
+    apt.write_text("\n".join(american), encoding="utf-8")
+    build_index(apt, tmp_path / "american.sqlite")
+    db = AirportDB(tmp_path / "american.sqlite")
+    engine = Engine(db, seed=1, procedures=lambda ident: parse_cifp([]))
+    ground = db.station(121700, *APRON)
+    taxi = engine.handle(Intent("request_taxi"), ground, ISSUE, taxiing(*APRON))
+    assert taxi.expect == {"hold_short": "9R/27L"}
+    assert engine.handle(Intent("readback", runway="09R"), ground, ISSUE, taxiing(*APRON)).text == ""  # accepted
+    engine.handle(Intent("request_crossing"), ground, ISSUE, taxiing(50.999))
+    wrong = engine.handle(Intent("readback", runway="09L"), ground, ISSUE, taxiing(50.999))
+    assert wrong.text.startswith(f"{CALLSIGN}, negative")  # a wrong runway is still wrong

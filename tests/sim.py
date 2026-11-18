@@ -416,12 +416,14 @@ class SimParser:
     def __init__(self):
         self.means: dict[str, Intent] = {}
 
-    def parse(self, transcript: str, last_said: str = "", names=None) -> Intent:
+    def parse(self, transcript: str, last_said: str = "", names=None, situation: str = "") -> Intent:
         return self.means.get(transcript, Intent("other"))
 
 
 class SimModel:
     """The language model's free-form fallback: it only ever asks for a repeat."""
+
+    histories: dict = {}  # noqa: RUF012 - never written: the conversation the second reading is shown
 
     def reply(self, transcript, context, station_key="free", inform_only=False) -> str:
         return "Station calling, say again"
