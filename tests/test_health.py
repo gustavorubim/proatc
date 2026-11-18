@@ -11,6 +11,7 @@ from proatc import health, voice_loop
 from proatc.config import Config
 from proatc.health import as_text, check, for_app
 from proatc.intents import Intent
+from proatc.llm import LlmError
 from tests.test_journal import lines, session_with_journal
 from tests.test_realism import APRON, taxiing
 
@@ -123,6 +124,11 @@ def test_journals_written_before_replies_were_marked_are_read_by_their_words():
 
 
 class Model:
+    histories: dict = {}  # noqa: RUF012 - no conversation kept
+
+    def complete(self, *args, **kwargs):  # the second reading: no model here, so the free answer takes the call
+        raise LlmError("no model")
+
     def __init__(self, answer):
         self.answer = answer
 

@@ -339,6 +339,7 @@ Not run in CI: they need the speech models or a language model.
 
 - `proatc bench-speech` speaks 25 radio calls in four voices, clean and through the radio effect with two levels of noise, and measures word errors and whether the numbers survive. `--quick` runs a third of it.
 - `proatc bench-intents` runs 89 transcripts through the configured model and checks the intent and every value. It costs a fraction of a cent on OpenRouter.
+- `proatc bench-off-script` runs 23 calls in the pilot's own words ("it's getting bumpy, any chance of a bit lower"), each in a situation (cruise, approach, ground, an open controller question, a mayday, short final), through both readings as the app reads them. It counts calls placed on the first reading, acted on or asked back on the second, left unclear, and the one that matters most: WRONG AND ACTED ON, a call the rules would carry out that the pilot did not ask for. It exits with an error when there is one.
 
 Baseline on 0.8 (Windows, NVIDIA graphics card, `small.en`, default model `anthropic/claude-haiku-5.5`):
 
@@ -348,6 +349,8 @@ Baseline on 0.8 (Windows, NVIDIA graphics card, `small.en`, default model `anthr
 | `bench-speech`, by condition | clean 8.0%, radio effect 7.5%, noisy radio 9.3% word errors |
 | `bench-intents`, 61 transcripts | 60 understood exactly (98%); the miss was a blind call taken for a position report, which the engine treats the same way |
 | `bench-intents` on 0.15, 89 transcripts | 85 understood exactly (96%). The misses: "roger" to an instruction taken as an acknowledgement (treated as the readback anyway); a blind call taken for a position report; "request frequency change to get the ATIS" taken as a request for information; "negative, request vectors back to the departure" taken as "negative" (it still gets a way back, direct to the next waypoint) |
+| `bench-intents` on 0.16, 89 transcripts | 85 understood exactly (96%). "Negative, request vectors back to the departure" is now right; "request wind check" is now taken as a request for the weather, which is also answered with the wind. The other three misses are as on 0.15 |
+| `bench-off-script` on 0.16, 23 calls | 23 right: 22 on the first reading, "the coffee on this flight is terrible" left unclear; 0 wrong and acted on. Without the situation given to the first reading: 20 right, 3 wrong and acted on ("correcting back onto it now" to the off-track question, "head back to where we came from" after a mayday, "are we good to land") |
 
 The two voice engines, compared on 0.9 (same machine; `proatc bench-speech --engine kokoro` and `--engine phonon`):
 

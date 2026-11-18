@@ -258,3 +258,151 @@ def bench_intents(controller, report=print) -> tuple[int, int, list[str]]:
     for line in wrong:
         report(f"  wrong  {line}")
     return right, len(UNDERSTOOD), wrong
+
+
+# ---- off-script calls: the first reading, then the second (resolver.py) ---------------------
+
+CRUISE = {
+    "station": "Washington Center (center)",
+    "conversation": ["Pilot: Washington Center, November one two three Alfa Bravo, level flight level three six zero",
+                     "November one two three Alfa Bravo, Washington Center, radar contact"],
+    "flight": {"phase": "airborne", "flight_rules": "IFR", "destination": "KIAD", "cleared_level": "FL360"},
+    "plan": {"origin": "KBOS", "destination": "KIAD", "route": "BLZZR6 BLZZR DCT BAF HYPER1", "cruise_ft": 36000},
+    "on_ground": False, "altitude_ft": 36000, "open_question": None,
+    "calls_that_fit": ['Request lower: "request lower" -> {"intent": "request_descent"}',
+                       'Request higher: "request higher" -> {"intent": "request_climb"}',
+                       'Direct BAF: "request direct Baf" -> {"intent": "request_direct", "fix": "BAF"}',
+                       'Destination weather: "request weather at destination" -> {"intent": "request_weather"}'],
+}  # fmt: skip
+APPROACH = {
+    "station": "Washington Dulles Approach (approach)",
+    "conversation": ["Pilot: Washington Dulles Approach, November one two three Alfa Bravo, descending one zero thousand",
+                     "November one two three Alfa Bravo, Washington Dulles Approach, radar contact, expect I L S approach runway one left",
+                     "November one two three Alfa Bravo, turn left heading one niner zero, descend and maintain four thousand"],
+    "flight": {"phase": "airborne", "flight_rules": "IFR", "destination": "KIAD", "cleared_level": "4,000 ft",
+               "approach": "I L S runway 1L", "heading": 190},
+    "plan": {"origin": "KBOS", "destination": "KIAD"}, "on_ground": False, "altitude_ft": 6000, "open_question": None,
+    "calls_that_fit": ['Request R NAV: "request R NAV approach" -> {"intent": "request_approach", "approach": "RNAV"}',
+                       'Field in sight: "field in sight" -> {"intent": "request_visual"}',
+                       'Request runway 1C: "request runway one center" -> {"intent": "request_runway", "runway": "1C"}'],
+}  # fmt: skip
+GROUND = {
+    "station": "Boston Ground (ground)",
+    "conversation": ["Pilot: Boston Ground, November one two three Alfa Bravo, request taxi",
+                     "November one two three Alfa Bravo, runway two seven, taxi via Kilo, Mike, Charlie"],
+    "flight": {"phase": "taxiing out", "flight_rules": "IFR", "destination": "KIAD", "assigned_runway": "27"},
+    "plan": {"origin": "KBOS", "destination": "KIAD"}, "on_ground": True, "altitude_ft": 20, "open_question": None,
+    "calls_that_fit": ['Progressive taxi: "request progressive taxi" -> {"intent": "request_progressive"}',
+                       'Return to gate: "request return to the gate" -> {"intent": "request_return"}'],
+}  # fmt: skip
+OFF_TRACK = ("November one two three Alfa Bravo, you appear to be six miles off the departure track, "
+             "confirm you are following the departure")  # fmt: skip
+DEPARTURE = {
+    "station": "Boston Departure (departure)",
+    "conversation": ["Pilot: Boston Departure, November one two three Alfa Bravo, passing two thousand climbing five thousand",
+                     "November one two three Alfa Bravo, Boston Departure, radar contact, climb and maintain one five thousand",
+                     OFF_TRACK],
+    "flight": {"phase": "airborne", "flight_rules": "IFR", "destination": "KIAD", "cleared_level": "15,000 ft", "sid": "BLZZR6"},
+    "plan": {"origin": "KBOS", "destination": "KIAD"}, "on_ground": False, "altitude_ft": 6200, "open_question": OFF_TRACK,
+    "calls_that_fit": ['Affirm: "affirm, following the B L Z Z R six departure" -> {"intent": "affirm"}',
+                       'Request vectors: "request vectors to rejoin the departure" -> {"intent": "request_vectors"}'],
+}  # fmt: skip
+
+MAYDAY_ASKED = ("November one two three Alfa Bravo, Washington Center, roger mayday, squawk seven seven zero zero, "
+                "say intentions")  # fmt: skip
+EMERGENCY = {
+    **CRUISE,
+    "conversation": [*CRUISE["conversation"], "Pilot: Mayday mayday mayday, November one two three Alfa Bravo, engine failure",
+                     MAYDAY_ASKED],
+    "flight": {**CRUISE["flight"], "emergency": "mayday"},
+    "open_question": MAYDAY_ASKED,
+    "calls_that_fit": ['Return: "request return to Boston" -> {"intent": "request_return"}',
+                       'Divert: "request diversion to {destination}" -> {"intent": "request_diversion"}',
+                       'Continue: "continuing to destination" -> {"intent": "affirm"}'],
+}  # fmt: skip
+FINAL = {
+    "station": "Dulles Tower (tower)",
+    "conversation": ["Pilot: Dulles Tower, November one two three Alfa Bravo, established I L S runway one left",
+                     "November one two three Alfa Bravo, Dulles Tower, continue approach runway one left, number two"],
+    "flight": {"phase": "airborne", "flight_rules": "IFR", "destination": "KIAD", "approach": "I L S runway 1L"},
+    "plan": {"origin": "KBOS", "destination": "KIAD"}, "on_ground": False, "altitude_ft": 1800, "open_question": None,
+    "calls_that_fit": ['Final: "final runway one left" -> {"intent": "position_report", "position": "final"}',
+                       'Going around: "going around" -> {"intent": "going_around"}'],
+}  # fmt: skip
+
+# (situation, transcript, intents that are right, values that must be right; a set of values means any of them). The pilot does not use the standard
+# words: that is the point. An empty set of intents means nothing should be acted on.
+OFF_SCRIPT = (
+    (CRUISE, "it's getting pretty bumpy up here, any chance we could go a bit lower", {"request_descent"}, {}),
+    (CRUISE, "we'd love to cut the corner and head straight for baf if that works for you", {"request_direct"}, {"fix": "BAF"}),
+    (CRUISE, "how's the weather looking at dulles", {"request_weather"}, {}),
+    (CRUISE, "the ride is smooth, we could go higher if you've got it", {"request_climb"}, {}),
+    (CRUISE, "we've got a passenger who isn't well, we'd like to get on the ground as soon as possible",
+     {"pan_pan", "request_diversion", "mayday"}, {}),
+    (CRUISE, "our left engine is running rough, we'd like to divert to philadelphia", {"request_diversion", "pan_pan", "mayday"}, {}),
+    (CRUISE, "the coffee on this flight is terrible", set(), {}),
+    (APPROACH, "which runway are we landing on again", {"request_information"}, {"item": "runway"}),
+    (APPROACH, "we'd prefer to do the rnav instead of the ils if that's possible", {"request_approach"}, {"approach": "RNAV"}),
+    (APPROACH, "we can see the airport now", {"request_visual"}, {}),
+    (APPROACH, "how many miles have we got to go", {"request_information"}, {"item": "distance"}),
+    # With no runway read, the engine asks which runway: not acted on wrongly.
+    (APPROACH, "could we have the center runway instead, one center", {"request_runway"}, {"runway": {"1C", "01C", None}}),
+    (APPROACH, "we're going to need a bit of time to sort out a problem, can we hold somewhere", {"request_hold"}, {}),
+    (GROUND, "sorry we're a little lost, which way after kilo", {"request_progressive"}, {}),
+    (GROUND, "we've got a warning light, we need to head back to the gate", {"request_return"}, {}),
+    (GROUND, "give us a couple of minutes, we're not quite ready", {"request_delay"}, {}),
+    (DEPARTURE, "yes we're on it, following the blizzard six", {"affirm"}, {}),
+    (DEPARTURE, "no I think I lost it, can you point me back", {"request_vectors", "negative"}, {}),
+    # Only the conversation says what these mean.
+    # "Negative" here gets a direct back to the departure: an answer as good as "affirm".
+    (DEPARTURE, "we drifted a little north there, correcting back onto it now", {"affirm", "negative"}, {}),
+    (EMERGENCY, "we'll head back to where we came from", {"request_return", "request_diversion"}, {}),
+    (EMERGENCY, "we'll keep going, we can make it", {"affirm"}, {}),
+    (FINAL, "are we good to land", {"position_report"}, {}),
+    (APPROACH, "sorry, missed the last bit", {"say_again"}, {}),
+)  # fmt: skip
+
+
+def _fits(intent, wanted: set, values: dict) -> bool:
+    def same(key, value):
+        got = getattr(intent, key)
+        return got in value if isinstance(value, set) else got == value
+
+    return intent.intent in wanted and all(same(key, value) for key, value in values.items())
+
+
+def bench_off_script(controller, report=print) -> dict:
+    """Off-script calls through both readings, as the app reads them. Counted: right on the first reading; right on
+    the second, acted on or asked back; left unclear (the free answer takes them); asked back wrongly (the pilot can
+    say "negative"); and WRONG AND ACTED ON, the one that matters most: a call the rules would carry out that the
+    pilot did not ask for."""
+    from .resolver import read
+
+    parser = IntentParser(controller)
+    counts = {"first": 0, "second_act": 0, "second_confirm": 0, "unclear": 0, "wrong_confirm": 0, "wrong_act": 0}
+    right = 0
+    for about, transcript, wanted, values in OFF_SCRIPT:
+        last = next((line for line in reversed(about["conversation"]) if not line.startswith("Pilot:")), "")
+        from .resolver import brief
+
+        first = parser.parse(transcript, last, situation=brief(about))
+        if first.intent != "other":
+            ok = _fits(first, wanted, values) or (not wanted and first.intent in ("acknowledge", "say_again"))
+            kind, got = ("first" if ok else "wrong_act"), f"first reading: {first.intent}"
+        else:
+            reading = read(controller, about, transcript)
+            if reading.intent is None:
+                ok, kind, got = not wanted, "unclear", f"unclear ({reading.why})"
+            else:
+                ok = _fits(reading.intent, wanted, values)
+                kind = f"{'second' if ok else 'wrong'}_{reading.decision}"
+                got = f"second reading: {reading.decision} {reading.intent.intent} ({reading.why})"
+        counts[kind] += 1
+        right += ok
+        report(f"  {'ok  ' if ok else 'MISS'} {transcript!r}: {got}")
+    report(
+        f"{right}/{len(OFF_SCRIPT)} right ({counts['first']} on the first reading, {counts['second_act']} acted on and "
+        f"{counts['second_confirm']} asked back on the second); {counts['unclear']} unclear; "
+        f"{counts['wrong_confirm']} asked back wrongly; {counts['wrong_act']} WRONG AND ACTED ON"
+    )
+    return counts

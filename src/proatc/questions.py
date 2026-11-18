@@ -25,6 +25,7 @@ from .navdata import bearing
 PATTERNS = (
     (re.compile(r"off the (departure|arrival) track, confirm you are following"), "off_track"),
     (re.compile(r"off your filed route, confirm your routing"), "off_track"),
+    (re.compile(r"confirm you (?:request|are declaring|are cancelling|are going)"), "confirm_request"),
     (re.compile(r"say intentions"), "intentions"),
     (re.compile(r"low altitude alert"), "low_altitude"),
     (re.compile(r"check your (?:altitude|level), cleared"), "level_bust"),
@@ -42,6 +43,7 @@ PATTERNS = (
 # has been made to the station that asked, the question is closed. A readback never is: it answers the instruction
 # the question came with ("maintain flight level one one zero, advise when able"), not the question.
 ANSWERED_BY = {
+    "confirm_request": {"affirm", "negative"},
     "off_track": {"affirm", "negative", "unable", "request_vectors", "request_direct", "request_deviation"},
     "intentions": {"affirm", "negative", "request_return", "request_diversion", "request_hold", "going_around",
                    "request_special_vfr", "request_vectors", "inbound", "request_approach", "request_visual",
@@ -134,6 +136,39 @@ def settle(engine, intent, station) -> None:
 
 
 # ---- the answers that have a rule here ----------------------------------------------------
+
+
+# Calls that leave "confirm you request …" waiting: a request to say it again, a "roger", and words the first
+# reading could not place, which the second reading then reads with the question still in view.
+KEEPS_CONFIRM_OPEN = {"say_again", "acknowledge", "other"}
+
+
+def confirmed(engine, intent, station, callsign: str):
+    """The pilot's answer to "confirm you request …" (asked after a second reading, resolver.py).
+
+    Returns (the call to go on with, a reply to give instead). "Affirm" is the call that was asked about, as if the
+    pilot had made it plainly. "Negative" is answered with a request to say it again. Any other call is a new one:
+    the question is dropped and the call goes on as it is."""
+    waiting = engine.flight.question
+    if waiting and waiting.kind == "confirm_request" and waiting.station != station.key:
+        engine.flight.question = None  # asked on another frequency: an "affirm" much later must not make that call
+        return intent, None
+    question = open_question(engine, station)
+    if question is None or question.kind != "confirm_request":
+        return intent, None
+    if intent.intent in KEEPS_CONFIRM_OPEN:
+        return intent, None
+    engine.flight.question = None
+    asked = question.data.get("intent")
+    if intent.intent == "affirm" and isinstance(asked, dict):
+        from .intents import Intent
+
+        return Intent.from_dict(asked), None
+    if intent.intent == "negative":
+        from .engine import Reply
+
+        return intent, Reply(f"{callsign}, roger, say again your request")
+    return intent, None
 
 
 def answer(engine, intent, station, issue, raw, variation, callsign, hello):
@@ -275,6 +310,7 @@ def calls(engine, station, issue, raw, opening: str) -> list[dict]:
         "low_altitude": _offer_low, "able_level": _offer_able, "able_heading": _offer_able, "able": _offer_able,
         "ready_approach": _offer_ready_approach, "ready_departure": _offer_ready, "established": _offer_established,
         "destination": _offer_destination, "runway": _offer_runway, "report": _offer_report,
+        "confirm_request": _offer_confirm,
     }.get(question.kind)  # fmt: skip
     if offer:
         offer(engine, question, station, issue, raw, add)
@@ -378,6 +414,11 @@ def _offer_level(engine, question, station, issue, raw, add) -> None:
 
 def _offer_low(engine, question, station, issue, raw, add) -> None:
     add("Climbing", "climbing", "affirm")
+
+
+def _offer_confirm(engine, question, station, issue, raw, add) -> None:
+    add("Affirm", "affirm", "affirm")
+    add("Negative", "negative", "negative")
 
 
 def _offer_able(engine, question, station, issue, raw, add) -> None:

@@ -11,6 +11,7 @@ from proatc.atis import Issue
 from proatc.debrief import review
 from proatc.engine import Engine, Phase
 from proatc.intents import Intent
+from proatc.llm import LlmError
 from proatc.navfix import NavFix
 from proatc.voice_loop import informational
 from proatc.weather import Cloud, Weather
@@ -155,6 +156,11 @@ def test_hold_short_and_north_headings_are_checked(tmp_path):
 
 
 class Model:
+    histories: dict = {}  # noqa: RUF012 - no conversation kept
+
+    def complete(self, *args, **kwargs):  # the second reading: no model here, so the free answer takes the call
+        raise LlmError("no model")
+
     def __init__(self, answer):
         self.answer, self.calls = answer, []
 
@@ -167,7 +173,7 @@ class Model:
 
 
 class NoParse:
-    def parse(self, transcript, last="", known=None):
+    def parse(self, transcript, last="", known=None, situation=""):
         return Intent("other")
 
 
