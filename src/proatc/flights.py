@@ -738,7 +738,7 @@ class GateToGate:
             self.set_stage("takeoff")
         elif self.stage == "landing roll" and re.search(r"\b(?:backtrack runway|back-taxi runway)\b", text):
             # Once stopped: back along the runway to the taxiway said ("via Charlie"), or the first one, and off there.
-            said = re.search(r"\b(?:vacate|exit) via ([A-Za-z ]+?)(?:,|$)", text)
+            said = re.search(r"\b(?:vacate|exit) via ([A-Za-z ]+?)(?:,| and |$)", text)
             self.backtrack_in = said.group(1).strip() if said else True
         elif self.stage == "landing roll" and "vacate" in text:
             self._vacate()
