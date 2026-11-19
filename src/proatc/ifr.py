@@ -790,14 +790,17 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
         position, arrival.course_true, arrival.platform_ft, _feet(raw), safe, arrival.final_nm, extend, inbound, on_base, vectored
     )
     floor = 0
-    if position.distance_nm > MSA_RADIUS_NM:
+    # The sector altitude's circle is centred on the airport, not on the runway's threshold, which at a large airport
+    # is miles away from it: measured from the threshold, a vector just outside the circle went below the terrain.
+    beyond = distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon) > MSA_RADIUS_NM
+    if beyond:
         # Outside the minimum sector altitude's circle, the terrain below sets the floor for any vector.
         floor = int(math.ceil(max(safe, safe_floor_ft(engine, raw)) / 100) * 100)
         vector = replace(vector, altitude_ft=max(vector.altitude_ft, floor))
     feet = _feet(raw)
     cleared = flight.cleared_ft if flight.cleared_ft is not None else feet
     high = vector.stage == "intercept" and (too_high_ft(position, feet, vector.altitude_ft, airport.elev_ft) or 0) > 0
-    if high and inbound and (position.along_nm > arrival.final_nm + TURN_OUT_WITHIN_NM or position.distance_nm > MSA_RADIUS_NM):
+    if high and inbound and (position.along_nm > arrival.final_nm + TURN_OUT_WITHIN_NM or beyond):
         # Too high to get down to the glide path from here, with miles still to go: down first, and cleared for the
         # approach once it can make it. Never cleared from where it could only meet the path from above.
         vector = Vector("descend", None, vector.altitude_ft)
@@ -903,7 +906,11 @@ def _via_initial_fix(engine, station, issue, raw, callsign, lead, position, safe
     flight, arrival, airport = engine.flight, engine.flight.arrival, station.airport
     # Direct to the fix from wherever the aircraft is: never below the minimum sector altitude, nor, beyond its 25
     # miles, below the minimum off-route altitude of the terrain under the aircraft; never below the field.
-    floor = max(safe, safe_floor_ft(engine, raw) if position.distance_nm > MSA_RADIUS_NM else 0, airport.elev_ft + 1500)
+    floor = max(
+        safe,
+        safe_floor_ft(engine, raw) if distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon) > MSA_RADIUS_NM else 0,
+        airport.elev_ft + 1500,
+    )
     found = _initial_fix(engine, airport, arrival, raw, position, floor)
     if not found:
         return None

@@ -89,6 +89,26 @@ def test_never_cleared_from_above_the_floor_beyond_the_sector_altitude_circle(wo
         assert reply is None or "cleared" not in reply.text  # still too high: no approach clearance
 
 
+def test_the_sector_altitude_circle_is_measured_from_the_airport_not_the_threshold(world):  # noqa: F811
+    db, engine, _ = world
+
+    class Floors:
+        def airport_safe_ft(self, ident):
+            return 7000
+
+        def grid_safe_ft(self, lat, lon):
+            return 6500
+
+        def position(self, *args):
+            return None
+
+    engine.navfix = Floors()
+    # 24.5 miles from the threshold of 27, which is east of the airport's reference point: over 25 from the airport.
+    engine, approach, first = arrive(world, out(24.5, 9000))
+    assert first.expect["altitude"] == 7000  # the floor outside the circle, not the approach's 2,500 ft
+    assert "cleared" not in first.text
+
+
 def test_a_leg_given_beyond_the_sector_altitude_circle_is_brought_down_inside_it(world):  # noqa: F811
     db, engine, _ = world
 
