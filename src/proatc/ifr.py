@@ -33,7 +33,19 @@ from .atis import uses_faa_style
 from .intents import Intent
 from .navdata import Airport, bearing, distance_nm, expect_station
 from .procedures import choose_approach, choose_sid, choose_star, circling_approach, route_fixes, spoken_name
-from .vectors import CLOSE_NM, FINAL_NM, established, locate, next_vector, turn_direction
+from .vectors import (
+    CLOSE_NM,
+    FINAL_NM,
+    GLIDE_FT_PER_NM,
+    Vector,
+    established,
+    locate,
+    next_vector,
+    pattern_ft,
+    too_high_ft,
+    turn_direction,
+    turn_out,
+)
 
 RADAR_KINDS = ("departure", "approach", "center")
 CHECK_IN = ("check_in", "initial_call", "position_report", "inbound")
@@ -75,6 +87,12 @@ EN_ROUTE_OFF_TRACK_S = 120
 CROSSING_NM = 2.5
 SPEED_MARGIN_KT = 15
 SPEEDS_KT = {"descend": 250, "downwind": 220, "base": 180, "intercept": 160}
+FAR_FINAL_NM = 18  # cleared for the approach farther out than this, the speed is one eight zero to five miles
+FAR_FINAL_KT = 180
+STEP_DOWN_FT = 2000  # on the way in, a further descent is given when it is at least this much lower
+TURN_OUT_WITHIN_NM = 2  # too high to join the glide path this close to the joining point: turned out for the descent
+HIGH_ON_FINAL_FT = 1000  # cleared, on the localiser, and this far above the glide path: the controller says so
+HIGH_TOLD_BEYOND_NM = 6  # but not inside this distance, where it is the tower's and the pilot's to sort out
 JOIN_NM = (9, 10, 12)  # how far out final is joined; it differs from one arrival to the next
 FINAL_MAX_NM = 30  # but never so close in that the joining altitude is above a three degree path, up to this
 EXTEND_UP_TO_NM = 8  # a downwind leg is extended at most this far beyond the usual base turn
@@ -115,6 +133,7 @@ class Arrival:
     via: str | None = None  # the initial approach fix an approach flown as a procedure starts at
     unavailable: bool = False  # no instrument approach, and weather that rules out a visual one
     unavailable_told: bool = False
+    high_told: bool = False  # told it is well above the glide path on final
 
     @property
     def flown(self) -> str:
@@ -722,9 +741,11 @@ def _weather_allows(issue, visibility_sm: float, ceiling_ft: float) -> bool:
     return weather.visibility_sm >= visibility_sm and (ceiling is None or ceiling >= ceiling_ft) and not weather.fog
 
 
-def _speed(arrival: Arrival, stage: str, raw: dict, faa: bool) -> str | None:
-    """Speed control as the aircraft is brought onto final. Not said if already that slow."""
-    target = SPEEDS_KT.get(stage)
+def _speed(arrival: Arrival, stage: str, raw: dict, faa: bool, along_nm: float = 0.0) -> str | None:
+    """Speed control as the aircraft is brought onto final. Not said if already that slow. Cleared for the approach
+    far out, it is one eight zero to five miles: one six zero from twenty miles out is not asked of an airliner."""
+    far = stage == "intercept" and along_nm > FAR_FINAL_NM
+    target = FAR_FINAL_KT if far else SPEEDS_KT.get(stage)
     if not target or (arrival.speed_kt and arrival.speed_kt <= target):
         return None
     if stage == "descend" and not (raw.get("ias_kt", 0.0) > target + 10 and _feet(raw) < 14000):
@@ -734,7 +755,8 @@ def _speed(arrival: Arrival, stage: str, raw: dict, faa: bool) -> str | None:
         return None
     spoken = say.digits(target)
     if stage == "intercept":
-        return f"maintain {spoken} knots until four mile final" if faa else f"speed {spoken} knots until four miles"
+        miles = "five" if far else "four"
+        return f"maintain {spoken} knots until {miles} mile final" if faa else f"speed {spoken} knots until {miles} miles"
     return f"reduce speed to {spoken}" if faa else f"reduce speed {spoken} knots"
 
 
@@ -769,10 +791,29 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     vector = next_vector(
         position, arrival.course_true, arrival.platform_ft, _feet(raw), safe, arrival.final_nm, extend, inbound, on_base, vectored
     )
+    floor = 0
     if position.distance_nm > MSA_RADIUS_NM:
         # Outside the minimum sector altitude's circle, the terrain below sets the floor for any vector.
-        floor = max(safe, safe_floor_ft(engine, raw))
-        vector = replace(vector, altitude_ft=max(vector.altitude_ft, int(math.ceil(floor / 100) * 100)))
+        floor = int(math.ceil(max(safe, safe_floor_ft(engine, raw)) / 100) * 100)
+        vector = replace(vector, altitude_ft=max(vector.altitude_ft, floor))
+    feet = _feet(raw)
+    cleared = flight.cleared_ft if flight.cleared_ft is not None else feet
+    high = vector.stage == "intercept" and (too_high_ft(position, feet, vector.altitude_ft, airport.elev_ft) or 0) > 0
+    if high and inbound and (position.along_nm > arrival.final_nm + TURN_OUT_WITHIN_NM or position.distance_nm > MSA_RADIUS_NM):
+        # Too high to get down to the glide path from here, with miles still to go: down first, and cleared for the
+        # approach once it can make it. Never cleared from where it could only meet the path from above.
+        vector = Vector("descend", None, vector.altitude_ft)
+    elif high:
+        # Close in, or turning in from a downwind or base leg: out again, to lose the height, for a new base.
+        vector = turn_out(position, arrival.course_true, max(pattern_ft(arrival.platform_ft, safe), floor), again=True)
+        lead = f"{lead}too high to join the glide path, "
+    # On the way in, the next descent as the aircraft comes down to the last one given.
+    step = (
+        vector.stage == "descend"
+        and arrival.stage == "descend"
+        and vector.altitude_ft < cleared
+        and (high or (vector.altitude_ft <= cleared - STEP_DOWN_FT and feet <= cleared + NEXT_STEP_WITHIN_FT))
+    )
     if (
         extend
         and arrival.stage == "downwind"
@@ -782,7 +823,7 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     ):
         arrival.extended = True
         return _reply(engine, f"{callsign}, extending your downwind for traffic on final, I will call your base turn")
-    if arrival.stage is not None and STAGES.index(vector.stage) <= STAGES.index(arrival.stage) and not vector.again:
+    if arrival.stage is not None and STAGES.index(vector.stage) <= STAGES.index(arrival.stage) and not vector.again and not step:
         return None if not first else _reply(engine, f"{callsign}, {lead.rstrip(', ')}") if lead else None
     arrival.stage = vector.stage
 
@@ -797,8 +838,7 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
             parts.append(f"turn {turn_direction(current, heading)} heading {say.heading(heading)}")
         expect["heading"] = heading
         arrival.heading, arrival.heading_at, arrival.heading_asked = heading, engine.now(), False
-    cleared = flight.cleared_ft if flight.cleared_ft is not None else _feet(raw)
-    if vector.altitude_ft < min(cleared, _feet(raw) + 200):
+    if vector.altitude_ft < min(cleared, feet + 200):
         flight.cleared_ft, flight.descent_given = vector.altitude_ft, True
         transition = _transition_ft(engine, airport.ident, faa)
         text = f"descend {'and maintain ' if faa else ''}{say.level(vector.altitude_ft, transition, faa)}"
@@ -807,7 +847,7 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
             text += f", {engine._pressure(issue, faa)[0]}"
         parts.append(text)
         expect["altitude"] = vector.altitude_ft
-    speed = _speed(arrival, vector.stage, raw, faa)
+    speed = _speed(arrival, vector.stage, raw, faa, position.along_nm)
     if vector.stage == "intercept":
         parts.append(f"{say.digits(round(position.distance_nm))} miles from touchdown")
         parts.append(f"cleared {arrival.words()}")
@@ -1637,6 +1677,16 @@ def tick(engine, station, issue, raw, variation, callsign):
         # Flying in along final, not across or away from it on the way to an initial fix beyond the airport.
         inbound = abs((raw.get("heading_true", arrival.course_true) - arrival.course_true + 180) % 360 - 180) < 90
         if inbound and (established(position, arrival.final_nm) or inside):
+            above = _feet(raw) - (station.airport.elev_ft + position.along_nm * GLIDE_FT_PER_NM)
+            if above > HIGH_ON_FINAL_FT and position.along_nm > HIGH_TOLD_BEYOND_NM:
+                # Well above the glide path: said once, and the tower waits until the pilot answers ("established",
+                # or "request vectors") or the aircraft comes down to the path.
+                if arrival.high_told:
+                    return None
+                arrival.high_told = True
+                return _reply(
+                    engine, f"{callsign}, you appear well above the glide path, say intentions", event="high_on_approach"
+                )
             return _to_tower(engine, station, callsign)
         return None
     asked = engine.requested_runway(station.airport, issue)  # checked against the wind again: dropped if it fails
