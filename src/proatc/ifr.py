@@ -134,6 +134,8 @@ class Arrival:
     unavailable: bool = False  # no instrument approach, and weather that rules out a visual one
     unavailable_told: bool = False
     high_told: bool = False  # told it is well above the glide path on final
+    closing: bool = False  # turned toward final beyond the sector altitude's circle, the approach clearance to come
+    turned_out: bool = False  # turned out once already for being too high to join the glide path
 
     @property
     def flown(self) -> str:
@@ -799,7 +801,15 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
         vector = replace(vector, altitude_ft=max(vector.altitude_ft, floor))
     feet = _feet(raw)
     cleared = flight.cleared_ft if flight.cleared_ft is not None else feet
-    high = vector.stage == "intercept" and (too_high_ft(position, feet, vector.altitude_ft, airport.elev_ft) or 0) > 0
+    # Held up by the terrain's floor beyond the circle, above the altitude the approach is joined at inside it.
+    raised = beyond and vector.altitude_ft > arrival.platform_ft
+    excess = too_high_ft(position, feet, vector.altitude_ft, airport.elev_ft) if vector.stage == "intercept" else 0
+    # No answer: the glide path is below the joining altitude where final would be joined. At the floor out here that
+    # is too high, and the approach's own altitude waits inside the circle. At the approach's own altitude it is the
+    # approach as published over high ground, flown as it is.
+    high = vector.stage == "intercept" and (excess > 0 if excess is not None else raised)
+    lower = max(pattern_ft(arrival.platform_ft, safe), floor)  # what a leg flown out again is flown at
+    closing = False
     if high and inbound and (position.along_nm > arrival.final_nm + TURN_OUT_WITHIN_NM or beyond):
         # Too high to get down to the glide path from here, with miles still to go: down first, and cleared for the
         # approach once it can make it. Never cleared from where it could only meet the path from above.
@@ -808,9 +818,16 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
         # Turned out already, or on a downwind leg: it flies on, away from the airport and down to the level it was
         # given, until an intercept from where it is can make the glide path. Nothing new to say meanwhile.
         return None if not first else _reply(engine, f"{callsign}, {lead.rstrip(', ')}") if lead else None
-    elif high:
-        # Close in, or turning in from a base leg: out again, to lose the height, for a new base.
-        vector = turn_out(position, arrival.course_true, max(pattern_ft(arrival.platform_ft, safe), floor), again=True)
+    elif high and raised:
+        # On a base leg, beyond the circle: turned toward final at the floor, once, without the approach clearance.
+        # That comes inside the circle, with the descent to the altitude the approach is joined at.
+        closing = True
+        vector = Vector("base", vector.heading_true, vector.altitude_ft, again=not arrival.closing)
+    elif high and lower < feet - 200 and not arrival.turned_out:
+        # Close in, or turning in from a base leg: out again, once, to lose the height, for a new base. Not where the
+        # leg out is no lower than the aircraft is now (high ground): nothing would be lost on it.
+        arrival.turned_out = True
+        vector = turn_out(position, arrival.course_true, lower, again=True)
         lead = f"{lead}too high to join the glide path, "
     # On the way in, the next descent as the aircraft comes down to the last one given; on a downwind or base leg given
     # beyond the sector altitude's circle, the lower level due inside it.
@@ -832,6 +849,7 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     if arrival.stage is not None and STAGES.index(vector.stage) <= STAGES.index(arrival.stage) and not vector.again and not step:
         return None if not first else _reply(engine, f"{callsign}, {lead.rstrip(', ')}") if lead else None
     arrival.stage = vector.stage
+    arrival.closing = closing
 
     parts: list[str] = []
     expect: dict = {}

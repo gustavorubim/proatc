@@ -152,3 +152,47 @@ def test_back_on_the_glide_path_the_hand_off_follows(world):  # noqa: F811
     assert engine.tick(approach, ISSUE, out(8, 4000)).event == "high_on_approach"
     handed = engine.tick(approach, ISSUE, out(7.5, 2700))  # the path is at 2,690 ft
     assert handed.text == f"{CALLSIGN}, contact Eastfield Tower one one niner decimal one"
+
+
+def test_a_base_leg_beyond_the_circle_is_turned_toward_final_and_cleared_inside_it(world):  # noqa: F811
+    db, engine, _ = world
+
+    class Floors:
+        def airport_safe_ft(self, ident):
+            return 3000
+
+        def grid_safe_ft(self, lat, lon):
+            return 9000  # high ground in the same one-degree cell, far from the airport
+
+        def position(self, *args):
+            return None
+
+    engine.navfix = Floors()
+    north = 12 / 60
+    engine, approach, first = arrive(world, at(51.0 + north, THRESHOLD[1] + 26 * NM_LON, feet=9000, heading=180))
+    assert "cleared" not in first.text and engine.flight.arrival.stage == "base"
+    # Three miles from the centreline, 26 miles out, at the floor: the path where final would be joined is far below.
+    close = at(51.0 + 3 / 60, THRESHOLD[1] + 26 * NM_LON, feet=9000, heading=180)
+    turned = engine.tick(approach, ISSUE, close)
+    assert turned.text == f"{CALLSIGN}, turn right heading two four zero"  # toward final, and no approach clearance
+    engine.flight.pending = None
+    assert engine.tick(approach, ISSUE, close) is None  # said once
+    inside = at(51.0 + 2 / 60, THRESHOLD[1] + 23.5 * NM_LON, feet=9000, heading=240)
+    cleared = engine.tick(approach, ISSUE, inside)
+    assert "descend altitude two thousand five hundred feet" in cleared.text
+    assert "cleared I L S approach runway two seven" in cleared.text
+
+
+def test_an_aircraft_is_turned_out_for_height_only_once(world):  # noqa: F811
+    engine, approach, _ = arrive(world, out(35, 13000))
+    final_nm = engine.flight.arrival.final_nm
+    assert "too high" in engine.tick(approach, ISSUE, out(final_nm + 1.5, 7000)).text
+    engine.flight.pending = None
+    heading = engine.flight.arrival.heading
+    back = engine.tick(approach, ISSUE, out(final_nm + 8, 3500, heading=heading))
+    assert "cleared I L S" in back.text or "turn" in back.text
+    engine.flight.pending = None
+    # Still high the second time round: cleared as it is, and told on final, not sent round again and again.
+    engine.flight.arrival.stage = "base"
+    again = engine.tick(approach, ISSUE, out(final_nm + 1.5, 7000))
+    assert again is None or "too high" not in again.text
