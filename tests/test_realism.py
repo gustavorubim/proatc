@@ -635,8 +635,8 @@ def test_a_runway_the_airport_calls_9r_is_found_in_a_taxi_network_that_calls_it_
     net = engine.network(airport)
     assert sorted(net.runway_nodes) == ["9L/27R", "9R/27L"]
     assert route_to_runway(net, *APRON, "9R", nine_right, "props") is not None
-    # 9L's only entry is at its far end, the threshold of 27R: no runway left ahead to depart on.
-    assert route_to_runway(net, *APRON, "9L", (51.004, -1.02)) is None
+    # 9L's only entry is at its far end, the threshold of 27R: no runway left ahead, so a backtrack from there.
+    assert route_to_runway(net, *APRON, "9L", (51.004, -1.02)).backtrack
     to_27r = route_to_runway(net, *APRON, "27R", (51.004, -0.98))
     assert to_27r.crossings == ["9R/27L"]  # the runway crossed on the way is still known as one
     assert use_airport_runway_names(as_written, ["09L", "27R"]) is as_written  # nothing to rename: untouched

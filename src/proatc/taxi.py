@@ -15,6 +15,7 @@ UNNAMED = ("none", "null")  # what some scenery tools write for a taxiway with n
 FULL_LENGTH_M = 400  # runway entries this close to the threshold count as full-length departures
 ON_CENTRELINE_M = 25  # an aircraft this near a runway's centreline is on the runway, not beside it
 # The runway an intersection departure must leave ahead, by stand category: no less than a type of that kind needs.
+BACKTRACK_COST = 3  # a metre of runway backtracked weighs as much as this many of taxiway: it holds the runway
 INTERSECTION_NEEDS_M = {"heavy": 2800, "jets": 1800, "turboprops": 1000, "props": 500}
 
 
@@ -76,6 +77,7 @@ class Route:
     points: list[tuple[float, float]] = field(default_factory=list)  # (lat, lon) along the route, for the map
     crossing_index: dict[str, int] = field(default_factory=dict)  # crossed runway -> where in `points` it is met
     available_m: float | None = None  # for a departure from an intersection: the runway left ahead of it
+    backtrack: bool = False  # ends where the runway is entered and taxied along to the threshold (a tower clearance)
 
 
 def end_key(ident: str) -> str:
@@ -239,6 +241,13 @@ def route_to_runway(
     route = _route(net, start, intersections, runway_name) if intersections else None
     if route is not None:
         route.available_m = span - distance_nm(*threshold, *route.points[-1]) * 1852
+        return route
+    # Otherwise the runway is entered where the taxiways reach it and taxied along to the threshold: a backtrack,
+    # which the tower clears when the runway is free. The entry nearest the threshold, as long as the way there is
+    # not much longer.
+    route = _route(net, start, {n: gap[n] * BACKTRACK_COST for n in entries}, runway_name)
+    if route is not None:
+        route.backtrack = True
     return route
 
 

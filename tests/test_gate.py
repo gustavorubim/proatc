@@ -213,11 +213,11 @@ SPLIT = """1201 52.0000 -1.0000 both 0 apron
 
 
 def test_a_taxi_route_is_never_made_along_a_runway():
-    # Backtracking needs its own clearance from the tower, read back and checked against traffic: not modelled, so
-    # where the taxiways meet only on the runway there is no route (the airport is a known limit), as before.
+    # Along a runway is the tower's to clear, as a backtrack (test_backtrack.py): a taxi route ends where it is entered.
     network = parse_taxi(SPLIT)
     assert route_to_point(network, 52.0, -1.0, (52.0, -0.9899)) is None
-    assert route_to_runway(network, 52.0, -1.0, "27", (52.001, -0.99)) is None  # not along 09/27 to its far end
+    to_27 = route_to_runway(network, 52.0, -1.0, "27", (52.001, -0.99))
+    assert to_27.backtrack and to_27.points[-1] == (52.001, -1.0)  # entered at its far end, not taxied along it
 
 
 def test_a_taxiway_the_scenery_names_none_is_not_spoken_as_none():
@@ -506,7 +506,7 @@ def test_without_a_taxiway_to_the_threshold_a_departure_starts_from_an_intersect
     assert 2200 < route.available_m < 2300  # the runway left ahead, which the controller says
     # The west end leaves no runway ahead for 27: never an entry there.
     far = [row for row in rows if "taxiway_E A" not in row]
-    assert route_to_runway(parse_taxi(far), 52.0, -1.0, "27", (52.001, -0.99)) is None
+    assert route_to_runway(parse_taxi(far), 52.0, -1.0, "27", (52.001, -0.99)).backtrack  # a backtrack from there
 
 
 def test_an_intersection_departure_leaves_the_runway_the_aircraft_needs():
@@ -520,7 +520,7 @@ def test_an_intersection_departure_leaves_the_runway_the_aircraft_needs():
 1202 1 2 twoway runway 09/27""".splitlines()
     net = parse_taxi(rows)
     assert route_to_runway(net, 52.0, -1.009, "27", (52.001, -0.99), "props") is not None
-    assert route_to_runway(net, 52.0, -1.009, "27", (52.001, -0.99), "jets") is None
+    assert route_to_runway(net, 52.0, -1.009, "27", (52.001, -0.99), "jets").backtrack
 
 
 def test_an_intersection_departure_is_said_with_the_runway_left(tmp_path):
@@ -618,3 +618,20 @@ def test_approach_hands_a_flight_to_tower_only_when_it_flies_in_along_final(worl
     assert ifr.tick(engine, approach, ISSUE, outbound, 0.0, CALLSIGN) is None  # was: "contact Eastfield Tower"
     inbound = at(51.0, 5.50, feet=1800, heading=270)
     assert ifr.tick(engine, approach, ISSUE, inbound, 0.0, CALLSIGN).text.startswith(f"{CALLSIGN}, contact Eastfield Tower")
+
+
+def test_a_taxiway_passing_just_beyond_a_runway_end_does_not_cross_it():
+    # Found replaying a real flight at Boston: the route to 33L passes 28 m beyond the end of 4L, and 0.17 called that
+    # a crossing ("hold short runway four left", then a runway incursion). On the runway itself, it is one.
+    from proatc.navdata import Runway, distance_nm
+
+    engine = Engine(None, seed=1)
+    runway = Runway("09", 52.0, -1.01, "27", 52.0, -0.99, distance_nm(52.0, -1.01, 52.0, -0.99) * 1852, 1)
+    beyond = [
+        (51.999, -0.9896),
+        (52.001, -0.9896),
+        (52.002, -0.9896),
+    ]  # 28 m east of the end of 27's runway, north across the line
+    assert engine._passes_over(runway, [(51.998, -0.9896), *beyond]) is None
+    on_it = [(51.999, -0.9902), (52.001, -0.9902), (52.002, -0.9902)]  # 14 m inside the end
+    assert engine._passes_over(runway, [(51.998, -0.9902), *on_it]) is not None
