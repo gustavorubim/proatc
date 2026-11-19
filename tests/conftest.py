@@ -2,7 +2,14 @@
 
 import pytest
 
-from proatc import flightlog
+from proatc import atis, flightlog
+
+
+@pytest.fixture(autouse=True)
+def no_runways_from_another_test():
+    """What one test's engine found of an airport's runways, or its plan's runways, is not another test's world:
+    test worlds reuse the same idents (EGXX) with different taxiways."""
+    atis.forget_runways()
 
 
 @pytest.fixture(autouse=True)
