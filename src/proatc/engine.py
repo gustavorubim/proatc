@@ -9,6 +9,7 @@ may then fall back to a free-form reply.
 
 from __future__ import annotations
 
+import math
 import random
 import re
 import threading
@@ -18,11 +19,12 @@ from enum import Enum
 
 from . import answers, chart, ifr, questions, traffic, vfr
 from . import phraseology as say
-from .atis import Issue, runways_in_use, split_runways, uses_faa_style
+from .atis import Issue, close_runways, forget_runways, plan_runways, runways_in_use, split_runways, uses_faa_style
 from .intents import Intent
 from .navdata import Airport, AirportDB, Station, bearing, distance_nm, expect_station, forget_stations, prefer_airports
 from .taxi import (
     FULL_LENGTH_M,
+    INTERSECTION_NEEDS_M,
     TaxiNetwork,
     aircraft_category,
     assign_stand,
@@ -58,6 +60,9 @@ READBACK_WORDS = {
 REPOSITION_NM = 2.0  # on the ground, then on the ground this far away at the next look: the aircraft was moved
 REPOSITION_AIRBORNE_NM = 10.0  # on the ground, then airborne this far away
 ON_RUNWAY_NM = 0.022  # this close to a runway's centreline is on it
+# A runway the taxi network never names counts as reached when a taxiway comes this near its centreline. Further than
+# a holding point (up to 90 m out), so a network that stops at the holding points is not taken for a closed runway.
+REACHED_WITHIN_M = 150
 RUNWAY_END_NM = 0.008  # 15 m: a taxiway passing further beyond a runway's end does not cross it
 HOLDING_SHORT_NM = 0.075  # stopped this close to a runway to be crossed: holding short of it
 CROSSING_FINAL_NM = 3.0  # an aircraft on final this close in keeps a crossing waiting
@@ -188,6 +193,19 @@ def _end(ident: str) -> str:
     return ident.strip().upper().lstrip("0") or "0"
 
 
+def _taxiway_near(network: TaxiNetwork, taxi: set[int], runway) -> bool:
+    """Whether a taxiway node lies within REACHED_WITHIN_M of the runway's centreline."""
+    scale = math.cos(math.radians(runway.lat1))  # a degree of longitude in degrees of latitude, near enough
+    ax, ay, bx, by = runway.lon1 * scale, runway.lat1, runway.lon2 * scale, runway.lat2
+    dx, dy = bx - ax, by - ay
+    for node in taxi:
+        lat, lon = network.nodes[node]
+        along = max(0.0, min(1.0, ((lon * scale - ax) * dx + (lat - ay) * dy) / (dx * dx + dy * dy or 1.0)))
+        if distance_nm(lat, lon, ay + along * dy, (ax + along * dx) / scale) * 1852 <= REACHED_WITHIN_M:
+            return True
+    return False
+
+
 def _squawk(rng: random.Random) -> str:
     while True:
         code = "".join(str(rng.randint(0, 7)) for _ in range(4))
@@ -216,9 +234,11 @@ class Engine:
         self.centers = centers  # centers.CenterIndex or None
         self.navaids = navaids  # procedures.NavaidNames or None
         self.flight = Flight()
+        forget_runways()  # a new session: no plan yet, and nothing known of any airport's taxiways
         self.last_raw: dict = {}  # the latest sim snapshot the engine was shown
         self.lock = threading.RLock()
         self._networks: dict[str, TaxiNetwork] = {}
+        self._closed: dict[str, set[str]] = {}  # airport -> runway ends no taxiway reaches
         self._charts: dict[str, dict] = {}
         self._map_airport: tuple[float, float, Airport | None] | None = None
         self._rerouted_at: tuple[float, float] | None = None
@@ -255,6 +275,24 @@ class Engine:
             self.flight.plan = plan
             self.flight.route_points = None
             prefer_airports([plan.origin, plan.destination, plan.alternate] if plan else [])
+            self.share_plan_runways()
+
+    def share_plan_runways(self) -> None:
+        """Give the ATIS the runways the plan names, so that the airport is taken to use them where the wind allows."""
+        plan = self.flight.plan
+        if plan is None:
+            plan_runways(None, None, None, None)
+            return
+        origin, destination = self.db.airport(plan.origin or ""), self.db.airport(plan.destination or "")
+        for airport in (origin, destination):
+            if airport:
+                self.closed_runways(airport)  # so that their ATIS leaves them out from the first time it is heard
+        plan_runways(
+            plan.origin,
+            self._planned_runway(origin, "departure"),
+            plan.destination,
+            self._planned_runway(destination, "arrival"),
+        )
 
     def route(self) -> list[tuple[str, float, float]]:
         """The filed route as every waypoint it passes, with positions. Worked out once per plan."""
@@ -278,9 +316,55 @@ class Engine:
                 self.centers.forget()
             self._rng = random.Random(self.seed)  # a new flight begins the same sequence again
 
+    def active_runways(self, airport: Airport, issue: Issue | None = None, weather=None) -> list[str]:
+        """The runways in use, as the ATIS gives them: never one no taxiway reaches while another remains."""
+        weather = issue.weather if issue else weather
+        if weather is None:
+            return []
+        self.closed_runways(airport)  # known before the choice, and from then on to the ATIS too
+        return runways_in_use(airport, weather.wind_dir_true, weather.wind_kt)
+
+    def closed_runways(self, airport: Airport) -> set[str]:
+        """Runway ends the scenery's taxiways do not reach: a runway drawn but closed, or one left out of the taxi
+        network. A runway the network has as a runway with no taxiway joining it is one; so is a runway the network
+        never names with no taxiway near it. One the network does not name but a taxiway comes near is not: many
+        sceneries leave runways untagged. With no taxi network at all, no runway is known to be closed.
+        apt.dat has no mark for a closed runway: a runway closed for good is taken out of the scenery or drawn
+        without the taxiways that joined it, which is what is looked for here."""
+        if airport.ident not in self._closed:
+            network, closed = self.network(airport), set()
+            if network.usable:
+                taxi = network.taxi_nodes()
+                joined = {
+                    _end(end): bool(nodes & taxi) for name, nodes in network.runway_nodes.items() for end in name.split("/")
+                }
+                for runway in airport.runways:
+                    known = [joined[_end(end)] for end in (runway.end1, runway.end2) if _end(end) in joined]
+                    if not (any(known) if known else _taxiway_near(network, taxi, runway)):
+                        closed.update((runway.end1, runway.end2))
+            self._closed[airport.ident] = closed
+            close_runways(airport.ident, closed)
+        return self._closed[airport.ident]
+
+    def _planned_runway(self, airport: Airport | None, purpose: str) -> str | None:
+        """The plan's departure runway at its origin, or its arrival runway at its destination, as the airport names
+        it: a plan's '01L' is the airport's '1L'."""
+        plan = self.flight.plan
+        if plan is None or airport is None:
+            return None
+        ident, runway = (
+            (plan.origin, plan.departure_runway) if purpose == "departure" else (plan.destination, plan.arrival_runway)
+        )
+        if not runway or (ident or "").upper() != airport.ident:
+            return None
+        return next((end for rw in airport.runways for end in (rw.end1, rw.end2) if _end(end) == _end(runway)), None)
+
     @staticmethod
-    def active_runways(airport: Airport, issue: Issue | None) -> list[str]:
-        return runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
+    def _long_enough(airport: Airport, idents: list[str], raw: dict) -> list[str]:
+        """Of these runways, those as long as an aircraft of this kind needs; all of them when none is."""
+        need = INTERSECTION_NEEDS_M[aircraft_category(raw.get("aircraft_type"))]
+        lengths = {end: rw.length_m for rw in airport.runways for end in (rw.end1, rw.end2)}
+        return [ident for ident in idents if lengths.get(ident, 0.0) >= need] or idents
 
     def network(self, airport: Airport) -> TaxiNetwork:
         if airport.ident not in self._networks:
@@ -337,19 +421,16 @@ class Engine:
         return asked[1]
 
     def _departure_runway(self, airport: Airport, issue: Issue | None, raw: dict) -> str | None:
-        """The runway the pilot asked for, else the departure runway whose threshold is nearest the aircraft."""
+        """The runway the pilot asked for, else the plan's when it is in use, else the departure runway whose threshold
+        is nearest the aircraft, of those long enough for it."""
         if self.requested_runway(airport, issue):
             return self.requested_runway(airport, issue)
-        active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
-        # A runway the scenery's taxi network has as a runway, with no taxiway joining it (a grass strip beside the
-        # main runway, a closed one), is not given for departure while another runway in use remains. A runway the
-        # network does not mention at all is not known to be out of reach: many sceneries leave runways untagged.
-        network = self.network(airport)
-        if network.usable:
-            taxi = network.taxi_nodes()
-            tagged = {_end(end): bool(nodes & taxi) for name, nodes in network.runway_nodes.items() for end in name.split("/")}
-            active = [ident for ident in active if tagged.get(_end(ident), True)] or active
-        active = split_runways(active)[1]
+        # Runways no taxiway reaches (a grass strip beside the main runway, a closed one) are already left out.
+        active = self.active_runways(airport, issue)
+        planned = self._planned_runway(airport, "departure")
+        if planned in active:
+            return planned
+        active = self._long_enough(airport, split_runways(active)[1], raw)
         if not active:
             return None
         if "lat" not in raw:
@@ -1326,7 +1407,9 @@ class Engine:
         return None
 
     def _landing_runway(self, airport: Airport, issue: Issue | None, raw: dict, intent: Intent) -> str | None:
-        active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
+        """The runway the pilot asked for; the one the approach brought the flight to; the one already given or named;
+        the plan's when it is in use; else the landing runway whose threshold is nearest, of those long enough."""
+        active = self.active_runways(airport, issue)
         if not active:
             return None
         if self.requested_runway(airport, issue):
@@ -1344,7 +1427,10 @@ class Engine:
             return self.flight.runway
         if intent.runway in active:
             return intent.runway
-        landing = split_runways(active)[0]
+        planned = self._planned_runway(airport, "arrival")
+        if planned in active:
+            return planned
+        landing = self._long_enough(airport, split_runways(active)[0], raw)
         if "lat" not in raw:
             return landing[0]
         return min(landing, key=lambda ident: distance_nm(raw["lat"], raw["lon"], *self._threshold(airport, ident)))

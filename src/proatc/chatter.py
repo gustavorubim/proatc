@@ -12,7 +12,7 @@ import random
 
 from . import phraseology as say
 from . import vfr
-from .atis import runways_in_use, split_runways, uses_faa_style
+from .atis import split_runways, uses_faa_style
 
 MODES = ("off", "some", "busy")
 # Average seconds between exchanges with chatter set to "some"; "busy" halves it.
@@ -93,7 +93,7 @@ def _self_announced(station, issue, engine, rng: random.Random, own_callsign: st
     """Another aircraft's blind call at an airfield with no controller. Nobody answers it."""
     airport, place = station.airport, station.place
     callsign = light_callsign(airport.ident, rng, own_callsign)
-    active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
+    active = engine.active_runways(airport, issue)
     runway = f" runway {say.runway(active[0])}" if active else ""
     side = vfr.pattern_side(engine, airport, active[0]) if active else "left"
     miles = say.digits(rng.choice((5, 8, 10, 12)))
@@ -118,7 +118,7 @@ def _informed(station, issue, engine, rng: random.Random, own_callsign: str) -> 
     """An exchange with an information officer: information, and what the pilot intends."""
     airport = station.airport
     callsign = light_callsign(airport.ident, rng, own_callsign)
-    active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if issue else []
+    active = engine.active_runways(airport, issue)
     wind = engine._wind(issue, 0.0, False) if issue else "wind calm"
     pressure = engine._pressure(issue, False)[0] if issue else ""
     runway = say.runway(active[0]) if active else None
@@ -157,7 +157,7 @@ def exchange(station, issue, engine, rng: random.Random, own_callsign: str = "")
     side = rng.choice(("left", "right"))
     options: list[tuple[str, str]] = []  # (instruction, readback); the readback gets the callsign appended
 
-    active = runways_in_use(airport, issue.weather.wind_dir_true, issue.weather.wind_kt) if airport and issue else []
+    active = engine.active_runways(airport, issue) if airport else []
     landing, departing = split_runways(active) if active else ([], [])
     wind = engine._wind(issue, 0.0, faa) if issue else ""
     pressure = engine._pressure(issue, faa)[0] if issue else ""

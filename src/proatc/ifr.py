@@ -208,10 +208,7 @@ def clearance(engine, station, issue, raw, callsign, hello, faa, atis_part, on_c
     from .engine import Reply, _squawk
 
     flight, plan, airport = engine.flight, engine.flight.plan, station.airport
-    runway = engine._departure_runway(airport, issue, raw)
-    asked = engine.requested_runway(airport, issue)
-    if plan.departure_runway and issue and plan.departure_runway in engine.active_runways(airport, issue) and not asked:
-        runway = plan.departure_runway
+    runway = engine._departure_runway(airport, issue, raw)  # the one asked for, else the plan's where the wind allows
     procedures = engine.procedures(airport.ident)
     sid = choose_sid(procedures, runway, plan.route, plan.sid)
     destination = engine.db.airport(plan.destination)
@@ -674,14 +671,15 @@ def _flight_following(engine, intent, station, issue, callsign, hello):
 
 
 def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
-    flight, airport, plan = engine.flight, station.airport, engine.flight.plan
+    flight, airport = engine.flight, station.airport
     active = engine.active_runways(airport, issue)
     if not active:
         return None
+    planned = engine._planned_runway(airport, "arrival")
     if engine.requested_runway(airport, issue):
         runway = engine.requested_runway(airport, issue)
-    elif plan and plan.arrival_runway in active and plan.destination == airport.ident:
-        runway = plan.arrival_runway
+    elif planned in active:
+        runway = planned
     else:
         runway = engine._landing_runway(airport, issue, raw, intent)
     procedures = engine.procedures(airport.ident)
@@ -1116,6 +1114,7 @@ def _divert(engine, intent, station, raw, variation, callsign, hello):
         base, origin=left_from, destination=target.ident, route=[], sid=None, star=None, departure_runway=None,
         arrival_runway=None, cruise_ft=level, alternate=None,
     )  # fmt: skip
+    engine.share_plan_runways()  # the new plan names no runway: the old one's no longer sets any airport's runways
     flight.rules, flight.destination = "IFR", target.spoken_name
     flight.arrival, flight.star, flight.star_procedure, flight.constraints = None, None, None, None
     flight.told_approach, flight.told_sector, flight.descent_given, flight.direct_to = False, None, False, None

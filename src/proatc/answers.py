@@ -16,7 +16,7 @@ import math
 
 from . import ifr
 from . import phraseology as say
-from .atis import runways_in_use, split_runways, uses_faa_style
+from .atis import RUNWAY_CROSSWIND_KT, RUNWAY_TAILWIND_KT, split_runways, uses_faa_style, wind_on_runway
 from .navdata import distance_nm
 from .procedures import choose_approach
 from .weather import from_snapshot
@@ -43,12 +43,10 @@ BELONGS = {
     "request_deviation": "radar", "request_approach": "radar", "request_visual": "radar", "request_diversion": "radar",
     "request_flight_following": "radar", "request_vectors": "radar",
 }  # fmt: skip
-RUNWAY_TAILWIND_KT = 5  # a runway asked for is given with no more tailwind than this
 NEAR_NM = 30  # the sim's weather at the aircraft stands for an airport's this close
 SHORT_RUNWAY_M = 1200  # shorter than this and well short of the airport's longest: not for an airliner
 HANDOFF_AGAIN_S = 60  # after "unable" to a hand-off, how long before it is given again
 CANCEL_BELOW_MS = 15  # a takeoff is not cancelled by a plain "unable" faster than this (the tower's own threshold)
-RUNWAY_CROSSWIND_KT = 25
 
 
 def _reply(engine, text: str, expect: dict | None = None):
@@ -86,7 +84,7 @@ def weather_at(engine, airport, raw: dict):
 def runways_at(engine, airport, issue, raw: dict) -> list[str]:
     """The runways in use at an airport, from this controller's ATIS when it is the airport's own."""
     weather = issue.weather if issue else weather_at(engine, airport, raw)
-    return runways_in_use(airport, weather.wind_dir_true, weather.wind_kt) if weather else []
+    return engine.active_runways(airport, weather=weather)
 
 
 def _level_ident(engine, station) -> str | None:
@@ -434,8 +432,7 @@ def acceptable_runway(airport, runway: str, weather, raw: dict | None = None) ->
         return "wind not known"
     if weather.wind_kt < 1:
         return None
-    angle = math.radians(weather.wind_dir_true - ends[runway])
-    tail, cross = -weather.wind_kt * math.cos(angle), abs(weather.wind_kt * math.sin(angle))
+    tail, cross = wind_on_runway(ends[runway], weather.wind_dir_true, weather.wind_kt)
     if tail > RUNWAY_TAILWIND_KT:
         return f"tailwind {say.digits(round(tail))} knots"
     if cross > RUNWAY_CROSSWIND_KT:
