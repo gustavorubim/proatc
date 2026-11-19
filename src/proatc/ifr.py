@@ -803,14 +803,19 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
         # Too high to get down to the glide path from here, with miles still to go: down first, and cleared for the
         # approach once it can make it. Never cleared from where it could only meet the path from above.
         vector = Vector("descend", None, vector.altitude_ft)
+    elif high and arrival.stage == "downwind":
+        # Turned out already, or on a downwind leg: it flies on, away from the airport and down to the level it was
+        # given, until an intercept from where it is can make the glide path. Nothing new to say meanwhile.
+        return None if not first else _reply(engine, f"{callsign}, {lead.rstrip(', ')}") if lead else None
     elif high:
-        # Close in, or turning in from a downwind or base leg: out again, to lose the height, for a new base.
+        # Close in, or turning in from a base leg: out again, to lose the height, for a new base.
         vector = turn_out(position, arrival.course_true, max(pattern_ft(arrival.platform_ft, safe), floor), again=True)
         lead = f"{lead}too high to join the glide path, "
-    # On the way in, the next descent as the aircraft comes down to the last one given.
+    # On the way in, the next descent as the aircraft comes down to the last one given; on a downwind or base leg given
+    # beyond the sector altitude's circle, the lower level due inside it.
     step = (
-        vector.stage == "descend"
-        and arrival.stage == "descend"
+        vector.stage == arrival.stage
+        and vector.stage in ("descend", "downwind", "base")
         and vector.altitude_ft < cleared
         and (high or (vector.altitude_ft <= cleared - STEP_DOWN_FT and feet <= cleared + NEXT_STEP_WITHIN_FT))
     )

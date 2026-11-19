@@ -57,6 +57,14 @@ def test_too_high_close_in_is_turned_out_for_the_descent(world):  # noqa: F811
     assert turned.text.startswith(f"{CALLSIGN}, too high to join the glide path, turn ")
     assert "cleared" not in turned.text
     assert "heading" in turned.expect and engine.flight.arrival.stage == "downwind"
+    engine.flight.pending = None  # read back
+    # Flying out, still too high: not turned out again and again; nothing new is said.
+    heading = turned.expect["heading"]
+    for miles, feet in ((final_nm + 2.5, 6800), (final_nm + 3.5, 6400)):
+        assert engine.tick(approach, ISSUE, out(miles, feet, heading=heading)) is None
+    # Far enough out and low enough: turned back in, and cleared for the approach.
+    back = engine.tick(approach, ISSUE, out(final_nm + 8, 3500, heading=heading))
+    assert "cleared I L S approach runway two seven" in back.text
 
 
 def test_never_cleared_from_above_the_floor_beyond_the_sector_altitude_circle(world):  # noqa: F811
@@ -79,6 +87,30 @@ def test_never_cleared_from_above_the_floor_beyond_the_sector_altitude_circle(wo
     for miles in (27, 26.5, 26):
         reply = engine.tick(approach, ISSUE, out(miles, 11500))
         assert reply is None or "cleared" not in reply.text  # still too high: no approach clearance
+
+
+def test_a_leg_given_beyond_the_sector_altitude_circle_is_brought_down_inside_it(world):  # noqa: F811
+    db, engine, _ = world
+
+    class Floors:
+        def airport_safe_ft(self, ident):
+            return 7000
+
+        def grid_safe_ft(self, lat, lon):
+            return 6500
+
+        def position(self, *args):
+            return None
+
+    engine.navfix = Floors()
+    south = 5 / 60  # five miles south of the extended centreline
+    engine, approach, first = arrive(world, at(51.0 - south, THRESHOLD[1] + 27 * NM_LON, feet=9000, heading=270))
+    assert first.expect["altitude"] == 7000 and "heading" in first.expect  # a leg toward final, at the floor out here
+    engine.flight.pending = None
+    stage = engine.flight.arrival.stage
+    inside = engine.tick(approach, ISSUE, at(51.0 - south, THRESHOLD[1] + 23 * NM_LON, feet=7000, heading=270))
+    assert "descend altitude two thousand five hundred feet" in inside.text  # inside the circle: down to the approach's
+    assert engine.flight.arrival.stage == stage
 
 
 def test_well_above_the_glide_path_on_final_is_told_and_the_tower_waits(world):  # noqa: F811
