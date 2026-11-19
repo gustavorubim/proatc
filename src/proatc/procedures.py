@@ -109,11 +109,13 @@ class Procedure:
         route, then the common part, then the part for the landing runway.
         """
         runway_parts, common, enroute = [], [], []
+        # The procedure data writes "RW01R", the airport data "1R", a flight plan either: compared without the zero.
+        wanted_runway = runway.strip().upper().lstrip("0") if runway else None
         for name, legs in self.transitions.items():
             if name.startswith("RW"):
-                ident = name[2:]
+                ident = name[2:].lstrip("0")
                 ends = {ident[:-1] + side for side in "LRC"} | {ident[:-1]} if ident.endswith("B") else {ident}
-                if runway is None or runway in ends:
+                if wanted_runway is None or wanted_runway in ends:
                     runway_parts.append(legs)
             elif name in ("ALL", ""):
                 common.append(legs)
