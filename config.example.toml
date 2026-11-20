@@ -44,6 +44,9 @@ copilot = "off"
 traffic = true
 # Other aircraft heard on the frequency: "off", "some" or "busy". Sound only; they are not in the sim.
 chatter = "some"
+# On real weather, use the runways the real airport is using now, where it publishes a digital ATIS (about 75
+# airports in the United States). Only the airport's code is sent, to atis.info.
+real_atis = true
 
 # The language model on your own machine instead of OpenRouter (Ollama, LM Studio): under [llm] set
 #   provider = "local"

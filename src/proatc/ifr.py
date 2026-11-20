@@ -29,7 +29,7 @@ from dataclasses import dataclass, replace
 from . import atis as atis_text
 from . import holding, restrictions, traffic, vfr
 from . import phraseology as say
-from .atis import uses_faa_style
+from .atis import RunwaysInUse, split_runways, uses_faa_style
 from .intents import Intent
 from .navdata import Airport, bearing, distance_nm, expect_station
 from .procedures import choose_approach, choose_sid, choose_star, circling_approach, route_fixes, spoken_name
@@ -685,8 +685,8 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
     planned = engine._planned_runway(airport, "arrival")
     if engine.requested_runway(airport, issue):
         runway = engine.requested_runway(airport, issue)
-    elif planned in active:
-        runway = planned
+    elif planned in (split_runways(active)[0] if isinstance(active, RunwaysInUse) else active):
+        runway = planned  # the plan's, when it is one of those landing: with a real ATIS, not one that only departs
     else:
         runway = engine._landing_runway(airport, issue, raw, intent)
     procedures = engine.procedures(airport.ident)

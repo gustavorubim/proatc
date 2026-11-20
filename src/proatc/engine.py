@@ -19,7 +19,17 @@ from enum import Enum
 
 from . import answers, chart, ifr, questions, traffic, vfr
 from . import phraseology as say
-from .atis import Issue, close_runways, forget_runways, plan_runways, runways_in_use, split_runways, uses_faa_style
+from .atis import (
+    Issue,
+    RunwaysInUse,
+    close_runways,
+    forget_runways,
+    plan_runways,
+    real_runways,
+    runways_in_use,
+    split_runways,
+    uses_faa_style,
+)
 from .intents import Intent
 from .navdata import Airport, AirportDB, Station, bearing, distance_nm, expect_station, forget_stations, prefer_airports
 from .taxi import (
@@ -218,8 +228,13 @@ class Engine:
     def __init__(
         self, db: AirportDB, seed: int | None = None, procedures=None, centers=None, navaids=None, clock=None,
         navfix=None, metars=None, holding: str = "never", traffic: bool = True, airspace=None, airways=None,
+        real_atis=None,
     ):  # fmt: skip
         self.db = db
+        # datis.RealAtis: the runways airports are really using, from their real digital ATIS. Used on real weather
+        # only: with weather the pilot has set, the real airport's runways are not this one's.
+        self.real_atis = real_atis
+        self._real_weather = False  # whether the sim was last seen on real weather
         self.airways = airways  # airways.Airways: the waypoints along each airway
         self.airspace = airspace  # airspace.AirspaceIndex: control zones, class B/C/D, restricted areas
         self._zones: dict = {}  # airport -> its control zone
@@ -291,6 +306,8 @@ class Engine:
         for airport in (origin, destination):
             if airport:
                 self.closed_runways(airport)  # so that their ATIS leaves them out from the first time it is heard
+                if self.real_atis is not None:
+                    self.real_atis.runways(airport)  # asked for now, so that it is known by the time it is needed
         plan_runways(
             plan.origin,
             self._planned_runway(origin, "departure"),
@@ -320,13 +337,27 @@ class Engine:
                 self.centers.forget()
             self._rng = random.Random(self.seed)  # a new flight begins the same sequence again
 
-    def active_runways(self, airport: Airport, issue: Issue | None = None, weather=None) -> list[str]:
-        """The runways in use, as the ATIS gives them: never one no taxiway reaches while another remains."""
+    def active_runways(self, airport: Airport, issue: Issue | None = None, weather=None, raw: dict | None = None) -> list[str]:
+        """The runways in use, as the ATIS gives them: the ones the airport's real ATIS gives where that is known;
+        never one no taxiway reaches while another remains. `raw`: the sim's state, from a caller the engine has
+        not been shown it by (the ATIS broadcast)."""
         weather = issue.weather if issue else weather
         if weather is None:
             return []
         self.closed_runways(airport)  # known before the choice, and from then on to the ATIS too
+        self.real_runways(airport, raw)
         return runways_in_use(airport, weather.wind_dir_true, weather.wind_kt)
+
+    def real_runways(self, airport: Airport, raw: dict | None = None) -> None:
+        """Tell the ATIS what the airport's real ATIS says of its runways: on real weather, where it has one."""
+        if self.real_atis is None:
+            real_runways(airport.ident, None)  # switched off: what was known of it is no longer used
+            return
+        raw = raw if raw is not None else self.last_raw
+        if "wx_source" in raw:
+            self._real_weather = raw["wx_source"] == 1
+        found = self.real_atis.runways(airport)  # never waits: what is known now, and asked for when it is not
+        real_runways(airport.ident, found if self._real_weather else None)
 
     def closed_runways(self, airport: Airport) -> set[str]:
         """Runway ends the scenery's taxiways do not reach: a runway drawn but closed, or one left out of the taxi
@@ -432,7 +463,8 @@ class Engine:
         # Runways no taxiway reaches (a grass strip beside the main runway, a closed one) are already left out.
         active = self.active_runways(airport, issue)
         planned = self._planned_runway(airport, "departure")
-        if planned in active:
+        # The plan's runway, when it is one of those departing: with a real ATIS, not one that only lands.
+        if planned in (split_runways(active)[1] if isinstance(active, RunwaysInUse) else active):
             return planned
         active = self._long_enough(airport, split_runways(active)[1], raw)
         if not active:
@@ -1432,7 +1464,7 @@ class Engine:
         if intent.runway in active:
             return intent.runway
         planned = self._planned_runway(airport, "arrival")
-        if planned in active:
+        if planned in (split_runways(active)[0] if isinstance(active, RunwaysInUse) else active):
             return planned
         landing = self._long_enough(airport, split_runways(active)[0], raw)
         if "lat" not in raw:

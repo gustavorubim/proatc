@@ -91,6 +91,7 @@ def test_settings_changed_in_the_app_survive_a_restart(tmp_path, monkeypatch):
     assert (loaded.ptt.joystick, loaded.ptt.joystick_button) == ("Yoke", 2)
     assert editable_values(loaded)["atc"] == {
         "holding": "never", "copilot": "readbacks", "traffic": True, "chatter": "some", "second_radio": True,
+        "real_atis": True,
     }  # fmt: skip
     config_module.settings_path().write_text('{"config": {"atc": {"holding": "bogus"}}}', encoding="utf-8")
     assert load_config().atc.holding == "sometimes"  # a bad saved value is ignored, not fatal
