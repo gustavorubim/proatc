@@ -873,10 +873,17 @@ def _exchange(config, bridge, db, book, stt, tts, controller, player, ptt, recor
              on_khz=on_khz)  # fmt: skip
 
 
+# What a free-form reply must not say: an instruction, or a permission in any words ("you're good to land",
+# "you may depart", "affirmative"). Nothing else checks a reply the model makes up, so this errs on refusing:
+# refused, the pilot hears "unable, say again" and a way to ask that the rules engine answers.
 INSTRUCTION = re.compile(
     r"\b(cleared|clearance|climb|descend|turn (left|right)|fly heading|heading \w+ \w+ \w+|taxi|cross|line up|take ?off|"
-    r"cleared to land|contact|squawk|hold (short|position|at)|maintain|approved|proceed|direct|vectors?|reduce speed|"
-    r"increase speed|expect|push ?back|start ?up|go around|enter|join|report)\b",
+    r"cleared to land|contact|squawk|hold|maintain|approved|proceed|direct|vectors?|reduce speed|"
+    r"increase speed|expect|push ?back|start ?up|go around|enter|join|report|"
+    r"land|depart|wait|stop|expedite|slow|speed|remain|stay|leave|resume|vacate|follow|orbit|extend|monitor|"
+    r"change to|switch to|set|make (a |an )?(left|right|three sixty|360|orbit|short)|number (one|two|three|four|\d)|"
+    r"go ahead|permission|authori[sz]ed|granted|affirm(ative)?|you('| a)re (good|ok|okay|fine|free|clear|set|able|all set)|"
+    r"you (may|can|should|must|need to|will|are to)|use runway|assigned)\b",
     re.I,
 )
 

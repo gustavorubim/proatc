@@ -14,10 +14,10 @@ Everything is parsed once and cached in data/navfix-v1.pickle until a source fil
 from __future__ import annotations
 
 import math
-import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import cache as cached
 from .config import PROJECT_DIR
 from .navdata import distance_nm
 
@@ -180,19 +180,14 @@ def open_navfix(xplane_root: Path | None, cache: Path = CACHE) -> NavFix:
         return NavFix()
     paths = {name: _find(xplane_root, name) for name in FILES}
     stamp = "|".join(f"{p}:{p.stat().st_size}:{int(p.stat().st_mtime)}" if p else "-" for p in paths.values())
-    if cache.exists():
-        try:
-            saved_stamp, data = pickle.loads(cache.read_bytes())
-            if saved_stamp == stamp:
-                return data
-        except Exception:
-            pass  # unreadable cache: rebuild it
+    data = cached.load(cache, stamp, NavFix, Hold)
+    if data is not None:
+        return data
     data = NavFix(
         fixes=parse_fixes(_lines(paths["earth_fix.dat"]), _lines(paths["earth_nav.dat"])),
         holds=parse_holds(_lines(paths["earth_hold.dat"])),
         msa=parse_msa(_lines(paths["earth_msa.dat"])),
         mora=parse_mora(_lines(paths["earth_mora.dat"])),
     )
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(pickle.dumps((stamp, data)))
+    cached.save(cache, stamp, data)
     return data

@@ -201,13 +201,22 @@ def push_to_talk_key(name: str) -> bool:
 
 
 def private(path: Path) -> None:
-    """Make a file readable by this user only. Windows keeps a user's AppData to that user already; elsewhere a
-    new file is often readable by every user of the machine."""
+    """Make a file (or a folder, and so all in it) readable by this user only. Windows keeps a user's AppData to
+    that user already; elsewhere a new file is often readable by every user of the machine."""
     if os.name != "nt":
         try:
-            path.chmod(0o600)
+            path.chmod(0o700 if path.is_dir() else 0o600)
         except OSError:
             pass  # a file system without permissions: nothing more can be done
+
+
+def private_folder(folder: Path) -> Path:
+    """A folder for what is about this user's flights (journals, logs, reports), made if missing and readable by
+    this user only, with the logs folder it is in."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for path in (folder, folder.parent) if folder.parent.name == "logs" else (folder,):
+        private(path)
+    return folder
 
 
 TOKEN_LIKE = 16  # a part of an address's path this long may be a token (".../v1/chat/completions" has none)

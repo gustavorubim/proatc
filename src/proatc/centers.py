@@ -14,10 +14,10 @@ CONTROLLER_END
 from __future__ import annotations
 
 import math
-import pickle
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import cache as cached
 from .config import PROJECT_DIR
 from .navdata import FREQ_TOLERANCE_KHZ
 
@@ -184,16 +184,11 @@ class CenterIndex:
             return cls([])
         stat = path.stat()
         stamp = f"{path}:{stat.st_size}:{int(stat.st_mtime)}"
-        if cache.exists():
-            try:
-                saved_stamp, centers = pickle.loads(cache.read_bytes())
-                if saved_stamp == stamp:
-                    return cls(centers)
-            except Exception:
-                pass  # unreadable cache: rebuild it
+        centers = cached.load(cache, stamp, Center, Polygon)
+        if centers is not None:
+            return cls(centers)
         centers = parse_atc(path.read_text(encoding="utf-8", errors="ignore").splitlines())
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_bytes(pickle.dumps((stamp, centers)))
+        cached.save(cache, stamp, centers)
         return cls(centers)
 
     def at(self, lat: float, lon: float, altitude_ft: float | None = None) -> Center | None:

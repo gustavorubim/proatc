@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from .audio_io import MIC_RATE, Meter, device_name, play_underruns
+from .config import private, private_folder
 from .radio import SECOND_RADIO_GAIN, transmit
 from .radio_fx import radio_effect
 
@@ -366,9 +367,10 @@ def result(steps: list[dict], total: int) -> dict:
 def keep(outcome: dict, folder: Path) -> Path | None:
     """Keep the last result next to the journals, for the problem report."""
     try:
-        folder.mkdir(parents=True, exist_ok=True)
+        private_folder(folder)
         path = folder / RESULT_FILE
         path.write_text(json.dumps(outcome, indent=1, default=str), encoding="utf-8")
+        private(path)
         return path
     except OSError:
         return None

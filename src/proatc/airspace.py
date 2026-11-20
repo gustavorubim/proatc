@@ -15,11 +15,11 @@ one-degree grid, so asking "what am I in?" every second is cheap.
 from __future__ import annotations
 
 import math
-import pickle
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import cache as cached
 from .config import PROJECT_DIR
 from .navdata import bearing, distance_nm
 
@@ -214,15 +214,10 @@ def open_airspace(xplane_root: Path | None, cache: Path = CACHE) -> AirspaceInde
     if path is None:
         return AirspaceIndex()
     stamp = f"{path}:{path.stat().st_size}:{int(path.stat().st_mtime)}"
-    if cache.exists():
-        try:
-            saved_stamp, spaces = pickle.loads(cache.read_bytes())
-            if saved_stamp == stamp:
-                return AirspaceIndex(spaces)
-        except Exception:
-            pass  # unreadable cache: rebuild it
+    spaces = cached.load(cache, stamp, Airspace)
+    if spaces is not None:
+        return AirspaceIndex(spaces)
     with open(path, encoding="utf-8", errors="ignore") as handle:
         spaces = parse_openair(handle)
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(pickle.dumps((stamp, spaces)))
+    cached.save(cache, stamp, spaces)
     return AirspaceIndex(spaces)

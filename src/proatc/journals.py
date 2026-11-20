@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .config import private_folder
 from .replay import NOTHING, Result, load
 
 ACCEPTED = ".accepted.json"
@@ -190,7 +191,7 @@ def check(folder: Path, runner: Runner, settings: dict) -> list[Check]:
 def keep(journal: Path, folder: Path, runner: Runner, settings: dict) -> Path:
     """Copy a journal into the corpus and accept what the engine answers to it now."""
     events = load(journal).get("events", [])
-    folder.mkdir(parents=True, exist_ok=True)
+    private_folder(folder)
     name = kept_name(journal, events)
     target = folder / f"{name}.jsonl"
     number = 2

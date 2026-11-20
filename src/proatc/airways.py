@@ -13,12 +13,12 @@ Parsed once and cached in data/airways-v1.pickle until the file changes.
 
 from __future__ import annotations
 
-import pickle
 import re
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import cache as cached
 from .config import PROJECT_DIR
 from .navdata import distance_nm
 
@@ -167,15 +167,10 @@ def open_airways(xplane_root: Path | None, cache: Path = CACHE) -> Airways:
     if path is None:
         return Airways()
     stamp = f"{path}:{path.stat().st_size}:{int(path.stat().st_mtime)}"
-    if cache.exists():
-        try:
-            saved_stamp, data = pickle.loads(cache.read_bytes())
-            if saved_stamp == stamp:
-                return data
-        except Exception:
-            pass  # unreadable cache: rebuild it
+    data = cached.load(cache, stamp, Airways)
+    if data is not None:
+        return data
     with open(path, encoding="utf-8", errors="ignore") as handle:
         data = parse_airways(handle)
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(pickle.dumps((stamp, data)))
+    cached.save(cache, stamp, data)
     return data
