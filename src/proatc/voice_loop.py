@@ -613,9 +613,12 @@ class Session:
                     try:
                         if kind == "voice":
                             recording, self._recording = self._recording, False  # a key going down again sets it anew
-                            _exchange(self.config, self.bridge, self.db, self.book, self.stt, self.tts, self.controller,
-                                      self.player, self.ptt, self.recorder, self.engine, self.parser, self.emit,
-                                      on_khz=self._keyed_khz, recording=recording)  # fmt: skip
+                            # The microphone did not start at key-down (that was reported): it is tried again only
+                            # while the key is still held, never opened after the pilot let go.
+                            if recording or self.ptt.pressed.is_set():
+                                _exchange(self.config, self.bridge, self.db, self.book, self.stt, self.tts,
+                                          self.controller, self.player, self.ptt, self.recorder, self.engine,
+                                          self.parser, self.emit, on_khz=self._keyed_khz, recording=recording)  # fmt: skip
                         elif kind in ("explain", "what_next"):
                             self._instructor(kind)
                         elif kind == "debrief":

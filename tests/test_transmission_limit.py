@@ -83,3 +83,34 @@ def test_the_recorder_keeps_no_more_than_its_limit_and_then_stops_the_microphone
     with pytest.raises(sd.CallbackStop):
         recorder._callback(np.ones((10, 1), dtype=np.float32), 10, None, None)
     assert recorder.stop().size == 16
+
+
+def test_a_microphone_that_failed_at_key_down_is_not_opened_after_the_key_is_let_go(session, monkeypatch):
+    class Broken(Microphone):
+        def start(self):
+            raise OSError("no input device")
+
+    session.recorder = Broken()
+    session.ptt.press()  # the microphone fails here, and that is reported
+    session.ptt.release()  # let go before the radio gets to the call
+    exchanged = []
+    monkeypatch.setattr(voice_loop, "_exchange", lambda *args, **kwargs: exchanged.append(kwargs))
+
+    class Jobs:
+        def __init__(self, *jobs):
+            self.jobs = list(jobs)
+
+        def get(self):
+            if not self.jobs:
+                raise KeyboardInterrupt  # the end of the run
+            return self.jobs.pop(0)
+
+    session.jobs = Jobs(("voice", None, None))
+    session.player = type("Player", (), {"stop": lambda self: None})()
+    session._after_transmission = session.close = lambda: None
+    for part in ("bridge", "db", "book", "stt", "tts", "controller", "engine", "parser"):
+        setattr(session, part, None)  # passed along to the exchange, which is stood in for
+    session.run_forever()
+    assert exchanged == []  # the job did not try the microphone again
+    assert not any(event["type"] == "error" and "Microphone" not in event["text"] for event in session.events)
+    assert any("Microphone" in event.get("text", "") for event in session.events)

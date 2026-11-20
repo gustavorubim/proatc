@@ -346,3 +346,62 @@ def test_a_paired_device_must_pair_again_after_a_month(app):
     server.save_settings({"remote_devices": [server._digest("from-0.21")]})
     assert server._device_entries()[0]["hash"] == server._digest("from-0.21")
     assert app._allowed("from-0.21", remote=True, source="192.0.2.22") == "device"
+
+
+# ---- a third review -------------------------------------------------------------------------------------------
+
+
+def test_a_device_whose_month_runs_out_while_connected_is_cut_off(app):
+    import time
+
+    device = pair(app)
+    with connect(f"{address(app)}?token={device}") as phone:
+        for _ in range(50):
+            if app._device_of:
+                break
+            threading.Event().wait(0.02)
+        app.cut_off_unpaired()  # still paired: stays
+        phone.send(json.dumps({"cmd": "clear_plan"}))
+        expired = time.time() - (server.DEVICE_DAYS + 1) * 86400
+        server.save_settings({"remote_devices": [{"hash": server._digest(device), "paired": expired}]})
+        app.cut_off_unpaired()
+        with pytest.raises(ConnectionClosed):
+            for _ in range(200):
+                phone.recv(timeout=5)
+
+
+def test_a_settings_save_running_alongside_forget_all_does_not_bring_the_devices_back(app, monkeypatch):
+    # A save reads the file, adds its change and writes it all back: if "Forget all" wrote in between, the save
+    # put the forgotten devices back. Saves now take turns.
+    pair(app)
+    real = config_module.settings_path()
+    read, go = threading.Event(), threading.Event()
+
+    class Slow:
+        def exists(self):
+            return real.exists()
+
+        def read_text(self, **kwargs):
+            text = real.read_text(**kwargs)
+            if threading.current_thread().name == "saver":
+                read.set()
+                go.wait(2)  # "Forget all" comes now
+            return text
+
+        def write_text(self, *args, **kwargs):
+            return real.write_text(*args, **kwargs)
+
+        def chmod(self, mode):
+            pass
+
+    monkeypatch.setattr(config_module, "settings_path", lambda: Slow())
+    saver = threading.Thread(target=config_module.save_settings, args=({"simbrief_user": "someone"},), name="saver")
+    saver.start()
+    assert read.wait(2)
+    forgetting = threading.Thread(target=app.forget_devices)
+    forgetting.start()
+    forgetting.join(0.5)
+    go.set()
+    saver.join(5)
+    forgetting.join(5)
+    assert server.paired_devices() == [] and server.load_settings()["simbrief_user"] == "someone"

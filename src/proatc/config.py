@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
@@ -238,6 +239,11 @@ def url_secrets(url: str) -> set[str]:
     return found
 
 
+# settings.json is read, changed and written back from several threads (the app's commands, pairing, "Forget
+# all"): one at a time, or a save that read the file before another wrote it puts back what that one removed.
+SETTINGS_LOCK = threading.RLock()
+
+
 def settings_path() -> Path:
     return PROJECT_DIR / "settings.json"
 
@@ -245,10 +251,11 @@ def settings_path() -> Path:
 def load_settings() -> dict:
     """What the app remembers between runs (not secrets): setting changes and the SimBrief username."""
     path = settings_path()
-    try:
-        settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except (OSError, ValueError):
-        settings = {}
+    with SETTINGS_LOCK:  # never half of a file being written
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError):
+            settings = {}
     # SIMBRIEF_USER in .env is the default until another account is used in the app.
     if not settings.get("simbrief_user") and env_value("SIMBRIEF_USER"):
         settings["simbrief_user"] = env_value("SIMBRIEF_USER")
@@ -257,20 +264,22 @@ def load_settings() -> dict:
 
 def save_settings(changes: dict) -> None:
     path = settings_path()
-    try:
-        stored = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except (OSError, ValueError):
-        stored = {}
-    path.write_text(json.dumps({**stored, **changes}, indent=2), encoding="utf-8")
-    private(path)  # the SimBrief ID, the paired devices
+    with SETTINGS_LOCK:
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError):
+            stored = {}
+        path.write_text(json.dumps({**stored, **changes}, indent=2), encoding="utf-8")
+        private(path)  # the SimBrief ID, the paired devices
 
 
 def save_overrides(changes: dict) -> None:
     """Remember setting changes made in the app, on top of earlier ones."""
-    stored = load_settings().get("config", {})
-    for section, values in changes.items():
-        stored.setdefault(section, {}).update(values)
-    save_settings({"config": stored})
+    with SETTINGS_LOCK:
+        stored = load_settings().get("config", {})
+        for section, values in changes.items():
+            stored.setdefault(section, {}).update(values)
+        save_settings({"config": stored})
 
 
 def load_config(path: Path | None = None) -> Config:
