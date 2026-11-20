@@ -27,7 +27,7 @@ export function updateView(update: UpdateState, version: string): UpdateView {
         label: `Restart to update to v${update.version}`,
         tone: 'ok',
         action: 'install',
-        hint: 'Closes Pro ATC, installs the new version and starts it again.'
+        hint: 'Closes Pro ATC, installs the new version and starts it again. Nothing is installed until you click.'
       }
     case 'available':
       return {
