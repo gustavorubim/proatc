@@ -145,9 +145,12 @@ class Intent:
 
     @classmethod
     def from_dict(cls, data: dict) -> Intent:
-        """An intent carried by a suggested call (a click needs no language model)."""
-        known = {f.name for f in fields(cls)}
-        return cls(**{key: value for key, value in data.items() if key in known})
+        """An intent carried by a suggested call (a click needs no language model), or kept in a log. Cleaned as
+        the model's answers are: a click may come from another device, and nothing in it is taken as it is."""
+        return _clean(data if isinstance(data, dict) else {})
+
+
+TEXT_MAX = 40  # a callsign, a destination or a fix as said on the radio
 
 
 def _clean(data: dict) -> Intent:
@@ -158,8 +161,9 @@ def _clean(data: dict) -> Intent:
     if data.get("intent") in INTENTS:
         intent.intent = data["intent"]
     for key in ("callsign", "destination", "fix"):
-        if isinstance(data.get(key), str):
-            setattr(intent, key, data[key].strip())
+        if isinstance(data.get(key), str):  # one line of ordinary text, as it would be said
+            text = " ".join("".join(c if c.isprintable() else " " for c in data[key]).split())[:TEXT_MAX]
+            setattr(intent, key, text or None)
     runway = re.fullmatch(
         r"0?(\d{1,2})\s*([LRC])?",
         str(data.get("runway", ""))

@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import phraseology as say
-from .config import editable_values, load_settings, openrouter_key, safe_url, url_secrets
+from .config import editable_values, load_settings, openrouter_key, private, private_folder, safe_url, url_secrets
 from .soundcheck import last
 
 ISSUE_URL = "https://github.com/gustavorubim/proatc/issues/new"
@@ -216,9 +216,10 @@ def write(home: Path, config, hide: bool, computer: list[dict], now: datetime | 
         previous=" (and the run before it, which had just ended)" if len(chosen) > 1 else "",
         hidden=HIDDEN if hide else SHOWN,
     )
-    folder = logs / "reports"
-    folder.mkdir(parents=True, exist_ok=True)
+    folder = private_folder(logs / "reports")
     path = folder / f"proatc-report-{now:%Y%m%d-%H%M%S}.zip"
+    path.touch()
+    private(path)  # before anything is written into it
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("README.txt", readme)
         archive.writestr("about.json", scrub(json.dumps(about, indent=1, default=str), hidden))

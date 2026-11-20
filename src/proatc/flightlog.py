@@ -64,12 +64,13 @@ class FlightLog:
     def keep_journal(self, folder: Path) -> Path | None:
         """Write every record to a file in `folder` from now on, starting with what is already held."""
         try:
-            folder.mkdir(parents=True, exist_ok=True)
+            config.private_folder(folder)
             for old in sorted(folder.glob("session-*.jsonl"))[: -(JOURNALS_KEPT - 1) or None]:
                 old.unlink(missing_ok=True)
             with self._lock:  # what is already held goes first, before any record made meanwhile
                 self.journal = folder / JOURNAL_NAME.format(self.started)
                 self._file = open(self.journal, "a", encoding="utf-8")  # noqa: SIM115  (kept open for the whole run)
+                config.private(self.journal)
                 for entry in list(self.records):
                     self._write(entry)
         except OSError:
@@ -147,13 +148,15 @@ class FlightLog:
 
     def save(self, folder: Path, extra: dict | None = None) -> Path:
         """Write the transcript (.txt) and the full record (.json). Returns the transcript's path."""
-        folder.mkdir(parents=True, exist_ok=True)
+        config.private_folder(folder)
         stem = folder / f"flight-{datetime.now():%Y%m%d-%H%M%S}"
         extra = dict(extra or {})
         text = self._hidden(self.text() + extra.pop("debrief_text", ""))
         stem.with_suffix(".txt").write_text(text, encoding="utf-8")
         payload = self._hidden({"started": self.started.isoformat(timespec="seconds"), **extra, "events": self.entries()})
         stem.with_suffix(".json").write_text(json.dumps(payload, indent=1, default=str), encoding="utf-8")
+        for suffix in (".txt", ".json"):
+            config.private(stem.with_suffix(suffix))
         return stem.with_suffix(".txt")
 
 

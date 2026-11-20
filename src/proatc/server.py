@@ -42,7 +42,7 @@ from websockets.sync.server import serve
 from . import phraseology as say
 from .airspace import CONTROLLED
 from .atis import decoded, runways_in_use, uses_faa_style
-from .config import PROJECT_DIR, Config, editable_values, load_settings, private, save_settings
+from .config import PROJECT_DIR, Config, editable_values, load_settings, private, save_settings, settings_path
 from .flightplan import PlanError, fetch_simbrief, manual
 from .intents import Intent
 from .navdata import AirportDB, distance_nm
@@ -55,6 +55,8 @@ CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I: the code is
 MAX_BAD_CODES = 5  # wrong pairing codes from one source within LOCKOUT_S before it is refused for a while
 LOCKOUT_S = 300
 MAX_BAD_PAIRING = 40  # wrong codes from anywhere while a pairing window is open before it closes
+MAX_SOURCES = 256  # addresses whose wrong codes are remembered; older ones are forgotten first
+MAX_REMOTE_CONNECTIONS = 16  # connections from other devices at once, signed in or not
 PAIRING_WINDOW_S = 300  # how long a pairing code shown on the computer is good for
 MAX_DEVICES = 8  # paired devices kept; the oldest is forgotten first
 DEVICE_DAYS = 30  # a paired device must pair again after this: its token crosses the network in the clear
@@ -376,6 +378,10 @@ class AppServer:
         self.remote = None  # the listener for other devices, while it is switched on
         self.remote_clients: set = set()  # connections from paired devices
         self._bad_codes: dict[str, deque] = {}  # source address -> when its wrong codes came
+        self._remote_slots = threading.BoundedSemaphore(MAX_REMOTE_CONNECTIONS)
+        self._known: list[str] = []  # the paired devices, as last read
+        self._known_stamp = None  # settings.json as it was then (None: read it again)
+        self._known_at = 0.0
         self._bad_pairing = 0  # wrong codes from anywhere while the pairing window is open
         self._code = ""  # the pairing code while a pairing window is open
         self._pairing_until = 0.0
@@ -459,9 +465,11 @@ class AppServer:
         if not remote:
             return hmac.compare_digest(token.encode(), self.token.encode())
         digest = _digest(token)
-        if token and any(hmac.compare_digest(digest, known) for known in paired_devices()):
+        if token and any(hmac.compare_digest(digest, known) for known in self._paired_now()):
             return "device"
         now = time.monotonic()
+        if source not in self._bad_codes and len(self._bad_codes) >= MAX_SOURCES:
+            self._forget_old_sources(now)
         bad = self._bad_codes.setdefault(source, deque(maxlen=MAX_BAD_CODES))
         if len(bad) == MAX_BAD_CODES and now - bad[0] < LOCKOUT_S:
             return False  # this source keeps guessing: refused for a while; other devices are not
@@ -475,6 +483,24 @@ class AppServer:
                 self.close_pairing()  # guessed at from many places: open it again on the computer
         return False
 
+    def _paired_now(self) -> list[str]:
+        """The paired devices, read again only when settings.json has changed (or every few seconds, for those
+        whose month runs out): an attempt to sign in costs no reading of files."""
+        try:
+            info = settings_path().stat()
+            stamp = (info.st_mtime_ns, info.st_size)
+        except OSError:
+            stamp = None
+        if stamp is None or stamp != self._known_stamp or time.monotonic() - self._known_at > DEVICE_RECHECK_S:
+            self._known, self._known_stamp, self._known_at = paired_devices(), stamp, time.monotonic()
+        return self._known
+
+    def _forget_old_sources(self, now: float) -> None:
+        """Wrong codes from long ago are forgotten, and only the newest addresses are kept."""
+        recent = {source: times for source, times in self._bad_codes.items() if times and now - times[-1] < LOCKOUT_S}
+        newest = sorted(recent.items(), key=lambda item: item[1][-1])[-(MAX_SOURCES - 1) :]
+        self._bad_codes = dict(newest)
+
     @staticmethod
     def _same_origin(connection) -> bool:
         """A browser says which page opened a connection: only the page this server gave may connect."""
@@ -483,6 +509,19 @@ class AppServer:
         return origin is None or urlparse(origin).netloc == headers.get("Host", "")
 
     def _handle(self, connection, remote: bool = False) -> None:
+        """One connection. From other devices, no more than MAX_REMOTE_CONNECTIONS at once, signed in or not."""
+        if not remote:
+            self._serve(connection, remote)
+            return
+        if not self._remote_slots.acquire(blocking=False):
+            connection.close(1013, "too many connections")
+            return
+        try:
+            self._serve(connection, remote)
+        finally:
+            self._remote_slots.release()
+
+    def _serve(self, connection, remote: bool) -> None:
         query = parse_qs(urlparse(connection.request.path).query)
         source = str((connection.remote_address or ("",))[0])
         token, device = query.get("token", [""])[0], None
@@ -491,6 +530,7 @@ class AppServer:
             if granted:
                 if granted == "paired":
                     device = self._new_device()
+                    self._known_stamp = None  # the list has changed: read it again
                 outbox = self._outbox[connection] = Outbox(connection)
                 # What it has missed goes first, and is in its outbox before anything sent from now on.
                 if device:
@@ -551,6 +591,7 @@ class AppServer:
         """Every paired device must pair again; those connected now are cut off."""
         with self.lock:  # no device is let in while this runs: each is either cut off below or refused
             save_settings({"remote_devices": []})
+            self._known, self._known_stamp = [], None
             self.close_pairing()
             connected = list(self.remote_clients)
             for client in connected:
