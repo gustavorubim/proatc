@@ -11,7 +11,7 @@ import time
 
 import httpx
 
-from .config import Llm
+from .config import Llm, safe_url
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -76,8 +76,11 @@ class Controller:
                 response = self.client.post(url, json=body)
             except httpx.HTTPError as error:
                 if self.local:
+                    # The address may carry a password or a token: errors are shown, logged and reported without it.
+                    shown = safe_url(url)
                     raise LlmError(
-                        f"The local model could not be reached at {url}. Is Ollama (or LM Studio) running? ({error})"
+                        f"The local model could not be reached at {shown}. Is Ollama (or LM Studio) running? "
+                        f"({str(error).replace(url, shown)})"
                     ) from error
                 raise LlmError(f"OpenRouter request failed: {error}") from error
             if response.status_code not in (429, 502, 503) or attempt == 2:

@@ -184,7 +184,18 @@ export interface EngineState {
   computer?: ComputerCheck[]
   sound_check?: { running: boolean; last: string }
   /** The app's screen in a browser on another device. */
-  remote?: { available: boolean; enabled: boolean; running: boolean; url: string; code: string }
+  remote?: {
+    available: boolean
+    enabled: boolean
+    running: boolean
+    url: string
+    /** Shown while a pairing window is open, for one device; empty otherwise. */
+    code: string
+    /** Seconds left in the pairing window. */
+    pairing_s: number
+    /** Devices paired and remembered. */
+    devices: number
+  }
   suggestions: Suggestion[]
 }
 
@@ -257,6 +268,10 @@ export type Command =
   /** null stops the check. */
   | { cmd: 'sound_check_answer'; heard: boolean | null }
   | { cmd: 'report'; hide: boolean }
+  /** A new pairing code, good for one device for a few minutes. */
+  | { cmd: 'pair_device' }
+  /** Every paired device must pair again. */
+  | { cmd: 'forget_devices' }
 
 export interface UpdateState {
   state: 'none' | 'checking' | 'downloading' | 'ready' | 'error' | 'available'

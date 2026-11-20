@@ -29,6 +29,15 @@ function savedCode(): string {
   }
 }
 
+/** The device's own token, given by the computer once the pairing code was accepted. Kept as it is: it is not typed. */
+function rememberCode(token: string): void {
+  try {
+    localStorage.setItem(CODE_KEY, token)
+  } catch {
+    // Without storage the device pairs again on its next visit.
+  }
+}
+
 const AIRSPACE_LABEL: Record<string, string> = {
   CTR: 'CTR',
   B: 'CLASS B',
@@ -71,7 +80,13 @@ function useEngine() {
       ws.onopen = () => dispatch({ type: 'link', link: 'open' })
       ws.onmessage = (event) => {
         try {
-          dispatch({ type: 'message', message: JSON.parse(String(event.data)) as EngineMessage })
+          const message = JSON.parse(String(event.data)) as EngineMessage | { type: 'paired'; device: string }
+          if (message.type === 'paired') {
+            // Paired with a code: this device's own token from now on, kept instead of the code.
+            if (typeof message.device === 'string') rememberCode(message.device)
+            return
+          }
+          dispatch({ type: 'message', message })
         } catch {
           // A malformed message is dropped; the next state message repairs the view.
         }
@@ -217,7 +232,7 @@ function PairDialog({ wrong, onPair }: { wrong: boolean; onPair: (code: string) 
         <h2>Connect to Pro ATC</h2>
         <p>
           {wrong ? 'That code was not accepted. ' : ''}
-          Enter the pairing code shown in the app on your computer, under Settings, Phone or tablet.
+          On your computer, open Settings, Phone or tablet, and click Pair a device. Then enter the code it shows.
         </p>
         <input
           autoFocus
@@ -808,14 +823,16 @@ export function App() {
               {mapOpen ? 'Hide map' : 'Map'}
             </button>
           )}
-          <button
-            className="quiet"
-            disabled={!ready}
-            title="Save this flight's radio log"
-            onClick={() => send({ cmd: 'save_log' })}
-          >
-            Save log
-          </button>
+          {inApp && (
+            <button
+              className="quiet"
+              disabled={!ready}
+              title="Save this flight's radio log"
+              onClick={() => send({ cmd: 'save_log' })}
+            >
+              Save log
+            </button>
+          )}
           <button
             className="quiet"
             disabled={!ready}
@@ -824,9 +841,11 @@ export function App() {
           >
             Debrief
           </button>
-          <button className="quiet" disabled={!engine} onClick={() => setSettingsOpen(true)}>
-            Settings
-          </button>
+          {inApp && (
+            <button className="quiet" disabled={!engine} onClick={() => setSettingsOpen(true)}>
+              Settings
+            </button>
+          )}
           {inApp && (
             <button
               className="quiet"
@@ -953,25 +972,28 @@ export function App() {
             )}
 
             <form className="entry" onSubmit={submitDraft}>
-              <button
-                type="button"
-                className={store.transmitting ? 'ptt live' : 'ptt'}
-                disabled={!ready}
-                title={`Hold to talk (or hold ${engine?.status.ptt_key ?? 'the push-to-talk key'})`}
-                onMouseDown={() => send({ cmd: 'ptt', down: true })}
-                onMouseUp={() => send({ cmd: 'ptt', down: false })}
-                onMouseLeave={() => store.transmitting && send({ cmd: 'ptt', down: false })}
-                onTouchStart={(event) => {
-                  event.preventDefault() // a touch must not also arrive as a mouse click
-                  send({ cmd: 'ptt', down: true })
-                }}
-                onTouchEnd={(event) => {
-                  event.preventDefault()
-                  send({ cmd: 'ptt', down: false })
-                }}
-              >
-                {store.transmitting ? 'Transmitting' : 'Hold to talk'}
-              </button>
+              {/* The computer's microphone is keyed from the computer only, not from a phone or tablet. */}
+              {inApp && (
+                <button
+                  type="button"
+                  className={store.transmitting ? 'ptt live' : 'ptt'}
+                  disabled={!ready}
+                  title={`Hold to talk (or hold ${engine?.status.ptt_key ?? 'the push-to-talk key'})`}
+                  onMouseDown={() => send({ cmd: 'ptt', down: true })}
+                  onMouseUp={() => send({ cmd: 'ptt', down: false })}
+                  onMouseLeave={() => store.transmitting && send({ cmd: 'ptt', down: false })}
+                  onTouchStart={(event) => {
+                    event.preventDefault() // a touch must not also arrive as a mouse click
+                    send({ cmd: 'ptt', down: true })
+                  }}
+                  onTouchEnd={(event) => {
+                    event.preventDefault()
+                    send({ cmd: 'ptt', down: false })
+                  }}
+                >
+                  {store.transmitting ? 'Transmitting' : 'Hold to talk'}
+                </button>
+              )}
               <input
                 placeholder="Type a call, or what you want in your own words"
                 value={draft}

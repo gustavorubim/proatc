@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 # Where the key, settings, speech models and airport index live. From a source checkout that is the
 # project folder; the installed app points PROATC_HOME at its own data folder.
@@ -175,10 +177,46 @@ def validate(changes: dict) -> dict:
                 ok = 0.7 <= value <= 1.6
             if ok and (section, key) == ("llm", "local_url"):
                 ok = value.startswith(("http://", "https://"))
+            if ok and (section, key) == ("ptt", "key"):
+                ok = push_to_talk_key(value)
             if not ok:
                 raise ValueError(f"'{value}' is not a valid value for {section}.{key}.")
             cleaned.setdefault(section, {})[key] = value
     return cleaned
+
+
+def push_to_talk_key(name: str) -> bool:
+    """Whether a push-to-talk key name is one the keyboard listener knows: one character, or a key's name such
+    as ctrl_r or f13. A name it does not know would stop the engine from starting, every time."""
+    if len(name) == 1:
+        return name.isprintable()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,15}", name):
+        return False
+    try:
+        from pynput import keyboard
+    except Exception:
+        return True  # no keyboard listener here to ask: the name has the right form
+    return hasattr(keyboard.Key, name)
+
+
+def private(path: Path) -> None:
+    """Make a file readable by this user only. Windows keeps a user's AppData to that user already; elsewhere a
+    new file is often readable by every user of the machine."""
+    if os.name != "nt":
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass  # a file system without permissions: nothing more can be done
+
+
+def safe_url(url: str) -> str:
+    """An address without a user name, password or query, which could carry a token: for logs and reports."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        return urlunsplit((parts.scheme, f"{host}:{parts.port}" if parts.port else host, parts.path, "", ""))
+    except ValueError:
+        return "(not shown)"
 
 
 def settings_path() -> Path:
@@ -205,6 +243,7 @@ def save_settings(changes: dict) -> None:
     except (OSError, ValueError):
         stored = {}
     path.write_text(json.dumps({**stored, **changes}, indent=2), encoding="utf-8")
+    private(path)  # the SimBrief ID, the paired devices
 
 
 def save_overrides(changes: dict) -> None:

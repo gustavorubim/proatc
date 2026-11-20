@@ -427,10 +427,43 @@ export function SettingsDialog({
                 <Toggle on={values.remote.enabled} onChange={(on) => change('remote', 'enabled', on)} />
               </Row>
               {remote.enabled && remote.running && (
-                <Row label="Open in the device's browser" hint="Then enter the pairing code">
-                  <span className="mono remote-url">{remote.url}</span>
-                  <span className="mono remote-code">{remote.code}</span>
-                </Row>
+                <>
+                  <Row
+                    label="Open in the device's browser"
+                    hint="Anyone on your network can see what this view shows, so it shows less than the app and cannot use this computer's microphone"
+                  >
+                    <span className="mono remote-url">{remote.url}</span>
+                  </Row>
+                  <Row
+                    label="Pair a device"
+                    hint={
+                      remote.code
+                        ? `Enter this code on the device. It works once, for ${Math.max(1, Math.ceil(remote.pairing_s / 60))} more minute${remote.pairing_s > 60 ? 's' : ''}`
+                        : 'A new code, good for one device for five minutes'
+                    }
+                  >
+                    {remote.code ? (
+                      <span className="mono remote-code">{remote.code}</span>
+                    ) : (
+                      <button className="ghost" onClick={() => send({ cmd: 'pair_device' })}>
+                        Pair a device
+                      </button>
+                    )}
+                  </Row>
+                  <Row
+                    label="Paired devices"
+                    hint="Forget them all if a device is lost or no longer yours: each must pair again"
+                  >
+                    <span className="mono">{remote.devices}</span>
+                    <button
+                      className="ghost"
+                      disabled={remote.devices === 0}
+                      onClick={() => send({ cmd: 'forget_devices' })}
+                    >
+                      Forget all
+                    </button>
+                  </Row>
+                </>
               )}
             </>
           )}

@@ -33,6 +33,11 @@ def _add_nvidia_dlls() -> None:
             os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
 
 
+# The commit of each speech model the app has been tested with, on Hugging Face. Another model name is fetched as
+# it is now.
+REVISIONS = {"small.en": "d1d751a5f8271d482d14ca55d9e2deeebbae577f"}
+
+
 class SpeechToText:
     def __init__(self, settings: Stt):
         self.settings = settings
@@ -55,6 +60,7 @@ class SpeechToText:
             device=device,
             compute_type=compute_type,
             download_root=str(MODELS_DIR / "whisper"),
+            revision=REVISIONS.get(self.settings.model),  # a known model: exactly the files it was tested with
         )
         self.device = device
         # Missing GPU libraries only fail on first use, and the first call is slow: do it now.

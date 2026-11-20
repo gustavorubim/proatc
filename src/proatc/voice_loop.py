@@ -49,6 +49,7 @@ from .tts import TextToSpeech, download_models, models_present
 from .xpbridge import SimUnavailable, XPBridge, describe, magnetic_variation, same_channel, transmit_radio, tuned_khz
 
 log = logging.getLogger(__name__)
+MAX_TRANSMISSION_S = 90  # the longest a transmission records: a full clearance readback takes about twenty
 
 MIN_SECONDS = 0.4
 
@@ -798,7 +799,11 @@ def _exchange(config, bridge, db, book, stt, tts, controller, player, ptt, recor
     if not recording:
         recorder.start()
     emit({"type": "tx", "on": True})
-    ptt.released.wait()
+    if not ptt.released.wait(MAX_TRANSMISSION_S):
+        # A key left down (a window or a device gone, a key the system never let go): the microphone is not left
+        # recording, and the radio is not kept waiting.
+        ptt.release()
+        emit({"type": "info", "text": f"transmission ended after {MAX_TRANSMISSION_S} seconds: release the key between calls"})
     audio = recorder.stop()
     emit({"type": "tx", "on": False})
     started = time.perf_counter()
