@@ -468,6 +468,8 @@ def test_the_controller_notices_a_level_bust_a_wrong_heading_and_a_wrong_squawk(
     still_west = {**at(51.1, 5.0, feet=6000, heading=270), "vs_fpm": -800.0}
     assert engine.tick(approach, ISSUE, still_west) is None  # give the turn time
     clock[0] += 60
+    assert engine.tick(approach, ISSUE, still_west) is None  # a turn right round takes a minute at rate one
+    clock[0] += 60
     assert engine.tick(approach, ISSUE, still_west).text == f"{CALLSIGN}, fly heading zero niner zero"
     assert engine.tick(approach, ISSUE, still_west) is None
 

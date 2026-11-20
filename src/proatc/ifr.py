@@ -39,6 +39,7 @@ from .vectors import (
     GLIDE_FT_PER_NM,
     Vector,
     established,
+    joins_at,
     locate,
     next_vector,
     pattern_ft,
@@ -75,6 +76,7 @@ LOW_AGL_FT = 1000  # descending below this height above the ground, away from th
 FIX_REACHED_NM = 2.5  # this close to an approach's initial fix, the aircraft has reached it (turns are anticipated)
 BUST_FT = 400  # how far through a cleared level before the controller says something
 HEADING_GRACE_S = 45  # time to roll onto an assigned heading before being asked about it
+TURN_DEG_PER_S = 3  # and the time the turn itself takes, at rate one: a turn back the other way takes a minute
 STAGES = ["descend", "downwind", "base", "intercept", "procedure", "tower"]
 ON_APPROACH = ("intercept", "procedure")  # cleared for the approach: by vectors, or by its own initial fix
 PROCEDURAL_KINDS = "RHP"  # R NAV, R N P and G P S approaches are flown from an initial fix when one is published
@@ -92,6 +94,7 @@ FAR_FINAL_KT = 180
 STEP_DOWN_FT = 2000  # on the way in, a further descent is given when it is at least this much lower
 TURN_OUT_WITHIN_NM = 2  # too high to join the glide path this close to the joining point: turned out for the descent
 HIGH_ON_FINAL_FT = 1000  # cleared, on the localiser, and this far above the glide path: the controller says so
+CIRCLE_MARGIN_NM = 1  # final joined this far inside the sector altitude's circle is joined inside it
 HIGH_TOLD_BEYOND_NM = 6  # but not inside this distance, where it is the tower's and the pilot's to sort out
 JOIN_NM = (9, 10, 12)  # how far out final is joined; it differs from one arrival to the next
 FINAL_MAX_NM = 30  # but never so close in that the joining altitude is above a three degree path, up to this
@@ -118,6 +121,8 @@ class Arrival:
     qnh_given: bool = False
     heading: int | None = None  # last heading assigned, magnetic
     heading_at: float = 0.0  # when it was assigned (engine clock)
+    heading_turn: float = 0.0  # how many degrees the aircraft had to turn onto it
+    cleared_nm: float = 0.0  # how far out along final the aircraft was when cleared for the approach
     heading_asked: bool = False
     speed_kt: int | None = None
     hold: object | None = None  # holding.HoldState while holding
@@ -760,6 +765,12 @@ def _speed(arrival: Arrival, stage: str, raw: dict, faa: bool, along_nm: float =
     return f"reduce speed to {spoken}" if faa else f"reduce speed {spoken} knots"
 
 
+def _joins_inside_circle(airport: Airport, arrival: Arrival, position) -> bool:
+    """Whether an intercept from here meets final inside the sector altitude's circle, which is centred on the airport."""
+    centre = locate(airport.lat, airport.lon, arrival.threshold, arrival.course_true)
+    return math.hypot(joins_at(position) - centre.along_nm, centre.cross_nm) < MSA_RADIUS_NM - CIRCLE_MARGIN_NM
+
+
 def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: bool):
     """The next vector, descent or approach clearance, or None when nothing new is due."""
     flight, arrival, airport = engine.flight, engine.flight.arrival, station.airport
@@ -818,9 +829,10 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
         # Turned out already, or on a downwind leg: it flies on, away from the airport and down to the level it was
         # given, until an intercept from where it is can make the glide path. Nothing new to say meanwhile.
         return None if not first else _reply(engine, f"{callsign}, {lead.rstrip(', ')}") if lead else None
-    elif high and raised:
+    elif high and raised and _joins_inside_circle(airport, arrival, position):
         # On a base leg, beyond the circle: turned toward final at the floor, once, without the approach clearance.
-        # That comes inside the circle, with the descent to the altitude the approach is joined at.
+        # That comes inside the circle, with the descent to the altitude the approach is joined at. Where final is
+        # joined beyond the circle (high ground all round), there is nothing to wait for: cleared as it is.
         closing = True
         vector = Vector("base", vector.heading_true, vector.altitude_ft, again=not arrival.closing)
     elif high and lower < feet - 200 and not arrival.turned_out:
@@ -862,6 +874,7 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
             parts.append(f"turn {turn_direction(current, heading)} heading {say.heading(heading)}")
         expect["heading"] = heading
         arrival.heading, arrival.heading_at, arrival.heading_asked = heading, engine.now(), False
+        arrival.heading_turn = abs((heading - current + 180) % 360 - 180)
     if vector.altitude_ft < min(cleared, feet + 200):
         flight.cleared_ft, flight.descent_given = vector.altitude_ft, True
         transition = _transition_ft(engine, airport.ident, faa)
@@ -875,6 +888,7 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     if vector.stage == "intercept":
         parts.append(f"{say.digits(round(position.distance_nm))} miles from touchdown")
         parts.append(f"cleared {arrival.words()}")
+        arrival.cleared_nm = position.along_nm
         if speed:
             parts.append(speed)
         parts.append("report established")
@@ -1473,8 +1487,10 @@ def _on_profile(arrival: Arrival, raw: dict) -> bool:
     if "lat" not in raw or "agl_m" not in raw:
         return False
     position = locate(raw["lat"], raw["lon"], arrival.threshold, arrival.course_true)
-    # A final joined farther out than planned is flown on the same path: the height check below is what keeps it safe.
-    on_final = position.cross_nm < PROFILE_CROSS_NM and 0 < position.along_nm <= max(arrival.final_nm + 2, LONG_FINAL_NM)
+    # A final joined farther out than planned, or cleared from farther out, is flown on the same path: the height
+    # check below is what keeps it safe.
+    limit = max(arrival.final_nm + 2, LONG_FINAL_NM, arrival.cleared_nm + 1)
+    on_final = position.cross_nm < PROFILE_CROSS_NM and 0 < position.along_nm <= limit
     return on_final and raw["agl_m"] / 0.3048 >= position.along_nm * 318 - PROFILE_MARGIN_FT
 
 
@@ -1489,7 +1505,7 @@ def _watch(engine, station, raw, callsign):
         and arrival.heading is not None
         and arrival.stage in ("downwind", "base")
         and not arrival.heading_asked
-        and engine.now() - arrival.heading_at > HEADING_GRACE_S
+        and engine.now() - arrival.heading_at > HEADING_GRACE_S + arrival.heading_turn / TURN_DEG_PER_S
         and "heading_mag" in raw
         and abs((raw["heading_mag"] - arrival.heading + 180) % 360 - 180) > 25
     ):

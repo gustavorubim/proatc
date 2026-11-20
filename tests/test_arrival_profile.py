@@ -196,3 +196,36 @@ def test_an_aircraft_is_turned_out_for_height_only_once(world):  # noqa: F811
     engine.flight.arrival.stage = "base"
     again = engine.tick(approach, ISSUE, out(final_nm + 1.5, 7000))
     assert again is None or "too high" not in again.text
+
+
+class HighGround:  # a low sector altitude, and high ground beyond its circle
+    def airport_safe_ft(self, ident):
+        return 3000
+
+    def grid_safe_ft(self, lat, lon):
+        return 9000
+
+    def position(self, *args):
+        return None
+
+
+def test_where_final_is_joined_beyond_the_circle_the_approach_is_cleared_as_it_is(world):  # noqa: F811
+    db, engine, _ = world
+    engine.navfix = HighGround()
+    engine.navfix.grid_safe_ft = lambda lat, lon: 12000  # the path is below this where final would be joined
+    engine, approach, _ = arrive(world, at(51.0 + 12 / 60, THRESHOLD[1] + 34 * NM_LON, feet=12000, heading=180))
+    engine.flight.arrival.stage = "base"  # on a base leg, far out
+    reply = engine.tick(approach, ISSUE, at(51.0 + 3 / 60, THRESHOLD[1] + 34 * NM_LON, feet=12000, heading=180))
+    # Nothing to wait for: turned toward final without the clearance, it would be turned out again and again.
+    assert "cleared I L S approach runway two seven" in reply.text
+
+
+def test_cleared_far_out_the_descent_on_the_glide_path_is_not_a_level_bust(world):  # noqa: F811
+    db, engine, _ = world
+    engine.navfix = HighGround()
+    engine, approach, first = arrive(world, out(28, 9000))
+    assert "two eight miles from touchdown, cleared I L S approach runway two seven" in first.text
+    assert engine.flight.cleared_ft == 9000
+    # Twenty-six miles out the glide path is at 8,580 ft: below the level given, and on the approach it was cleared for.
+    on_path = {**out(26, 8580), "vs_fpm": -800.0}
+    assert engine.tick(approach, ISSUE, on_path) is None
