@@ -223,9 +223,35 @@ def test_where_final_is_joined_beyond_the_circle_the_approach_is_cleared_as_it_i
 def test_cleared_far_out_the_descent_on_the_glide_path_is_not_a_level_bust(world):  # noqa: F811
     db, engine, _ = world
     engine.navfix = HighGround()
-    engine, approach, first = arrive(world, out(28, 9000))
-    assert "two eight miles from touchdown, cleared I L S approach runway two seven" in first.text
-    assert engine.flight.cleared_ft == 9000
+    engine, approach, _ = arrive(world, out(28, 9000))
+    arrival = engine.flight.arrival  # cleared for the approach twenty-eight miles out, at 9,000 ft
+    arrival.stage, arrival.cleared_nm, engine.flight.cleared_ft, engine.flight.pending = "intercept", 28.0, 9000, None
     # Twenty-six miles out the glide path is at 8,580 ft: below the level given, and on the approach it was cleared for.
     on_path = {**out(26, 8580), "vs_fpm": -800.0}
     assert engine.tick(approach, ISSUE, on_path) is None
+
+
+def test_the_approach_is_not_cleared_from_the_terrains_floor_but_inside_the_circle_at_its_own_altitude(world):  # noqa: F811
+    # A real flight: thirty miles out at Los Angeles, held at 7,800 ft by the terrain's floor, and cleared for the ILS
+    # there because the glide path is at 7,800 ft twenty-four miles out. No glideslope is received that far out: it
+    # flew level through the path, and was 1,600 ft above it by eighteen miles.
+    db, engine, _ = world
+
+    class Floors:
+        def airport_safe_ft(self, ident):
+            return 7800
+
+        def grid_safe_ft(self, lat, lon):
+            return 7500
+
+        def position(self, *args):
+            return None
+
+    engine.navfix = Floors()
+    engine, approach, first = arrive(world, out(29.5, 9400))  # low enough to reach the path from 7,800 ft: that is not enough
+    assert "cleared" not in first.text and first.expect["altitude"] == 7800
+    engine.flight.pending = None
+    assert engine.tick(approach, ISSUE, out(27, 7800)) is None  # at the floor, still outside the circle: nothing yet
+    inside = engine.tick(approach, ISSUE, out(23.5, 7800))
+    assert "descend altitude two thousand five hundred feet" in inside.text  # the approach's own altitude
+    assert "cleared I L S approach runway two seven" in inside.text
