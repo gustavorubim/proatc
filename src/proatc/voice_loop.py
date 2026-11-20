@@ -130,6 +130,13 @@ class Session:
 
     def emit(self, event: dict) -> None:
         """Report an event to the terminal or the app, and keep it in the flight log."""
+        if event.get("type") == "unsaid":
+            # A controller's call that was decided and not heard: kept in the journal, not shown or spoken.
+            try:
+                self.log.note("unsaid", None, **{key: value for key, value in event.items() if key != "type"})
+            except Exception:
+                pass  # the log must never break the radio
+            return
         if event.get("type") == "atc":
             self._last_atc = (event["station"], event["text"])
         try:
@@ -677,7 +684,8 @@ class Session:
         raw, station, _ = self._station_and_issue()
         with self.engine.lock:
             handoff, pending, given = flight.next_frequency, flight.pending, flight.handoffs
-            waiting = station is not None and self.engine.waiting_on(station, raw)
+            # A hand-off the controller has decided and not said yet is not followed: nobody has heard it.
+            waiting = (station is not None and self.engine.waiting_on(station, raw)) or self.engine.not_yet_said()
         if not handoff or _same_frequency(handoff, tuned_khz(raw)) or self._followed == (handoff, given):
             return
         if waiting or (pending is not None and mode != "full"):

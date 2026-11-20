@@ -152,6 +152,7 @@ class Flight:
     squawk_asked: bool = False
     bust_called_for: int | None = None  # the cleared level a bust was already called for
     pending_at: float = 0.0  # when the pending instruction was given (engine clock)
+    unsaid: object | None = None  # the pending instruction while its voice is still being made: not yet on the air
     pending_key: str | None = None  # the station that gave it
     pending_khz: int | None = None  # the frequency it was given on: a station that shares it may answer for it
     reminded: bool = False
@@ -234,6 +235,9 @@ class Engine:
         self.centers = centers  # centers.CenterIndex or None
         self.navaids = navaids  # procedures.NavaidNames or None
         self.flight = Flight()
+        # Set by the radio: the calls `tick` decides are spoken by a voice that takes seconds to make, and are not
+        # open to a readback until `on_air` says the voice has started. Without it they count as heard at once.
+        self.voiced = False
         forget_runways()  # a new session: no plan yet, and nothing known of any airport's taxiways
         self.last_raw: dict = {}  # the latest sim snapshot the engine was shown
         self.lock = threading.RLock()
@@ -783,8 +787,8 @@ class Engine:
         from .xpbridge import tuned_khz
 
         flight = self.flight
-        if flight.pending is None:
-            return False
+        if flight.pending is None or flight.pending is flight.unsaid:
+            return False  # nothing given, or given and not heard yet: there is nothing to read back
         if flight.pending_key == station.key:
             return True
         khz = tuned_khz(raw)
@@ -1480,9 +1484,29 @@ class Engine:
         """Calls the controller makes without being asked. Call about once a second."""
         with self.lock:
             reply = self._tick(station, issue, raw)
-            if reply is not None and not reply.correction:
+            if reply is not None and self.voiced and self.flight.pending is reply:
+                # Decided, and seconds away from being heard: nothing to read back or to answer until `on_air`.
+                self.flight.unsaid = reply
+            elif reply is not None and not reply.correction:
                 questions.record(self, station.key, reply)
             return reply
+
+    def on_air(self, reply: Reply) -> None:
+        """The controller's voice has started on this call: the wait for its readback starts now."""
+        with self.lock:
+            flight = self.flight
+            if flight.pending is reply:
+                flight.pending_at = self.now()
+                if flight.unsaid is reply and not reply.correction:
+                    questions.record(self, flight.pending_key, reply)
+            if flight.unsaid is reply:
+                flight.unsaid = None
+
+    def not_yet_said(self) -> bool:
+        """Whether the instruction waiting for a readback has not been heard yet: its voice is still being made, or
+        the frequency was taken when it was ready."""
+        flight = self.flight
+        return flight.pending is not None and flight.pending is flight.unsaid
 
     def _tick(self, station: Station, issue: Issue | None, raw: dict) -> Reply | None:
         with self.lock:

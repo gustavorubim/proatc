@@ -263,6 +263,8 @@ class AtisBroadcaster(threading.Thread):
         self.clock = clock
         self.after = after  # called after an unprompted transmission (the copilot may want to answer)
         self.engine = engine  # rules engine, for calls the controller makes unprompted
+        if engine is not None:
+            engine.voiced = True  # what it decides is heard only once this thread has made the voice
         self.busy = busy  # set while the pilot is transmitting or the controller is replying
         self._halt = threading.Event()
         self._text = ""
@@ -336,12 +338,18 @@ class AtisBroadcaster(threading.Thread):
             event["event"] = reply.event
         khz = tuned_khz(state)
         free = lambda: not (self._halt.is_set() or self.busy.is_set() or self._retuned(khz))  # noqa: E731
-        ticket = transmit(self.tts, self.player, reply.text, station_voice(self.tts, station), self.config.radio,
-                          on_sound=lambda: self._saying(reply, event), go=free)  # fmt: skip
+        began = self.clock.monotonic()
+        try:
+            ticket = transmit(self.tts, self.player, reply.text, station_voice(self.tts, station), self.config.radio,
+                              on_sound=lambda: self._saying(reply, event, began), go=free)  # fmt: skip
+        except Exception:
+            self._unsaid = (station.key, reply)  # the voice could not be made: tried again, not lost
+            raise
         if ticket is None:
             # The pilot keyed the microphone, or a call began, or the radio was retuned, while the voice was being
             # made: the controller waits, and says it when the frequency is next free.
             self._unsaid = (station.key, reply)
+            self._not_said(station.callsign, reply, "the frequency was taken while the voice was being made", began)
             return True
         # Tuned away mid-sentence: the rest is not heard on the new frequency.
         self.player.wait(ticket, should_stop=lambda: self._halt.is_set() or self.busy.is_set() or self._retuned(khz))
@@ -352,20 +360,36 @@ class AtisBroadcaster(threading.Thread):
     def _still_to_say(self, station: Station):
         """A call that was decided and not said, if it is still this station's to say. An instruction that has
         been replaced, or a station that is no longer tuned, drops it: the engine says it again if it must."""
-        unsaid, self._unsaid = self._unsaid, None
-        if unsaid is None or unsaid[0] != station.key:
+        if self._unsaid is None:
             return None
-        reply = unsaid[1]
-        if reply.expect and self.engine.flight.pending is not reply:
-            return None
-        return reply
+        key, reply = self._unsaid
+        if reply.expect:
+            with self.engine.lock:
+                pending = self.engine.flight.pending
+                # Still the instruction in force, or the "I say again" of the one that is.
+                wanted = pending is reply or (reply.correction and pending is not None and pending.expect == reply.expect)
+            if not wanted:
+                self._unsaid = None
+                self._not_said(station.callsign, reply, "dropped: another instruction or a readback came first")
+                return None
+            if key != station.key:
+                return None  # kept for when that controller is tuned again: an instruction nobody heard is not lost
+        self._unsaid = None
+        return reply if key == station.key else None
 
-    def _saying(self, reply, event: dict) -> None:
+    def _saying(self, reply, event: dict, began: float | None = None) -> None:
         """The call is heard from now: it goes in the log, and the wait for its readback starts now."""
-        with self.engine.lock:
-            if self.engine.flight.pending is reply:
-                self.engine.flight.pending_at = self.engine.now()
+        self.engine.on_air(reply)
+        if began is not None:
+            event["voice_s"] = round(self.clock.monotonic() - began, 1)  # how long the voice took to make
         self.emit(event)
+
+    def _not_said(self, callsign: str, reply, why: str, began: float | None = None) -> None:
+        """For the journal only: a call that was decided and has not been heard, so that it can be found later."""
+        note = {"type": "unsaid", "station": callsign, "text": reply.text, "why": why}
+        if began is not None:
+            note["voice_s"] = round(self.clock.monotonic() - began, 1)
+        self.emit(note)
 
     def _retuned(self, khz: int | None) -> bool:
         now = tuned_khz(self.bridge.snapshot())
