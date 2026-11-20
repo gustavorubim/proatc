@@ -19,10 +19,10 @@ import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from . import phraseology as say
-from .config import editable_values, load_settings, openrouter_key
+from .config import editable_values, load_settings, openrouter_key, safe_url
 from .soundcheck import last
 
 ISSUE_URL = "https://github.com/gustavorubim/proatc/issues/new"
@@ -65,10 +65,23 @@ SHOWN = 'To leave out the callsign and exact positions, make the report again wi
 
 
 def secrets() -> list[str]:
-    """The values that must never leave the computer: the key, the SimBrief ID, the pairing code."""
+    """The values that must never leave the computer: the key, the SimBrief ID, the pairing code, a password or
+    token in the local model's address, and the user's home folder (which holds their name), as errors write it."""
     settings = load_settings()  # includes SIMBRIEF_USER from .env when no other account was used
     found = {str(value).strip() for value in (openrouter_key(), settings.get("simbrief_user"), settings.get("remote_code"))
              if value and str(value).strip()}  # fmt: skip
+    local = str((settings.get("config") or {}).get("llm", {}).get("local_url") or "")
+    try:
+        parts = urlsplit(local)
+        found |= {value for value in (parts.username, parts.password) if value}
+        found |= {value for pair in parts.query.split("&") for value in pair.split("=")[1:] if len(value) >= 4}
+        if parts.username or parts.password or parts.query:
+            found.add(local)
+    except ValueError:
+        pass
+    home = str(Path.home())
+    if len(home) > 3:  # not a bare drive or "/"
+        found |= {home, home.replace("\\", "/")}
     found |= {json.dumps(value)[1:-1] for value in found}  # as it is written inside the journal's JSON
     return sorted(found, key=len, reverse=True)
 
@@ -81,16 +94,6 @@ def scrub(text: str, hidden: list[str]) -> str:
         pattern = re.escape(value) if len(value) >= 4 else rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])"
         text = re.sub(pattern, REMOVED, text, flags=re.IGNORECASE)
     return text
-
-
-def safe_url(url: str) -> str:
-    """A local model's address without a user name, password or query, which could carry a token."""
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname or ""
-        return urlunsplit((parts.scheme, f"{host}:{parts.port}" if parts.port else host, parts.path, "", ""))
-    except ValueError:
-        return "(not shown)"
 
 
 def safe_settings(config) -> dict:

@@ -184,3 +184,33 @@ def test_a_missing_sound_library_or_device_is_named_with_its_fix():
     assert system_check.startup_notes([system_check.item("x", "X", False, "Broken.", "Fix it.")], "win32") == []
     stopped = by_id(system_check.this_computer(False, "win32", {}, load=devices()))
     assert stopped["keyboard"]["ok"] is False and "did not start" in stopped["keyboard"]["text"]
+
+
+def test_the_report_hides_a_local_models_password_and_the_users_home_folder(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from proatc import config as config_module
+    from proatc import report
+
+    monkeypatch.setattr(config_module, "PROJECT_DIR", tmp_path)
+    config_module.save_settings({"config": {"llm": {"local_url": "http://me:s3cret-pw@pc:11434/v1?token=abcd1234"}}})
+    hidden = report.secrets()
+    text = "could not reach http://me:s3cret-pw@pc:11434/v1?token=abcd1234 from " + str(Path.home()) + "\logs"
+    cleaned = report.scrub(text, hidden)
+    assert "s3cret-pw" not in cleaned and "abcd1234" not in cleaned and str(Path.home()) not in cleaned
+
+
+def test_a_local_model_that_cannot_be_reached_is_reported_without_its_password():
+    import httpx
+
+    from proatc.config import Llm
+    from proatc.llm import Controller, LlmError
+
+    controller = Controller(Llm(provider="local", local_url="http://me:s3cret-pw@127.0.0.1:9/v1"), None)
+    controller.client = httpx.Client(timeout=0.5)
+    try:
+        controller.complete("system", "user")
+    except LlmError as error:
+        assert "s3cret-pw" not in str(error) and "127.0.0.1:9/v1" in str(error)
+    else:
+        raise AssertionError("expected the model to be unreachable")

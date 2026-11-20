@@ -441,6 +441,18 @@ class Engine:
             return f"altimeter {say.digits(f'{round(inches * 100):04d}')}", inches
         return say.qnh(issue.weather.qnh_hpa), float(int(issue.weather.qnh_hpa))
 
+    def _spoken_destination(self, said: str | None) -> str | None:
+        """A destination as the controller says it in a clearance. An airport's code is said as its name; anything
+        else must read as a place's name (letters, at most three words), because it is spoken as it was heard:
+        what the language model returned is never put into a clearance as it is. None: ask for it again."""
+        said = " ".join((said or "").split())
+        known = self.db.airport(said.upper()) if 3 <= len(said) <= 4 and said.isalnum() else None
+        if known is not None:
+            return known.spoken_name
+        if re.fullmatch(r"[A-Za-z][A-Za-z'-]*(?: [A-Za-z][A-Za-z'-]*){0,2}", said) and len(said) <= 32:
+            return said
+        return None
+
     def requested_runway(self, airport: Airport, issue: Issue | None = None, weather=None) -> str | None:
         """The runway the pilot asked for at this airport and was granted, for what the flight is doing now:
         departing (never landed or airborne yet) or arriving. With the weather, it is checked against the wind
@@ -955,9 +967,10 @@ class Engine:
                 )
             if has_plan:
                 return ifr.clearance(self, station, issue, raw, callsign, hello, faa, atis_part, on_correct)
-            if not intent.destination and not flight.destination:
+            asked = self._spoken_destination(intent.destination)
+            if not asked and not flight.destination:
                 return Reply(f"{callsign}, {hello}say destination")
-            flight.rules, flight.destination = "IFR", intent.destination or flight.destination
+            flight.rules, flight.destination = "IFR", asked or flight.destination
             flight.squawk = flight.squawk if flight.squawk and flight.squawk not in ("1200", "7000") else _squawk(self._rng)
             text = (
                 f"{callsign}, {hello}cleared to {flight.destination} as filed{runway_part}, "

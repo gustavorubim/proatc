@@ -11,6 +11,7 @@ runways, and anything not understood is left out: the wind and the flight plan t
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -26,6 +27,10 @@ FRESH_S = 600.0  # an ATIS is asked for again after ten minutes
 RETRY_S = 300.0  # after a failure, in five
 NONE_S = 3600.0  # an airport with no digital ATIS is asked about once an hour
 OLD_MIN = 180  # an ATIS issued more than three hours ago is not the airport as it is now
+MAX_TEXT = 3000  # characters of one ATIS read: a real one is under a thousand
+MAX_ENTRIES = 4  # a combined ATIS, or one for arrivals and one for departures
+MAX_BODY = 64_000  # bytes of the service's answer read: more is not an ATIS
+LOOK_BACK = 16  # characters before a number looked at to see whether "RWYS" or "/" introduces it
 
 WORDS = {"ZERO": "0", "ONE": "1", "TWO": "2", "THREE": "3", "FOUR": "4", "FIVE": "5", "SIX": "6", "SEVEN": "7",
          "EIGHT": "8", "NINER": "9", "NINE": "9"}  # fmt: skip
@@ -48,7 +53,10 @@ NOT_IN_USE = re.compile(
     r"|DISREGARD|CLSD|CLOSED|BRAKING|FICON|RCC|CONDITION|HOLD SHORT|HDSRT|H/S|CAUTION|EXITING|INCURSIONS?|CROSSING|NOTAMS?|NOTICE"
     r"|LGTS?|LIGHTS?|PAPI|REILS?|MALSR|ALS|TDZ|CRANES?|READBACK|READ BACK|TRANSPONDERS?|ONLY|EXPECT DELAYS?)\b"
 )
-RUNWAY_LIST = r"\d{1,2}[LRC]?(?:\s*(?:,|/|-|&|AND)?\s*(?:RWY\s+|RY\s+)?\d{1,2}[LRC]?)*"
+# Each number whole ((?!\d)), and the list taken as it is found (*+): a list the text does not close is given up
+# at once, rather than tried again every way its spaces and commas could be split, which takes a minute on a
+# few dozen numbers.
+RUNWAY_LIST = r"\d{1,2}(?!\d)[LRC]?(?:\s*(?:,|/|-|&|AND)?\s*(?:RWY\s+|RY\s+)?\d{1,2}(?!\d)[LRC]?)*+"
 # "RWY 27L, 9R CLSD": closed outright, with nothing after it that makes it a part of the runway or a time of day.
 CLOSED = re.compile(rf"\b(?:RWYS?|RUNWAYS?|RYS?)\s+({RUNWAY_LIST})\s+(?:IS\s+|ARE\s+)?(?:CLSD|CLOSED)(?=\s*(?:,|$|UFN))")
 STOP = re.compile(r"\b(AT|TWY|TAXIWAY|INT|INTERSECTION|BTN|BTWN|BETWEEN|VIA|ON|FROM|FT|FEET|FREQ)\b")  # no runway in use follows
@@ -96,7 +104,7 @@ def read(text: str, kind: str = "combined") -> tuple[list[str], list[str], list[
         if departs:
             departing.append(name)
 
-    for sentence in re.split(r"\.(?:\s+|$)", _plain(text)):
+    for sentence in re.split(r"\.(?:\s+|$)", _plain(text[:MAX_TEXT])):  # longer is not an ATIS: not read
         for shut in CLOSED.finditer(sentence):
             if not PLACE.search(sentence[sentence.rfind(",", 0, shut.start()) + 1 : shut.start()]):
                 closed += _named(shut.group(1))
@@ -130,7 +138,7 @@ def read(text: str, kind: str = "combined") -> tuple[list[str], list[str], list[
                 keyword_end = None
                 number, side = RUNWAY.fullmatch(word).groups()
                 name = f"{int(number)}{side or ''}"
-                introduced = bool(INTRODUCED.search(clause[: found.start()])) or (
+                introduced = bool(INTRODUCED.search(clause[max(0, found.start() - LOOK_BACK) : found.start()])) or (
                     list_end is not None and bool(JOINED.fullmatch(clause[list_end : found.start()]))
                 )
                 list_end = found.end() if introduced else None
@@ -165,7 +173,7 @@ def runways(airport: Airport, entries: list[dict], now_minutes: int | None = Non
     departing: list[str] = []
     closed: list[str] = []
     for entry in entries:
-        text, kind = str(entry.get("datis") or ""), str(entry.get("type") or "combined")
+        text, kind = str(entry.get("datis") or "")[:MAX_TEXT], str(entry.get("type") or "combined")
         if not text or _old(str(entry.get("time") or ""), now_minutes):
             continue
         lands, departs, shut = read(text, kind)
@@ -207,16 +215,23 @@ def publishes(ident: str) -> bool:
 def fetch(ident: str) -> list[dict] | None:
     """The airport's ATIS as the service gives it: a list of entries, empty when it has none. None on a failure."""
     try:
-        response = httpx.get(URL.format(ident=ident), timeout=TIMEOUT_S, follow_redirects=True, headers={"User-Agent": "ProATC"})
-        if response.status_code == 404:
-            return []
-        response.raise_for_status()
-        data = response.json()
+        with httpx.stream(
+            "GET", URL.format(ident=ident), timeout=TIMEOUT_S, follow_redirects=True, headers={"User-Agent": "ProATC"}
+        ) as response:
+            if response.status_code == 404:
+                return []
+            response.raise_for_status()
+            body = b""
+            for chunk in response.iter_bytes():
+                body += chunk
+                if len(body) > MAX_BODY:
+                    return None  # far more than an ATIS: not read any further
+        data = json.loads(body)
     except (httpx.HTTPError, ValueError):
         return None
     if isinstance(data, dict):
         return []  # {"error": ...}: no digital ATIS at this airport
-    return [entry for entry in data if isinstance(entry, dict)] if isinstance(data, list) else None
+    return [entry for entry in data if isinstance(entry, dict)][:MAX_ENTRIES] if isinstance(data, list) else None
 
 
 class RealAtis:

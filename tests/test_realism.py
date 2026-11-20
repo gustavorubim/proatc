@@ -23,7 +23,6 @@ from proatc.llm import Controller, LlmError
 from proatc.navdata import AirportDB, build_index
 from proatc.procedures import choose_approach, circling_approach, parse_cifp
 from proatc.radio import AtisBroadcaster
-from proatc.server import AppServer
 from proatc.taxi import aircraft_category, assign_stand, parse_taxi, route_to_runway
 from proatc.vectors import locate, next_vector
 from proatc.voice_loop import hearing_hints, known_names
@@ -539,72 +538,7 @@ def test_new_settings_are_checked(tmp_path, monkeypatch):
 # ---- the view for other devices -----------------------------------------------
 
 
-def test_another_device_gets_the_page_and_pairs_with_the_code(tmp_path, monkeypatch):
-    from websockets.exceptions import ConnectionClosed
-    from websockets.sync.client import connect
-
-    from proatc import server
-
-    web = tmp_path / "web"
-    (web / "assets").mkdir(parents=True)
-    (web / "index.html").write_text("<!doctype html><title>Pro ATC</title>", encoding="utf-8")
-    (web / "assets" / "app.js").write_text("console.log('hi')", encoding="utf-8")
-    (tmp_path / "secret.txt").write_text("not for the network", encoding="utf-8")
-    monkeypatch.setattr(config_module, "PROJECT_DIR", tmp_path)
-    monkeypatch.setattr(server, "PROJECT_DIR", tmp_path)
-    config = Config()
-    probe = __import__("socket").socket()
-    probe.bind(("127.0.0.1", 0))
-    config.remote.port = probe.getsockname()[1]
-    probe.close()
-    app = AppServer(config, 0, "app-token")
-
-    monkeypatch.delenv("PROATC_WEB_DIR", raising=False)
-    with pytest.raises(ValueError, match="needs the desktop app"):
-        app.set_remote(True)
-    monkeypatch.setenv("PROATC_WEB_DIR", str(web))
-    app.session.apply_settings({"remote": {"enabled": True}})
-    app.set_remote(True)
-    try:
-        base = f"http://127.0.0.1:{config.remote.port}"
-        page = httpx.get(base + "/")
-        assert page.status_code == 200 and "Pro ATC" in page.text and page.headers["content-type"].startswith("text/html")
-        assert httpx.get(base + "/assets/app.js").headers["content-type"].startswith("text/javascript")
-        assert httpx.get(base + "/../secret.txt").status_code == 404 and httpx.get(base + "/%2e%2e/secret.txt").status_code == 404
-        assert httpx.get(base + "/nothing.css").status_code == 404
-
-        info = app.remote_info()
-        code = info["code"]
-        assert info["running"] and len(code) == 8 and info["url"].endswith(f":{config.remote.port}")
-        assert server.pairing_code() == code  # the same code next time
-
-        app.backlog.append({"type": "info", "text": "hello phone"})
-        address = f"ws://127.0.0.1:{config.remote.port}/"
-        with connect(f"{address}?token={code.lower()}") as phone:
-            assert json.loads(phone.recv(timeout=5)) == {"type": "info", "text": "hello phone"}
-            # The key and the model are the computer's to change.
-            phone.send(json.dumps({"cmd": "set_key", "key": "sk-or-stolen"}))
-            assert "only be changed in the app" in json.loads(phone.recv(timeout=5))["text"]
-            phone.send(json.dumps({"cmd": "settings", "changes": {"llm": {"provider": "local"}, "atc": {"chatter": "off"}}}))
-            phone.send(json.dumps({"cmd": "settings", "changes": {"atc": {"holding": "always"}}}))
-        for _ in range(50):
-            if app.session.config.atc.holding == "always":
-                break
-            threading.Event().wait(0.05)
-        assert app.session.config.atc.chatter == "off" and app.session.config.llm.provider == "openrouter"
-        assert not (tmp_path / ".env").exists()
-
-        for wrong in ("WRONGCOD", "app-token", ""):  # the app's own token is not accepted from outside either
-            with pytest.raises(ConnectionClosed):
-                with connect(f"{address}?token={wrong}") as stranger:
-                    stranger.recv(timeout=5)
-        # After enough wrong codes, even the right one is refused for a while.
-        for _ in range(server.MAX_BAD_CODES):
-            assert not app._allowed("NOPE", remote=True)
-        assert not app._allowed(code, remote=True) and app._allowed("app-token", remote=False)
-    finally:
-        app.set_remote(False)
-    assert app.remote is None and not app.remote_info()["running"]
+# The view for other devices: tests/test_remote_view.py
 
 
 def test_spoken_helpers_used_by_the_new_calls():

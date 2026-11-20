@@ -9,13 +9,20 @@ App -> engine: {"cmd": "ptt", "down": bool}, {"cmd": "say", "text": str},
                {"cmd": "sound_check"}, {"cmd": "sound_check_answer", "heard": bool | None}, {"cmd": "report", "hide": bool}
 
 The view for other devices (a phone or tablet on the same network) is a second listener, off
-until it is switched on in the settings. It serves the app's own page over HTTP and accepts the
-same messages, but asks for a pairing code instead of the app's token, may not change the key,
-the language model or its own switch, and locks out a device that keeps guessing the code.
+until it is switched on in the settings. It serves the app's own page over plain HTTP: what it
+shows can be seen by anyone watching the network, so it shows and allows less than the app.
+- Pairing: a code shown on the computer for a few minutes, made new each time and good for one
+  device. That device is then given a token of its own, kept by its browser; the computer can
+  forget every paired device at once. A source that keeps guessing is refused for a while.
+- A paired device sends calls (typed, clicked, asked for), tunes, loads a plan and changes the ATC
+  and voice settings. It never keys the computer's microphone, captures a key, runs the sound
+  check, writes files, or changes the key, the model, push-to-talk, audio devices or its own
+  switch. It is not sent the SimBrief ID, the settings or the paths of saved files.
 """
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -34,7 +41,7 @@ from websockets.sync.server import serve
 from . import phraseology as say
 from .airspace import CONTROLLED
 from .atis import decoded, runways_in_use, uses_faa_style
-from .config import PROJECT_DIR, Config, editable_values, load_settings, save_settings
+from .config import PROJECT_DIR, Config, editable_values, load_settings, private, save_settings
 from .flightplan import PlanError, fetch_simbrief, manual
 from .intents import Intent
 from .navdata import AirportDB, distance_nm
@@ -44,8 +51,24 @@ from .xpbridge import SimUnavailable, describe, magnetic_variation, same_channel
 
 BACKLOG = 200
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O or 1/I: the code is typed on a phone
-MAX_BAD_CODES = 10  # wrong pairing codes within LOCKOUT_S before other devices are refused for a while
+MAX_BAD_CODES = 5  # wrong pairing codes from one source within LOCKOUT_S before it is refused for a while
 LOCKOUT_S = 300
+MAX_BAD_PAIRING = 40  # wrong codes from anywhere while a pairing window is open before it closes
+PAIRING_WINDOW_S = 300  # how long a pairing code shown on the computer is good for
+MAX_DEVICES = 8  # paired devices kept; the oldest is forgotten first
+# What a paired device may do. Everything else is the computer's: the microphone, the settings that are not
+# about ATC or voices, the key and the model, files, the sound check.
+REMOTE_COMMANDS = frozenset(("say", "click", "phrase", "explain", "what_next", "debrief", "tune", "chart", "simbrief",
+                             "plan", "clear_plan", "new_flight", "settings"))  # fmt: skip
+REMOTE_SETTINGS = frozenset(("atc", "tts", "radio"))
+# Calls that may cost the user's OpenRouter credit: a paired device makes no more than this many a minute.
+PAID_COMMANDS = frozenset(("say", "click", "phrase", "explain", "what_next", "debrief"))
+REMOTE_PAID_PER_MINUTE = 10
+# Events for the computer's own window only: they name files on it.
+PRIVATE_EVENTS = frozenset(("log_saved", "report_saved"))
+# Parts of the state a paired device is not sent: the SimBrief ID, the settings (a local model's address may
+# carry a password), this computer's checks, the pairing code, the sound check.
+PRIVATE_STATE = ("simbrief_user", "settings", "computer", "remote", "sound_check")
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".js": "text/javascript; charset=utf-8",
@@ -64,6 +87,29 @@ def web_dir() -> Path | None:
     return Path(folder) if folder and (Path(folder) / "index.html").exists() else None
 
 
+def page_files() -> dict[str, Path]:
+    """The page's files by the name a browser asks for them: 'index.html', 'assets/app.js'."""
+    root = web_dir()
+    if root is None:
+        return {}
+    root = root.resolve()
+    if root != _PAGE_FILES[0]:
+        files = {}
+        for path in root.rglob("*"):
+            if path.is_file() and not path.is_symlink() and path.suffix.lower() in CONTENT_TYPES:
+                files[path.relative_to(root).as_posix()] = path
+        _PAGE_FILES[:] = [root, files]
+    return _PAGE_FILES[1]
+
+
+_PAGE_FILES: list = [None, {}]  # (the folder, its files): the page does not change while the app runs
+
+
+def for_remote(state: dict) -> dict:
+    """The state as a paired device is sent it."""
+    return {key: value for key, value in state.items() if key not in PRIVATE_STATE}
+
+
 def lan_address() -> str:
     """This machine's address on the local network. Nothing is sent: connecting a UDP socket only picks a route."""
     probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -76,22 +122,31 @@ def lan_address() -> str:
         probe.close()
 
 
-def pairing_code() -> str:
-    """The code another device must enter. Made once and kept, so a bookmarked phone keeps working."""
-    code = load_settings().get("remote_code")
-    if not isinstance(code, str) or len(code) != 8:
-        code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
-        save_settings({"remote_code": code})
-    return code
+def new_code() -> str:
+    """A pairing code: eight characters a person can read off one screen and type on another."""
+    return "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
+
+
+def _digest(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def paired_devices() -> list[str]:
+    """The paired devices, as hashes of their tokens: what is kept on disk lets nobody in."""
+    found = load_settings().get("remote_devices")
+    return [entry for entry in found if isinstance(entry, str)] if isinstance(found, list) else []
 
 
 def save_key(key: str) -> None:
-    """Store the OpenRouter key in .env, replacing any existing one."""
+    """Store the OpenRouter key in .env, replacing any existing one. Readable by this user only."""
+    if any(c in key for c in "\r\n\0") or not key.isprintable():
+        raise ValueError("That does not look like an OpenRouter key.")
     env = PROJECT_DIR / ".env"
     lines = env.read_text(encoding="utf-8").splitlines() if env.exists() else []
     lines = [line for line in lines if not line.strip().startswith("OPENROUTER_API_KEY")]
     lines.append(f"OPENROUTER_API_KEY={key}")
     env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    private(env)
 
 
 def to_intent(data: dict) -> Intent:
@@ -241,7 +296,14 @@ class AppServer:
         self.lock = threading.Lock()
         self._last_state = ""
         self.remote = None  # the listener for other devices, while it is switched on
-        self._bad_codes: deque = deque(maxlen=MAX_BAD_CODES)
+        self.remote_clients: set = set()  # connections from paired devices
+        self._bad_codes: dict[str, deque] = {}  # source address -> when its wrong codes came
+        self._bad_pairing = 0  # wrong codes from anywhere while the pairing window is open
+        self._code = ""  # the pairing code while a pairing window is open
+        self._pairing_until = 0.0
+        self._paid: dict = {}  # paired connection -> when its paid calls came
+        self._ptt_owner = None  # the connection that keyed the microphone, while it is keyed
+        self._last_remote_state = ""
         self._address = lan_address()
 
     # ---- outgoing -----------------------------------------------------------
@@ -249,19 +311,24 @@ class AppServer:
     def emit(self, event: dict) -> None:
         if event.get("type") != "tx":
             self.backlog.append(event)
-        self._broadcast(json.dumps(event))
+        self._broadcast(json.dumps(event), None if event.get("type") in PRIVATE_EVENTS else json.dumps(event))
         if event.get("type") in ("status", "error", "info"):
             print(event["text"].strip(), flush=True)  # also in the engine's own log
 
-    def _broadcast(self, message: str) -> None:
+    def _broadcast(self, message: str, remote_message: str | None = None) -> None:
+        """`message` to the computer's window, `remote_message` to paired devices (None: not to them)."""
         with self.lock:
-            clients = list(self.clients)
-        for client in clients:
+            clients = [(client, client in self.remote_clients) for client in self.clients]
+        for client, remote in clients:
+            text = remote_message if remote else message
+            if text is None:
+                continue
             try:
-                client.send(message)
+                client.send(text)
             except Exception:
                 with self.lock:
                     self.clients.discard(client)
+                    self.remote_clients.discard(client)
 
     def _state_loop(self) -> None:
         db = None
@@ -274,40 +341,67 @@ class AppServer:
                 state = build_state(self.session, db)
                 state["remote"] = self.remote_info()
                 message = json.dumps(state)
+                remote_message = json.dumps(for_remote(state))
             except Exception as error:
-                message = json.dumps({"type": "error", "text": f"state: {type(error).__name__}: {error}"})
-            if message != self._last_state:
-                self._last_state = message
-                self._broadcast(message)
+                message = remote_message = json.dumps({"type": "error", "text": f"state: {type(error).__name__}"})
+            if message != self._last_state or remote_message != self._last_remote_state:
+                self._last_state, self._last_remote_state = message, remote_message
+                self._broadcast(message, remote_message)
 
     # ---- incoming -----------------------------------------------------------
 
-    def _allowed(self, token: str, remote: bool) -> bool:
+    def _allowed(self, token: str, remote: bool, source: str = "") -> bool | str:
+        """Whether a connection may come in: the app's token from this computer; from another device, its
+        own token, or the pairing code while the window for it is open ('paired': give it a token)."""
         if not remote:
-            return hmac.compare_digest(token, self.token)
+            return hmac.compare_digest(token.encode(), self.token.encode())
+        digest = _digest(token)
+        if token and any(hmac.compare_digest(digest, known) for known in paired_devices()):
+            return "device"
         now = time.monotonic()
-        if len(self._bad_codes) == MAX_BAD_CODES and now - self._bad_codes[0] < LOCKOUT_S:
-            return False  # too many wrong codes: nobody gets in from outside for a while
-        if hmac.compare_digest(token.upper(), pairing_code()):
-            return True
-        self._bad_codes.append(now)
+        bad = self._bad_codes.setdefault(source, deque(maxlen=MAX_BAD_CODES))
+        if len(bad) == MAX_BAD_CODES and now - bad[0] < LOCKOUT_S:
+            return False  # this source keeps guessing: refused for a while; other devices are not
+        if self.pairing_open() and hmac.compare_digest(token.upper().encode(), self._code.encode()):
+            self.close_pairing()  # one device per code
+            return "paired"
+        bad.append(now)
+        if self.pairing_open():
+            self._bad_pairing += 1
+            if self._bad_pairing >= MAX_BAD_PAIRING:
+                self.close_pairing()  # guessed at from many places: open it again on the computer
         return False
+
+    @staticmethod
+    def _same_origin(connection) -> bool:
+        """A browser says which page opened a connection: only the page this server gave may connect."""
+        headers = connection.request.headers
+        origin = headers.get("Origin")
+        return origin is None or urlparse(origin).netloc == headers.get("Host", "")
 
     def _handle(self, connection, remote: bool = False) -> None:
         query = parse_qs(urlparse(connection.request.path).query)
-        if not self._allowed(query.get("token", [""])[0], remote):
+        source = str((connection.remote_address or ("",))[0])
+        granted = (self._same_origin(connection) or not remote) and self._allowed(query.get("token", [""])[0], remote, source)
+        if not granted:
             connection.close(1008, "bad token")
             return
+        if granted == "paired":
+            connection.send(json.dumps({"type": "paired", "device": self._new_device()}))
         with self.lock:
             self.clients.add(connection)
+            if remote:
+                self.remote_clients.add(connection)
         try:
             for event in list(self.backlog):
-                connection.send(json.dumps(event))
-            if self._last_state:
-                connection.send(self._last_state)
+                if not (remote and event.get("type") in PRIVATE_EVENTS):
+                    connection.send(json.dumps(event))
+            last = self._last_remote_state if remote else self._last_state
+            if last:
+                connection.send(last)
             for message in connection:
                 try:
-                    self._command(json.loads(message), remote)
+                    self._command(json.loads(message), remote, connection)
                 except (PlanError, SimUnavailable, ValueError) as error:
                     self.emit({"type": "error", "text": str(error) or "That did not work."})
                 except Exception as error:
@@ -315,20 +409,79 @@ class AppServer:
         finally:
             with self.lock:
                 self.clients.discard(connection)
+                self.remote_clients.discard(connection)
+                self._paid.pop(connection, None)
+            if self._ptt_owner is connection and getattr(self.session, "ptt", None) is not None:
+                # The window that keyed the microphone has gone: the transmission ends, the microphone stops.
+                self._ptt_owner = None
+                self.session.ptt.release()
 
-    def _command(self, command: dict, remote: bool = False) -> None:
+    # ---- pairing --------------------------------------------------------------
+
+    def pairing_open(self) -> bool:
+        return bool(self._code) and time.monotonic() < self._pairing_until
+
+    def open_pairing(self) -> None:
+        """A new code, good for one device for a few minutes."""
+        self._code, self._pairing_until, self._bad_pairing = new_code(), time.monotonic() + PAIRING_WINDOW_S, 0
+
+    def close_pairing(self) -> None:
+        self._code, self._pairing_until = "", 0.0
+
+    @staticmethod
+    def _new_device() -> str:
+        """A token for a device that has just paired. Only its hash is kept."""
+        token = secrets.token_urlsafe(24)
+        save_settings({"remote_devices": [*paired_devices(), _digest(token)][-MAX_DEVICES:]})
+        return token
+
+    def forget_devices(self) -> None:
+        """Every paired device must pair again; those connected now are cut off."""
+        save_settings({"remote_devices": []})
+        self.close_pairing()
+        with self.lock:
+            connected = list(self.remote_clients)
+        for client in connected:
+            try:
+                client.close(1008, "forgotten")
+            except Exception:
+                pass  # gone already
+
+    def _paid_allowed(self, connection) -> bool:
+        """A paired device's calls that may cost credit: no more than REMOTE_PAID_PER_MINUTE a minute."""
+        now = time.monotonic()
+        with self.lock:
+            times = self._paid.setdefault(connection, deque(maxlen=REMOTE_PAID_PER_MINUTE))
+            if len(times) == REMOTE_PAID_PER_MINUTE and now - times[0] < 60:
+                return False
+            times.append(now)
+        return True
+
+    def _command(self, command: dict, remote: bool = False, connection=None) -> None:
         session, name = self.session, command.get("cmd")
         if remote and name == "set_key":
             raise ValueError("The key can only be changed in the app on the computer.")
+        if remote and name not in REMOTE_COMMANDS:
+            raise ValueError("That can only be done in the app on the computer.")
+        if remote and name in PAID_COMMANDS and not self._paid_allowed(connection):
+            raise ValueError("Too many requests from this device: wait a minute.")
+        if name == "pair_device":
+            self.open_pairing()
+            return
+        if name == "forget_devices":
+            self.forget_devices()
+            return
         if name == "settings":
             # Before the engine is ready too: the model and the view for other devices do not need it.
             changes = dict(command.get("changes") or {})
             if remote:
-                changes.pop("remote", None)
-                changes.pop("llm", None)
+                changes = {section: values for section, values in changes.items() if section in REMOTE_SETTINGS}
+            switched_on = bool((changes.get("remote") or {}).get("enabled")) and not self.remote
             session.apply_settings(changes)
             if "remote" in changes:
                 self.set_remote(session.config.remote.enabled)
+                if switched_on and self.remote:
+                    self.open_pairing()  # switched on now: a code to pair the first device with
             return
         if name == "set_key":
             key = str(command.get("key", "")).strip()
@@ -380,7 +533,12 @@ class AppServer:
         elif name == "reset_cost":
             session.usage.update(calls=0, prompt_tokens=0, completion_tokens=0, cost=0.0)
         elif name == "ptt":
-            session.ptt.press() if command.get("down") else session.ptt.release()
+            if command.get("down"):
+                session.ptt.press()
+                self._ptt_owner = connection
+            else:
+                self._ptt_owner = None
+                session.ptt.release()
         elif name == "phrase" and str(command.get("text", "")).strip():
             session.phrase(str(command["text"]))
         elif name == "say" and str(command.get("text", "")).strip():
@@ -397,12 +555,15 @@ class AppServer:
             "enabled": config.enabled,
             "running": self.remote is not None,
             "url": f"http://{self._address}:{config.port}",
-            "code": pairing_code() if config.enabled else "",
+            "code": self._code if config.enabled and self.pairing_open() else "",
+            "pairing_s": max(0, round(self._pairing_until - time.monotonic())) if self.pairing_open() else 0,
+            "devices": len(paired_devices()),
         }
 
     def set_remote(self, on: bool) -> None:
         """Start or stop listening for other devices on the network."""
         if not on:
+            self.close_pairing()
             if self.remote:
                 self.remote.shutdown()
                 self.remote = None
@@ -421,13 +582,14 @@ class AppServer:
 
     @staticmethod
     def _page(connection, request):
-        """Serve the app's page to a browser; let WebSocket requests through."""
+        """Serve the app's page to a browser; let WebSocket requests through. Only the files of the page are
+        served, looked up by name in a list made from its folder: the request never reaches the disk, so a name
+        like \\\\host\\share (which Windows would go and open, sending the user's login) is simply not found."""
         if request.headers.get("Upgrade", "").lower() == "websocket":
             return None
-        root = web_dir()
-        path = urlparse(request.path).path
-        target = (root / (path.lstrip("/") or "index.html")).resolve() if root else None
-        if target is None or not target.is_file() or root.resolve() not in target.parents:
+        name = urlparse(request.path).path.lstrip("/") or "index.html"
+        target = page_files().get(name)
+        if target is None:
             return connection.respond(404, "Not found\n")
         body = target.read_bytes()
         headers = Headers(

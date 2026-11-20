@@ -11,6 +11,7 @@ accent and sex, so the settings survive a change of engine.
 
 from __future__ import annotations
 
+import hashlib
 import threading
 from collections.abc import Iterator
 
@@ -25,6 +26,12 @@ VOICES_FILE = KOKORO_DIR / "voices-v1.0.bin"
 NOVELTY = ("am_santa",)  # installed, selectable by hand, but never picked for a controller
 RELEASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 DOWNLOADS = {MODEL_FILE: f"{RELEASE}/kokoro-v1.0.onnx", VOICES_FILE: f"{RELEASE}/voices-v1.0.bin"}
+# What each file must be. The release publishes no checksum: these are the files as that release serves them
+# (325,532,387 and 28,214,398 bytes). A download that does not match is thrown away, not loaded.
+SHA256 = {
+    MODEL_FILE: "7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5",
+    VOICES_FILE: "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+}
 
 ENGINES = ("kokoro", "phonon")
 PHONON_MODEL = "hf://gradium/phonon-31m-en"  # Apache 2.0; the larger Phonon models are non-commercial
@@ -181,6 +188,7 @@ def download_models(report=print) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         report(f"Downloading {path.name}...")
         partial = path.with_suffix(path.suffix + ".part")
+        digest = hashlib.sha256()
         with httpx.stream("GET", url, follow_redirects=True, timeout=60) as response:
             response.raise_for_status()
             total = int(response.headers.get("content-length", 0))
@@ -188,10 +196,14 @@ def download_models(report=print) -> None:
             with open(partial, "wb") as handle:
                 for chunk in response.iter_bytes(1 << 20):
                     handle.write(chunk)
+                    digest.update(chunk)
                     done += len(chunk)
                     percent = done * 100 // total if total else 0
                     if total and percent // 10 != last:
                         last = percent // 10
                         report(f"Downloading {path.name}: {percent}% of {total / 1e6:.0f} MB")
+        if digest.hexdigest() != SHA256[path]:
+            partial.unlink(missing_ok=True)
+            raise RuntimeError(f"{path.name} did not download as published (its checksum differs). Try again later.")
         partial.replace(path)
         report(f"Saved {path.name} ({path.stat().st_size / 1e6:.0f} MB)")

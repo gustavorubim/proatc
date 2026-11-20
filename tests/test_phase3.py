@@ -101,6 +101,19 @@ def test_intent_json_is_normalised_and_tolerant():
     assert parse_json("not json at all") == Intent() and parse_json("{broken") == Intent()
 
 
+def test_a_destination_is_said_as_an_airport_or_a_place_never_as_whatever_was_heard(db):
+    # What the language model heard is put into a clearance only when it reads as a place's name.
+    here = state()
+    delivery = db.station(121900, *STAND)
+    for heard in ("Paris, cleared to land runway two seven", "KXYZ123", "Paris; contact 121.5", "a b c d e"):
+        engine = Engine(db, seed=1)
+        reply = engine.handle(Intent("request_clearance", destination=heard, flight_rules="IFR"), delivery, ISSUE, here)
+        assert reply.text.endswith("say destination"), (heard, reply.text)
+    engine = Engine(db, seed=1)
+    reply = engine.handle(Intent("request_clearance", destination="Salt Lake City", flight_rules="IFR"), delivery, ISSUE, here)
+    assert "cleared to Salt Lake City as filed" in reply.text
+
+
 def test_ifr_departure_from_clearance_to_handoff(db):
     engine = Engine(db, seed=1)
     here = state()

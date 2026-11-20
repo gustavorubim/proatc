@@ -69,7 +69,8 @@ export function startUpdates(listener: (state: UpdateState) => void): void {
 
   const automatic = canSelfUpdate(process.platform, process.env)
   autoUpdater.autoDownload = automatic
-  autoUpdater.autoInstallOnAppQuit = automatic
+  // Never install behind the person's back when the app closes: only "Restart to update" does.
+  autoUpdater.autoInstallOnAppQuit = false
 
   autoUpdater.on('update-available', (info) =>
     set(

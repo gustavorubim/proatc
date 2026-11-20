@@ -219,3 +219,46 @@ def test_the_atis_station_itself_brings_the_real_runways_in(tmp_path):
     station = db.station(ATIS_KHZ, 36.002, -115.0)
     engine.real_runways(station.airport, REAL_WEATHER)  # what the ATIS broadcast does before it is put together
     assert "departing runways one right and one left" in compose(station.airport, SOUTH, "A", 12 * 3600)
+
+
+# ---- a hostile or broken service --------------------------------------------------------------------------------
+
+
+def test_a_crafted_text_is_read_at_once_and_does_not_freeze_the_engine(tmp_path):
+    # A list of runways the text never closes was tried again every way its spaces could be split: twenty-six
+    # numbers took a minute, while every thread of the engine waited.
+    import time
+
+    db, _ = world(tmp_path)
+    testville = db.airport("KXXX")
+    texts = ["RWY " + "1 " * 40 + "X", "RWY 1, 2 / 3 AND RY 4 " * 3000, "LANDING RWYS " + "26L AND " * 4000]
+    started = time.perf_counter()
+    for text in texts:
+        read(text)
+        runways(testville, [{"type": "combined", "datis": text}])
+    assert time.perf_counter() - started < 1.5
+
+
+def test_an_answer_far_larger_than_an_atis_is_not_read(monkeypatch):
+    import httpx
+
+    from proatc import datis
+
+    class Huge:
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_bytes(self):
+            while True:
+                yield b"[" + b" " * 65536
+
+    monkeypatch.setattr(httpx, "stream", lambda *args, **kwargs: Huge())
+    assert datis.fetch("KLAS") is None
