@@ -57,6 +57,7 @@ MAX_BAD_PAIRING = 40  # wrong codes from anywhere while a pairing window is open
 PAIRING_WINDOW_S = 300  # how long a pairing code shown on the computer is good for
 MAX_DEVICES = 8  # paired devices kept; the oldest is forgotten first
 DEVICE_DAYS = 30  # a paired device must pair again after this: its token crosses the network in the clear
+DEVICE_RECHECK_S = 30  # how often connected devices are checked against the paired ones
 # What a paired device may do. Everything else is the computer's: the microphone, the settings that are not
 # about ATC or voices, the key and the model, files, the sound check.
 REMOTE_COMMANDS = frozenset(("say", "click", "phrase", "explain", "what_next", "debrief", "tune", "chart", "simbrief",
@@ -353,7 +354,11 @@ class AppServer:
     def _state_loop(self) -> None:
         db = None
         stop = threading.Event()
+        checked = time.monotonic()
         while not stop.wait(0.7):
+            if time.monotonic() - checked >= DEVICE_RECHECK_S:
+                checked = time.monotonic()
+                self.cut_off_unpaired()
             try:
                 if self.session.ready and db is None:
                     db = AirportDB()
@@ -471,6 +476,18 @@ class AppServer:
         for client in connected:
             try:
                 client.close(1008, "forgotten")
+            except Exception:
+                pass  # gone already
+
+    def cut_off_unpaired(self) -> None:
+        """Close the connections of devices no longer paired: their month is up, or they were forgotten. A device
+        is let in while it is paired; it does not stay in after."""
+        paired = set(paired_devices())
+        with self.lock:
+            gone = [connection for connection, device in self._device_of.items() if device not in paired]
+        for connection in gone:
+            try:
+                connection.close(1008, "pair again")
             except Exception:
                 pass  # gone already
 
