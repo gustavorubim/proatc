@@ -59,7 +59,7 @@ def test_the_report_never_holds_the_key_the_simbrief_id_or_the_pairing_code(tmp_
     assert everything.count(report.REMOVED) >= 4 and ".env" not in everything
 
     about = json.loads(files["about.json"])
-    assert about["settings"]["llm"]["local_url"] == "http://pc:11434/v1" and about["python"] and about["system"]
+    assert about["settings"]["llm"]["local_url"] == "http://pc:11434" and about["python"] and about["system"]
     assert "simbrief_user" not in files["about.json"] and "remote_code" not in files["about.json"]
     # Without hiding, the flight is there as it was: the README says so.
     assert "G-ABCD" in files["journal/session-20261117-100000.jsonl"] and "51.47123" in everything
@@ -211,6 +211,24 @@ def test_a_local_model_that_cannot_be_reached_is_reported_without_its_password()
     try:
         controller.complete("system", "user")
     except LlmError as error:
-        assert "s3cret-pw" not in str(error) and "127.0.0.1:9/v1" in str(error)
+        assert "s3cret-pw" not in str(error) and "127.0.0.1:9" in str(error) and "/v1" not in str(error)
     else:
         raise AssertionError("expected the model to be unreachable")
+
+
+def test_the_report_hides_a_token_in_the_address_of_a_local_model_set_only_in_config_toml(tmp_path, monkeypatch):
+    # The address in use may come from config.toml, which settings.json never sees; and a token may be in its path.
+    from proatc import config as config_module
+    from proatc import report
+    from proatc.config import Config
+
+    monkeypatch.setattr(config_module, "PROJECT_DIR", tmp_path)
+    token = "tk-8f2c9a7e41d03b65"
+    config = Config()
+    config.llm.local_url = f"https://gateway.example/{token}/v1/chat/completions"
+    hidden = report.secrets(config)
+    cleaned = report.scrub(f"error at https://gateway.example/{token}/v1/chat/completions", hidden)
+    assert token not in cleaned
+    assert report.safe_settings(config)["llm"]["local_url"] == "https://gateway.example"
+    # An ordinary address hides nothing: there is nothing in it to hide.
+    assert config_module.url_secrets("http://localhost:11434/v1/chat/completions") == set()

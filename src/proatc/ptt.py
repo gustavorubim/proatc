@@ -17,9 +17,10 @@ def _parse_key(name: str):
 
 
 class PushToTalk:
-    def __init__(self, key_name: str, on_down=None):
+    def __init__(self, key_name: str, on_down=None, on_up=None):
         self.key = _parse_key(key_name)
         self.on_down = on_down  # called once each time transmission starts
+        self.on_up = on_up  # called once each time it ends: the key let go, a window gone, or too long
         self.pressed = threading.Event()
         self.released = threading.Event()
         self.released.set()
@@ -45,8 +46,11 @@ class PushToTalk:
                 self.on_down()
 
     def release(self) -> None:
+        was_down = self.pressed.is_set()
         self.pressed.clear()
         self.released.set()
+        if was_down and self.on_up:
+            self.on_up()
 
     def start(self) -> None:
         self._listener.start()

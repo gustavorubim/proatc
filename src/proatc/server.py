@@ -56,6 +56,7 @@ LOCKOUT_S = 300
 MAX_BAD_PAIRING = 40  # wrong codes from anywhere while a pairing window is open before it closes
 PAIRING_WINDOW_S = 300  # how long a pairing code shown on the computer is good for
 MAX_DEVICES = 8  # paired devices kept; the oldest is forgotten first
+DEVICE_DAYS = 30  # a paired device must pair again after this: its token crosses the network in the clear
 # What a paired device may do. Everything else is the computer's: the microphone, the settings that are not
 # about ATC or voices, the key and the model, files, the sound check.
 REMOTE_COMMANDS = frozenset(("say", "click", "phrase", "explain", "what_next", "debrief", "tune", "chart", "simbrief",
@@ -63,7 +64,8 @@ REMOTE_COMMANDS = frozenset(("say", "click", "phrase", "explain", "what_next", "
 REMOTE_SETTINGS = frozenset(("atc", "tts", "radio"))
 # Calls that may cost the user's OpenRouter credit: a paired device makes no more than this many a minute.
 PAID_COMMANDS = frozenset(("say", "click", "phrase", "explain", "what_next", "debrief"))
-REMOTE_PAID_PER_MINUTE = 10
+REMOTE_PAID_PER_MINUTE = 10  # for each paired device, however often it reconnects
+REMOTE_PAID_PER_HOUR = 120  # for all paired devices together: what they can spend of the key's credit
 # Events for the computer's own window only: they name files on it.
 PRIVATE_EVENTS = frozenset(("log_saved", "report_saved"))
 # Parts of the state a paired device is not sent: the SimBrief ID, the settings (a local model's address may
@@ -131,10 +133,24 @@ def _digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def paired_devices() -> list[str]:
-    """The paired devices, as hashes of their tokens: what is kept on disk lets nobody in."""
+def _device_entries(now: float | None = None) -> list[dict]:
+    """The paired devices still allowed in: the hash of each one's token (what is kept on disk lets nobody in)
+    and when it paired. A device paired before pairing had an age (a bare hash) counts from now."""
+    now = time.time() if now is None else now
     found = load_settings().get("remote_devices")
-    return [entry for entry in found if isinstance(entry, str)] if isinstance(found, list) else []
+    entries = []
+    for entry in found if isinstance(found, list) else []:
+        if isinstance(entry, str):
+            entry = {"hash": entry, "paired": now}
+        if isinstance(entry, dict) and isinstance(entry.get("hash"), str) and isinstance(entry.get("paired"), (int, float)):
+            if now - entry["paired"] < DEVICE_DAYS * 86400:
+                entries.append({"hash": entry["hash"], "paired": entry["paired"]})
+    return entries
+
+
+def paired_devices() -> list[str]:
+    """The hashes of the paired devices' tokens that still let them in."""
+    return [entry["hash"] for entry in _device_entries()]
 
 
 def save_key(key: str) -> None:
@@ -301,10 +317,14 @@ class AppServer:
         self._bad_pairing = 0  # wrong codes from anywhere while the pairing window is open
         self._code = ""  # the pairing code while a pairing window is open
         self._pairing_until = 0.0
-        self._paid: dict = {}  # paired connection -> when its paid calls came
+        self._paid: dict[str, deque] = {}  # paired device (its token's hash) -> when its paid calls came
+        self._paid_all: deque = deque(maxlen=REMOTE_PAID_PER_HOUR)  # every paired device's paid calls
+        self._device_of: dict = {}  # paired connection -> its device (the hash of its token)
         self._ptt_owner = None  # the connection that keyed the microphone, while it is keyed
         self._last_remote_state = ""
         self._address = lan_address()
+        if load_settings().get("remote_devices"):
+            save_settings({"remote_devices": _device_entries()})  # an age for each, and the expired gone
 
     # ---- outgoing -----------------------------------------------------------
 
@@ -382,17 +402,22 @@ class AppServer:
     def _handle(self, connection, remote: bool = False) -> None:
         query = parse_qs(urlparse(connection.request.path).query)
         source = str((connection.remote_address or ("",))[0])
-        granted = (self._same_origin(connection) or not remote) and self._allowed(query.get("token", [""])[0], remote, source)
+        token, device = query.get("token", [""])[0], None
+        with self.lock:
+            granted = (self._same_origin(connection) or not remote) and self._allowed(token, remote, source)
+            if granted:
+                if granted == "paired":
+                    device = self._new_device()
+                self.clients.add(connection)
+                if remote:
+                    self.remote_clients.add(connection)
+                    self._device_of[connection] = _digest(device or token)
         if not granted:
             connection.close(1008, "bad token")
             return
-        if granted == "paired":
-            connection.send(json.dumps({"type": "paired", "device": self._new_device()}))
-        with self.lock:
-            self.clients.add(connection)
-            if remote:
-                self.remote_clients.add(connection)
         try:
+            if device:
+                connection.send(json.dumps({"type": "paired", "device": device}))
             for event in list(self.backlog):
                 if not (remote and event.get("type") in PRIVATE_EVENTS):
                     connection.send(json.dumps(event))
@@ -410,7 +435,7 @@ class AppServer:
             with self.lock:
                 self.clients.discard(connection)
                 self.remote_clients.discard(connection)
-                self._paid.pop(connection, None)
+                self._device_of.pop(connection, None)
             if self._ptt_owner is connection and getattr(self.session, "ptt", None) is not None:
                 # The window that keyed the microphone has gone: the transmission ends, the microphone stops.
                 self._ptt_owner = None
@@ -432,15 +457,17 @@ class AppServer:
     def _new_device() -> str:
         """A token for a device that has just paired. Only its hash is kept."""
         token = secrets.token_urlsafe(24)
-        save_settings({"remote_devices": [*paired_devices(), _digest(token)][-MAX_DEVICES:]})
+        entries = [*_device_entries(), {"hash": _digest(token), "paired": time.time()}]
+        save_settings({"remote_devices": entries[-MAX_DEVICES:]})
         return token
 
     def forget_devices(self) -> None:
         """Every paired device must pair again; those connected now are cut off."""
-        save_settings({"remote_devices": []})
-        self.close_pairing()
-        with self.lock:
+        with self.lock:  # no device is let in while this runs: each is either cut off below or refused
+            save_settings({"remote_devices": []})
+            self.close_pairing()
             connected = list(self.remote_clients)
+            self._paid.clear()
         for client in connected:
             try:
                 client.close(1008, "forgotten")
@@ -448,13 +475,18 @@ class AppServer:
                 pass  # gone already
 
     def _paid_allowed(self, connection) -> bool:
-        """A paired device's calls that may cost credit: no more than REMOTE_PAID_PER_MINUTE a minute."""
+        """A paired device's calls that may cost credit: REMOTE_PAID_PER_MINUTE a minute for each device, counted
+        by device so that reconnecting does not start the count again, and REMOTE_PAID_PER_HOUR for all of them."""
         now = time.monotonic()
         with self.lock:
-            times = self._paid.setdefault(connection, deque(maxlen=REMOTE_PAID_PER_MINUTE))
+            device = self._device_of.get(connection, "")
+            times = self._paid.setdefault(device, deque(maxlen=REMOTE_PAID_PER_MINUTE))
             if len(times) == REMOTE_PAID_PER_MINUTE and now - times[0] < 60:
                 return False
+            if len(self._paid_all) == REMOTE_PAID_PER_HOUR and now - self._paid_all[0] < 3600:
+                return False
             times.append(now)
+            self._paid_all.append(now)
         return True
 
     def _command(self, command: dict, remote: bool = False, connection=None) -> None:
@@ -464,7 +496,7 @@ class AppServer:
         if remote and name not in REMOTE_COMMANDS:
             raise ValueError("That can only be done in the app on the computer.")
         if remote and name in PAID_COMMANDS and not self._paid_allowed(connection):
-            raise ValueError("Too many requests from this device: wait a minute.")
+            raise ValueError("Too many requests from other devices: wait a minute, or use the app on the computer.")
         if name == "pair_device":
             self.open_pairing()
             return

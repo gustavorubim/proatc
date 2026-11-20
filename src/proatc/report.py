@@ -19,10 +19,9 @@ import sys
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from . import phraseology as say
-from .config import editable_values, load_settings, openrouter_key, safe_url
+from .config import editable_values, load_settings, openrouter_key, safe_url, url_secrets
 from .soundcheck import last
 
 ISSUE_URL = "https://github.com/gustavorubim/proatc/issues/new"
@@ -64,21 +63,18 @@ SHOWN = 'To leave out the callsign and exact positions, make the report again wi
 # ---- secrets ---------------------------------------------------------------------
 
 
-def secrets() -> list[str]:
+def secrets(config=None) -> list[str]:
     """The values that must never leave the computer: the key, the SimBrief ID, the pairing code, a password or
-    token in the local model's address, and the user's home folder (which holds their name), as errors write it."""
+    token in the local model's address, and the user's home folder (which holds their name), as errors write it.
+    The local model's address as it is in use (`config`, which includes config.toml) and as the app saved it."""
     settings = load_settings()  # includes SIMBRIEF_USER from .env when no other account was used
     found = {str(value).strip() for value in (openrouter_key(), settings.get("simbrief_user"), settings.get("remote_code"))
              if value and str(value).strip()}  # fmt: skip
-    local = str((settings.get("config") or {}).get("llm", {}).get("local_url") or "")
-    try:
-        parts = urlsplit(local)
-        found |= {value for value in (parts.username, parts.password) if value}
-        found |= {value for pair in parts.query.split("&") for value in pair.split("=")[1:] if len(value) >= 4}
-        if parts.username or parts.password or parts.query:
-            found.add(local)
-    except ValueError:
-        pass
+    addresses = {str((settings.get("config") or {}).get("llm", {}).get("local_url") or "")}
+    if config is not None:
+        addresses.add(str(config.llm.local_url or ""))
+    for local in addresses:
+        found |= url_secrets(local)
     home = str(Path.home())
     if len(home) > 3:  # not a bare drive or "/"
         found |= {home, home.replace("\\", "/")}
@@ -201,7 +197,7 @@ def write(home: Path, config, hide: bool, computer: list[dict], now: datetime | 
     """Write the report to `logs/reports/` in the data folder `home`. Returns the zip's path."""
     now = now or datetime.now()
     logs = home / "logs"
-    hidden = secrets()
+    hidden = secrets(config)
     chosen = journals(logs / "journal", now)
     about = {
         "pro_atc": version(),

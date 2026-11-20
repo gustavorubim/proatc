@@ -279,3 +279,70 @@ def test_a_key_with_a_line_break_is_not_written_into_the_env_file(tmp_path, monk
     assert not (tmp_path / ".env").exists()
     server.save_key("sk-or-abc")
     assert (tmp_path / ".env").read_text(encoding="utf-8") == "OPENROUTER_API_KEY=sk-or-abc\n"
+
+
+# ---- a second review ------------------------------------------------------------------------------------------
+
+
+def test_reconnecting_does_not_start_a_devices_count_of_paid_calls_again(app):
+    device = pair(app)
+    counted = server._digest(device)
+    for connection in range(2):  # the same device, two connections: the limit is the device's, not the connection's
+        with connect(f"{address(app)}?token={device}") as phone:
+            for _ in range(server.REMOTE_PAID_PER_MINUTE // 2):
+                phone.send(json.dumps({"cmd": "explain"}))
+            for _ in range(100):  # until the server has counted them
+                if len(app._paid.get(counted, ())) == (connection + 1) * (server.REMOTE_PAID_PER_MINUTE // 2):
+                    break
+                threading.Event().wait(0.02)
+    with connect(f"{address(app)}?token={device}") as phone:
+        phone.send(json.dumps({"cmd": "explain"}))
+        assert "Too many requests" in answers(phone, "error", tries=60)["text"]
+
+
+def test_all_paired_devices_together_can_spend_only_so_much(app, monkeypatch):
+    from collections import deque
+
+    app._paid_all = deque(maxlen=3)
+    monkeypatch.setattr(server, "REMOTE_PAID_PER_HOUR", 3)
+    phones = [object() for _ in range(4)]
+    for number, phone in enumerate(phones):
+        app._device_of[phone] = f"device-{number}"  # four devices, one call each
+    assert [app._paid_allowed(phone) for phone in phones] == [True, True, True, False]
+
+
+def test_a_device_let_in_while_every_device_is_forgotten_is_cut_off_with_the_others(app, monkeypatch):
+    # "Forget all" used to close only the connections already registered: one let in just before, and registered
+    # just after, stayed connected. Being let in and being registered are now one step "Forget all" waits for.
+    device = pair(app)
+    allowed, forgotten, once = app._allowed, threading.Event(), []
+
+    def let_in_then_forget(token, remote, source=""):
+        granted = allowed(token, remote, source)
+        if remote and not once:
+            once.append(1)
+            threading.Thread(target=lambda: (app.forget_devices(), forgotten.set()), daemon=True).start()
+            forgotten.wait(1)  # forgotten here, between being let in and being registered, when nothing stops it
+        return granted
+
+    monkeypatch.setattr(app, "_allowed", let_in_then_forget)
+    with pytest.raises(ConnectionClosed):
+        with connect(f"{address(app)}?token={device}") as phone:
+            for _ in range(200):
+                phone.recv(timeout=5)
+    assert forgotten.wait(5) and app.remote_info()["devices"] == 0
+
+
+def test_a_paired_device_must_pair_again_after_a_month(app):
+    import time
+
+    month_ago = time.time() - (server.DEVICE_DAYS + 1) * 86400
+    server.save_settings({"remote_devices": [{"hash": server._digest("old-device"), "paired": month_ago},
+                                             {"hash": server._digest("new-device"), "paired": time.time()}]})  # fmt: skip
+    assert app._allowed("old-device", remote=True, source="192.0.2.20") is False
+    assert app._allowed("new-device", remote=True, source="192.0.2.21") == "device"
+    assert app.remote_info()["devices"] == 1
+    # A device paired by 0.21.0 (a hash alone) is let in, and its month counts from now.
+    server.save_settings({"remote_devices": [server._digest("from-0.21")]})
+    assert server._device_entries()[0]["hash"] == server._digest("from-0.21")
+    assert app._allowed("from-0.21", remote=True, source="192.0.2.22") == "device"
