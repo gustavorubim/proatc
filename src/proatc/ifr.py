@@ -819,9 +819,13 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     # is too high, and the approach's own altitude waits inside the circle. At the approach's own altitude it is the
     # approach as published over high ground, flown as it is.
     high = vector.stage == "intercept" and (excess > 0 if excess is not None else raised)
+    # Held at the floor, the aircraft would meet the glide path far out (7,800 ft is on it 24 miles from the runway),
+    # where no glideslope is received: it flies level through the path and is high from there on. The approach is
+    # not cleared from the floor. It waits for the circle, and the descent to the approach's own altitude.
+    waits = vector.stage == "intercept" and raised
     lower = max(pattern_ft(arrival.platform_ft, safe), floor)  # what a leg flown out again is flown at
     closing = False
-    if high and inbound and (position.along_nm > arrival.final_nm + TURN_OUT_WITHIN_NM or beyond):
+    if (high or waits) and inbound and (position.along_nm > arrival.final_nm + TURN_OUT_WITHIN_NM or beyond):
         # Too high to get down to the glide path from here, with miles still to go: down first, and cleared for the
         # approach once it can make it. Never cleared from where it could only meet the path from above.
         vector = Vector("descend", None, vector.altitude_ft)
@@ -829,7 +833,7 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
         # Turned out already, or on a downwind leg: it flies on, away from the airport and down to the level it was
         # given, until an intercept from where it is can make the glide path. Nothing new to say meanwhile.
         return None if not first else _reply(engine, f"{callsign}, {lead.rstrip(', ')}") if lead else None
-    elif high and raised and _joins_inside_circle(airport, arrival, position):
+    elif waits and _joins_inside_circle(airport, arrival, position):
         # On a base leg, beyond the circle: turned toward final at the floor, once, without the approach clearance.
         # That comes inside the circle, with the descent to the altitude the approach is joined at. Where final is
         # joined beyond the circle (high ground all round), there is nothing to wait for: cleared as it is.
