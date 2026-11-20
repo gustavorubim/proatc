@@ -415,13 +415,16 @@ def test_a_device_pairing_while_the_devices_are_checked_is_not_cut_off(app, monk
     # compared with the older list and cut off. Both now happen under the lock that lets a device in.
     app._command({"cmd": "pair_device"})
     code = app.remote_info()["code"]
-    real, started = server.paired_devices, []
+    real, started, done = server.paired_devices, [], threading.Event()
 
-    def phone():
+    def phone():  # stays connected, however slow the machine, until the test ends
         try:
             with connect(f"{address(app)}?token={code}") as ws:
-                while True:
-                    ws.recv(timeout=3)
+                while not done.is_set():
+                    try:
+                        ws.recv(timeout=0.2)
+                    except TimeoutError:
+                        continue
         except Exception:
             pass
 
@@ -440,12 +443,15 @@ def test_a_device_pairing_while_the_devices_are_checked_is_not_cut_off(app, monk
     sweep = threading.Thread(target=app.cut_off_unpaired, name="sweep")
     sweep.start()
     sweep.join(5)
-    for _ in range(100):
+    for _ in range(250):
         if app._device_of:
             break
         threading.Event().wait(0.02)
-    threading.Event().wait(0.3)
-    assert len(app._device_of) == 1  # paired, and still connected
+    threading.Event().wait(0.5)
+    try:
+        assert len(app._device_of) == 1  # paired, and still connected
+    finally:
+        done.set()
 
 
 def test_a_client_that_stops_reading_holds_up_nobody_else(app):

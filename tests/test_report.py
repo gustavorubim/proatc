@@ -195,7 +195,7 @@ def test_the_report_hides_a_local_models_password_and_the_users_home_folder(tmp_
     monkeypatch.setattr(config_module, "PROJECT_DIR", tmp_path)
     config_module.save_settings({"config": {"llm": {"local_url": "http://me:s3cret-pw@pc:11434/v1?token=abcd1234"}}})
     hidden = report.secrets()
-    text = "could not reach http://me:s3cret-pw@pc:11434/v1?token=abcd1234 from " + str(Path.home()) + "\logs"
+    text = "could not reach http://me:s3cret-pw@pc:11434/v1?token=abcd1234 from " + str(Path.home() / "logs")
     cleaned = report.scrub(text, hidden)
     assert "s3cret-pw" not in cleaned and "abcd1234" not in cleaned and str(Path.home()) not in cleaned
 
