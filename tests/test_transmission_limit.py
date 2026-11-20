@@ -43,6 +43,7 @@ def key(on_down, on_up) -> PushToTalk:
     ptt.on_down, ptt.on_up = on_down, on_up
     ptt.pressed, ptt.released = threading.Event(), threading.Event()
     ptt.released.set()
+    ptt.lock, ptt.presses = threading.RLock(), 0
     return ptt
 
 
@@ -105,7 +106,7 @@ def test_a_microphone_that_failed_at_key_down_is_not_opened_after_the_key_is_let
                 raise KeyboardInterrupt  # the end of the run
             return self.jobs.pop(0)
 
-    session.jobs = Jobs(("voice", None, None))
+    session.jobs = Jobs(("voice", session.ptt.presses, None))
     session.player = type("Player", (), {"stop": lambda self: None})()
     session._after_transmission = session.close = lambda: None
     for part in ("bridge", "db", "book", "stt", "tts", "controller", "engine", "parser"):
@@ -114,3 +115,44 @@ def test_a_microphone_that_failed_at_key_down_is_not_opened_after_the_key_is_let
     assert exchanged == []  # the job did not try the microphone again
     assert not any(event["type"] == "error" and "Microphone" not in event["text"] for event in session.events)
     assert any("Microphone" in event.get("text", "") for event in session.events)
+
+
+def test_a_key_let_go_while_the_microphone_is_tried_again_never_leaves_it_opened_after(session, monkeypatch):
+    # The worker checked that the key was held, then opened the microphone: let go in between, the microphone
+    # opened after the key was up. A release now waits for the attempt, and then stops it.
+    class Late(Microphone):
+        def __init__(self):
+            super().__init__()
+            self.tries, self.opened_after_release = 0, False
+
+        def start(self):
+            self.tries += 1
+            if self.tries == 1:
+                raise OSError("busy")  # at key-down
+            letting_go = threading.Thread(target=session.ptt.release)
+            letting_go.start()
+            letting_go.join(0.5)  # the pilot lets go now
+            self.opened_after_release = not session.ptt.pressed.is_set()
+            self.recording = True
+
+    session.recorder = Late()
+    session.ptt.press()
+
+    class Jobs:
+        def __init__(self, *jobs):
+            self.jobs = list(jobs)
+
+        def get(self):
+            if not self.jobs:
+                raise KeyboardInterrupt
+            return self.jobs.pop(0)
+
+    session.jobs = Jobs(("voice", session.ptt.presses, None))
+    session.player = type("Player", (), {"stop": lambda self: None})()
+    session._after_transmission = session.close = lambda: None
+    session.bridge = type("Bridge", (), {"connected": False})()
+    for part in ("db", "book", "stt", "tts", "controller", "engine", "parser"):
+        setattr(session, part, None)
+    session.run_forever()
+    assert session.recorder.tries == 2 and not session.recorder.opened_after_release
+    assert not session.recorder.recording  # stopped once the key was let go

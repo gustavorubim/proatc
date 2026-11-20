@@ -16,6 +16,7 @@ import queue
 import re
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import asdict
 
 from . import phrasing, questions, resolver, soundcheck, system_check
@@ -303,7 +304,7 @@ class Session:
                 self._recording = True
             except Exception as error:  # the job tries again, and reports what is wrong
                 self.emit({"type": "error", "text": f"Microphone: {error}"})
-        self.jobs.put(("voice", None, None))
+        self.jobs.put(("voice", getattr(self.ptt, "presses", None), None))  # for this press
 
     def _key_up(self) -> None:
         """The transmission ended: the microphone stops now, even while the job for the call is still waiting
@@ -317,6 +318,19 @@ class Session:
                 recorder.halt()
             except Exception:
                 pass  # the job's own stop reports a microphone that misbehaves
+
+    def _microphone_again(self, press) -> bool:
+        """The microphone did not start when the key went down (that was reported): try once more, for that same
+        press while it is still held. Under the key's lock, so a release waits for this and then stops it."""
+        with getattr(self.ptt, "lock", None) or nullcontext():
+            if press is None or press != getattr(self.ptt, "presses", None) or not self.ptt.pressed.is_set():
+                return False
+            try:
+                self.recorder.start()
+                return True
+            except Exception as error:
+                self.emit({"type": "error", "text": f"Microphone: {error}"})
+                return False
 
     def _too_long(self, timer) -> None:
         """A key left down (a window or a device gone, a key the system never let go): the transmission ends."""
@@ -613,12 +627,10 @@ class Session:
                     try:
                         if kind == "voice":
                             recording, self._recording = self._recording, False  # a key going down again sets it anew
-                            # The microphone did not start at key-down (that was reported): it is tried again only
-                            # while the key is still held, never opened after the pilot let go.
-                            if recording or self.ptt.pressed.is_set():
+                            if recording or self._microphone_again(text):
                                 _exchange(self.config, self.bridge, self.db, self.book, self.stt, self.tts,
                                           self.controller, self.player, self.ptt, self.recorder, self.engine,
-                                          self.parser, self.emit, on_khz=self._keyed_khz, recording=recording)  # fmt: skip
+                                          self.parser, self.emit, on_khz=self._keyed_khz, recording=True)  # fmt: skip
                         elif kind in ("explain", "what_next"):
                             self._instructor(kind)
                         elif kind == "debrief":

@@ -405,3 +405,112 @@ def test_a_settings_save_running_alongside_forget_all_does_not_bring_the_devices
     saver.join(5)
     forgetting.join(5)
     assert server.paired_devices() == [] and server.load_settings()["simbrief_user"] == "someone"
+
+
+# ---- a fourth review ------------------------------------------------------------------------------------------
+
+
+def test_a_device_pairing_while_the_devices_are_checked_is_not_cut_off(app, monkeypatch):
+    # The check read the list of paired devices, then looked at the connections: a device paired in between was
+    # compared with the older list and cut off. Both now happen under the lock that lets a device in.
+    app._command({"cmd": "pair_device"})
+    code = app.remote_info()["code"]
+    real, started, done = server.paired_devices, [], threading.Event()
+
+    def phone():  # stays connected, however slow the machine, until the test ends
+        try:
+            with connect(f"{address(app)}?token={code}") as ws:
+                while not done.is_set():
+                    try:
+                        ws.recv(timeout=0.2)
+                    except TimeoutError:
+                        continue
+        except Exception:
+            pass
+
+    def list_then_pair():
+        found = real()
+        if threading.current_thread().name == "sweep" and not started:
+            started.append(threading.Thread(target=phone, daemon=True))
+            started[0].start()
+            for _ in range(50):  # the device pairs now, if nothing stops it
+                if app._device_of:
+                    break
+                threading.Event().wait(0.02)
+        return found
+
+    monkeypatch.setattr(server, "paired_devices", list_then_pair)
+    sweep = threading.Thread(target=app.cut_off_unpaired, name="sweep")
+    sweep.start()
+    sweep.join(5)
+    for _ in range(250):
+        if app._device_of:
+            break
+        threading.Event().wait(0.02)
+    threading.Event().wait(0.5)
+    try:
+        assert len(app._device_of) == 1  # paired, and still connected
+    finally:
+        done.set()
+
+
+def test_a_client_that_stops_reading_holds_up_nobody_else(app):
+    class Stuck:
+        socket = None
+
+        def __init__(self):
+            self.unstuck = threading.Event()
+
+        def send(self, text):
+            self.unstuck.wait(60)  # a client that never reads: the write never finishes
+
+    class Reader:
+        def __init__(self):
+            self.got = []
+
+        def send(self, text):
+            self.got.append(text)
+
+    stuck, reader = Stuck(), Reader()
+    with app.lock:
+        for client in (stuck, reader):
+            app._outbox[client] = server.Outbox(client)
+            app.clients.add(client)
+
+    def send_all():
+        for n in range(server.OUTBOX + 20):
+            app._broadcast(f"m{n}")
+            if n % 16 == 0:
+                threading.Event().wait(0.01)  # a busy flight, not a flood: a client that reads keeps up
+
+    sending = threading.Thread(target=send_all)
+    sending.start()
+    sending.join(10)
+    stuck.unstuck.set()
+    assert not sending.is_alive()  # the stuck client held up nothing
+    for _ in range(100):
+        if len(reader.got) == server.OUTBOX + 20:
+            break
+        threading.Event().wait(0.02)
+    assert len(reader.got) == server.OUTBOX + 20
+    assert stuck not in app.clients and reader in app.clients  # only the one too far behind is cut off
+
+
+def test_a_device_whose_month_is_up_loses_its_commands_before_any_check_runs(app):
+    import time
+
+    device = pair(app)
+    with connect(f"{address(app)}?token={device}") as phone:
+        for _ in range(50):
+            if app._expires:
+                break
+            threading.Event().wait(0.02)
+        with app.lock:
+            for connection in app._expires:
+                app._expires[connection] = time.time() - 1
+        before = app.session.config.atc.holding
+        phone.send(json.dumps({"cmd": "settings", "changes": {"atc": {"holding": "always" if before != "always" else "never"}}}))
+        with pytest.raises(ConnectionClosed):  # cut off, the error perhaps arriving first
+            for _ in range(200):
+                phone.recv(timeout=5)
+    assert app.session.config.atc.holding == before  # and the command was not carried out

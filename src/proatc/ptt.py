@@ -24,6 +24,10 @@ class PushToTalk:
         self.pressed = threading.Event()
         self.released = threading.Event()
         self.released.set()
+        # A press, a release, and the microphone opened late for a press, one at a time: a key let go cannot be
+        # followed by the microphone opening for it.
+        self.lock = threading.RLock()
+        self.presses = 0  # which press this is: a job for an earlier one does not open the microphone
         self._listener = keyboard.Listener(on_press=self._on_press, on_release=self._on_release)
 
     def set_key(self, key_name: str) -> None:
@@ -39,18 +43,21 @@ class PushToTalk:
 
     def press(self) -> None:
         """Start transmitting. Also called by the desktop app's hold-to-talk button."""
-        if not self.pressed.is_set():
-            self.released.clear()
-            self.pressed.set()
-            if self.on_down:
-                self.on_down()
+        with self.lock:
+            if not self.pressed.is_set():
+                self.presses += 1
+                self.released.clear()
+                self.pressed.set()
+                if self.on_down:
+                    self.on_down()
 
     def release(self) -> None:
-        was_down = self.pressed.is_set()
-        self.pressed.clear()
-        self.released.set()
-        if was_down and self.on_up:
-            self.on_up()
+        with self.lock:
+            was_down = self.pressed.is_set()
+            self.pressed.clear()
+            self.released.set()
+            if was_down and self.on_up:
+                self.on_up()
 
     def start(self) -> None:
         self._listener.start()

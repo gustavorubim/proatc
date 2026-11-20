@@ -26,6 +26,7 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import secrets
 import socket
 import threading
@@ -57,7 +58,9 @@ MAX_BAD_PAIRING = 40  # wrong codes from anywhere while a pairing window is open
 PAIRING_WINDOW_S = 300  # how long a pairing code shown on the computer is good for
 MAX_DEVICES = 8  # paired devices kept; the oldest is forgotten first
 DEVICE_DAYS = 30  # a paired device must pair again after this: its token crosses the network in the clear
-DEVICE_RECHECK_S = 30  # how often connected devices are checked against the paired ones
+DEVICE_RECHECK_S = 5  # how often connected devices are checked against the paired ones, on a thread of its own
+OUTBOX = BACKLOG + 64  # messages waiting for one connection: a client this far behind is cut off
+CLOSE_WAIT_S = 5  # a connection being cut off that does not close by then is dropped
 # What a paired device may do. Everything else is the computer's: the microphone, the settings that are not
 # about ATC or voices, the key and the model, files, the sound check.
 REMOTE_COMMANDS = frozenset(("say", "click", "phrase", "explain", "what_next", "debrief", "tune", "chart", "simbrief",
@@ -303,6 +306,64 @@ def build_state(session: Session, db: AirportDB) -> dict:
     return state
 
 
+class Outbox:
+    """What waits to be sent to one connection, sent by a thread of its own: a client that stops reading holds up
+    only itself, never the others or the checks of paired devices, and is cut off once OUTBOX messages wait."""
+
+    def __init__(self, connection):
+        self.connection = connection
+        self.queue: queue.Queue = queue.Queue(maxsize=OUTBOX)
+        threading.Thread(target=self._send, name="app-outbox", daemon=True).start()
+
+    def _send(self) -> None:
+        while (text := self.queue.get()) is not None:
+            try:
+                self.connection.send(text)
+            except Exception:
+                return  # closed: its handler tidies up
+
+    def put(self, text: str) -> bool:
+        try:
+            self.queue.put_nowait(text)
+            return True
+        except queue.Full:
+            return False
+
+    def end(self) -> None:
+        try:
+            self.queue.put_nowait(None)
+        except queue.Full:
+            pass  # stuck on a client that does not read: dropping the connection ends it
+
+
+def _drop(connection) -> None:
+    """End a connection at once, without the closing handshake a client that does not read would never finish."""
+    try:
+        connection.socket.shutdown(socket.SHUT_RDWR)
+    except (OSError, AttributeError):
+        pass  # gone already
+
+
+def _cut_off(connection, reason: str) -> None:
+    """Close a connection with a reason the page can show, without waiting for it here; dropped if it hangs."""
+
+    def close() -> None:
+        closer = threading.Thread(target=_quietly, args=(lambda: connection.close(1008, reason),), daemon=True)
+        closer.start()
+        closer.join(CLOSE_WAIT_S)
+        if closer.is_alive():
+            _drop(connection)
+
+    threading.Thread(target=close, name="app-cut-off", daemon=True).start()
+
+
+def _quietly(action) -> None:
+    try:
+        action()
+    except Exception:
+        pass  # a connection gone already
+
+
 class AppServer:
     def __init__(self, config: Config, port: int, token: str):
         self.port, self.token = port, token
@@ -321,6 +382,8 @@ class AppServer:
         self._paid: dict[str, deque] = {}  # paired device (its token's hash) -> when its paid calls came
         self._paid_all: deque = deque(maxlen=REMOTE_PAID_PER_HOUR)  # every paired device's paid calls
         self._device_of: dict = {}  # paired connection -> its device (the hash of its token)
+        self._expires: dict = {}  # paired connection -> when its device must pair again (time.time())
+        self._outbox: dict = {}  # every connection -> what waits to be sent to it
         self._ptt_owner = None  # the connection that keyed the microphone, while it is keyed
         self._last_remote_state = ""
         self._address = lan_address()
@@ -339,26 +402,41 @@ class AppServer:
     def _broadcast(self, message: str, remote_message: str | None = None) -> None:
         """`message` to the computer's window, `remote_message` to paired devices (None: not to them)."""
         with self.lock:
-            clients = [(client, client in self.remote_clients) for client in self.clients]
-        for client, remote in clients:
+            targets = [(client, self._outbox[client], client in self.remote_clients) for client in self.clients]
+        behind = []
+        for client, outbox, remote in targets:
             text = remote_message if remote else message
-            if text is None:
-                continue
+            if text is not None and not outbox.put(text):
+                behind.append(client)
+        for client in behind:  # stopped reading: cut off, without waiting on it
+            with self.lock:
+                self._unregister(client)
+            _drop(client)
+
+    def _unregister(self, connection) -> None:
+        """Nothing more is sent to a connection or taken from it as a paired device. Called with the lock held."""
+        self.clients.discard(connection)
+        self.remote_clients.discard(connection)
+        self._device_of.pop(connection, None)
+        self._expires.pop(connection, None)
+        outbox = self._outbox.pop(connection, None)
+        if outbox is not None:
+            outbox.end()
+
+    def _sweep_loop(self) -> None:
+        """Check connected devices against the paired ones, apart from sending: a client that does not read
+        cannot hold it up."""
+        stop = threading.Event()
+        while not stop.wait(DEVICE_RECHECK_S):
             try:
-                client.send(text)
-            except Exception:
-                with self.lock:
-                    self.clients.discard(client)
-                    self.remote_clients.discard(client)
+                self.cut_off_unpaired()
+            except Exception as error:
+                print(f"device check: {type(error).__name__}", flush=True)
 
     def _state_loop(self) -> None:
         db = None
         stop = threading.Event()
-        checked = time.monotonic()
         while not stop.wait(0.7):
-            if time.monotonic() - checked >= DEVICE_RECHECK_S:
-                checked = time.monotonic()
-                self.cut_off_unpaired()
             try:
                 if self.session.ready and db is None:
                     db = AirportDB()
@@ -413,22 +491,27 @@ class AppServer:
             if granted:
                 if granted == "paired":
                     device = self._new_device()
+                outbox = self._outbox[connection] = Outbox(connection)
+                # What it has missed goes first, and is in its outbox before anything sent from now on.
+                if device:
+                    outbox.put(json.dumps({"type": "paired", "device": device}))
+                for event in list(self.backlog):
+                    if not (remote and event.get("type") in PRIVATE_EVENTS):
+                        outbox.put(json.dumps(event))
+                last = self._last_remote_state if remote else self._last_state
+                if last:
+                    outbox.put(last)
                 self.clients.add(connection)
                 if remote:
+                    digest = _digest(device or token)
+                    paired = next((e["paired"] for e in _device_entries() if e["hash"] == digest), time.time())
                     self.remote_clients.add(connection)
-                    self._device_of[connection] = _digest(device or token)
+                    self._device_of[connection] = digest
+                    self._expires[connection] = paired + DEVICE_DAYS * 86400
         if not granted:
             connection.close(1008, "bad token")
             return
         try:
-            if device:
-                connection.send(json.dumps({"type": "paired", "device": device}))
-            for event in list(self.backlog):
-                if not (remote and event.get("type") in PRIVATE_EVENTS):
-                    connection.send(json.dumps(event))
-            last = self._last_remote_state if remote else self._last_state
-            if last:
-                connection.send(last)
             for message in connection:
                 try:
                     self._command(json.loads(message), remote, connection)
@@ -438,9 +521,7 @@ class AppServer:
                     self.emit({"type": "error", "text": f"command failed: {type(error).__name__}: {error}"})
         finally:
             with self.lock:
-                self.clients.discard(connection)
-                self.remote_clients.discard(connection)
-                self._device_of.pop(connection, None)
+                self._unregister(connection)
             if self._ptt_owner is connection and getattr(self.session, "ptt", None) is not None:
                 # The window that keyed the microphone has gone: the transmission ends, the microphone stops.
                 self._ptt_owner = None
@@ -472,24 +553,29 @@ class AppServer:
             save_settings({"remote_devices": []})
             self.close_pairing()
             connected = list(self.remote_clients)
+            for client in connected:
+                self._unregister(client)
             self._paid.clear()
         for client in connected:
-            try:
-                client.close(1008, "forgotten")
-            except Exception:
-                pass  # gone already
+            _cut_off(client, "forgotten")
 
     def cut_off_unpaired(self) -> None:
         """Close the connections of devices no longer paired: their month is up, or they were forgotten. A device
         is let in while it is paired; it does not stay in after."""
-        paired = set(paired_devices())
-        with self.lock:
-            gone = [connection for connection, device in self._device_of.items() if device not in paired]
+        now = time.time()
+        with self.lock:  # the same lock as letting a device in: one pairing now is either in this list or not yet in
+            paired = set(paired_devices())
+            gone = [connection for connection, device in self._device_of.items()
+                    if device not in paired or now >= self._expires.get(connection, 0)]  # fmt: skip
+            for connection in gone:
+                self._unregister(connection)
         for connection in gone:
-            try:
-                connection.close(1008, "pair again")
-            except Exception:
-                pass  # gone already
+            _cut_off(connection, "pair again")
+
+    def _still_paired(self, connection) -> bool:
+        """A paired device's command is taken only while it is paired and its month is not up."""
+        with self.lock:
+            return connection in self._device_of and time.time() < self._expires.get(connection, 0)
 
     def _paid_allowed(self, connection) -> bool:
         """A paired device's calls that may cost credit: REMOTE_PAID_PER_MINUTE a minute for each device, counted
@@ -508,6 +594,10 @@ class AppServer:
 
     def _command(self, command: dict, remote: bool = False, connection=None) -> None:
         session, name = self.session, command.get("cmd")
+        if remote and not self._still_paired(connection):
+            if connection is not None:
+                _cut_off(connection, "pair again")
+            raise ValueError("This device must pair again: on the computer, Settings, Phone or tablet, Pair a device.")
         if remote and name == "set_key":
             raise ValueError("The key can only be changed in the app on the computer.")
         if remote and name not in REMOTE_COMMANDS:
@@ -677,6 +767,7 @@ class AppServer:
         server = serve(self._handle, "127.0.0.1", self.port)
         threading.Thread(target=server.serve_forever, name="app-server", daemon=True).start()
         threading.Thread(target=self._state_loop, name="app-state", daemon=True).start()
+        threading.Thread(target=self._sweep_loop, name="app-devices", daemon=True).start()
         print(f"SERVING ws://127.0.0.1:{self.port}", flush=True)
         if os.environ.get("PROATC_SELFTEST"):
             self._selftest()
