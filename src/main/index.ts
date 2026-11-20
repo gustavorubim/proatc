@@ -1,18 +1,26 @@
 import { randomBytes } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, session, shell } from 'electron'
 import type { Connection } from '../shared/protocol'
 import { type Engine, engineEnv, enginePaths, engineSteps, freePort, startEngine } from './engine'
-import { mayReveal } from './reveal'
+import { externalLink } from './links'
+import { logsRoot, mayReveal } from './reveal'
 import { checkForUpdates, getUpdateState, installUpdate, openReleases, startUpdates } from './updates'
 
-// Tests point the app at a throwaway data folder so they never touch the real one.
+// Test hooks (PROATC_USER_DATA here, PROATC_SHOT and PROATC_SELFTEST below): the packaged-app
+// smoke test needs them. Tests point the app at a throwaway data folder so they never touch the real one.
 if (process.env.PROATC_USER_DATA) app.setPath('userData', process.env.PROATC_USER_DATA)
+
+// The only browser permission the page uses: copying a frequency with navigator.clipboard.
+// The microphone and speakers are used by the engine, not the page.
+const ALLOWED_PERMISSIONS = new Set(['clipboard-sanitized-write'])
 
 let window: BrowserWindow | null = null
 let engine: Engine | null = null
 let connection: Connection | null = null
+/** The engine's logs folder: the only place the window may ask to show a file from. */
+let engineLogs: string | null = null
 let engineFailure: string | null = null
 const engineLog: string[] = []
 const lineListeners: Array<(line: string) => void> = []
@@ -35,14 +43,16 @@ function createWindow(): void {
       sandbox: true
     }
   })
-  // Links open in the browser, never inside the app window.
+  // Links open in the browser, never inside the app window, and only the project's own pages.
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://')) void shell.openExternal(url)
+    const link = externalLink(url)
+    if (link) void shell.openExternal(link)
     return { action: 'deny' }
   })
   window.webContents.on('will-navigate', (event) => event.preventDefault())
 
-  if (process.env.ELECTRON_RENDERER_URL) {
+  // The development server's page, from `electron-vite dev`. The installed app ignores it.
+  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
     void window.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
     void window.loadFile(join(__dirname, '../renderer/index.html'))
@@ -58,6 +68,7 @@ async function launchEngine(): Promise<void> {
   connection = { port, token }
   const paths = enginePaths(app.getAppPath(), process.resourcesPath, app.getPath('userData'), app.isPackaged)
   if (paths.home) mkdirSync(paths.home, { recursive: true })
+  engineLogs = logsRoot(paths, process.env)
   engine = startEngine(
     engineSteps(paths, port, Boolean(process.env.PROATC_NO_GPU_LIBS)),
     engineEnv(paths, token, process.env, join(__dirname, '../renderer')),
@@ -76,7 +87,7 @@ async function launchEngine(): Promise<void> {
   )
 }
 
-/** Test hook: PROATC_SHOT=<file.png> saves a picture of the window after a delay, then quits. */
+/** Test hook: PROATC_SHOT=<file.png> (used by the packaged-app test and screenshots) saves a picture of the window after a delay, then quits. */
 function scheduleScreenshot(): void {
   const target = process.env.PROATC_SHOT
   if (!target) return
@@ -101,7 +112,7 @@ function scheduleScreenshot(): void {
 }
 
 /**
- * Packaged-app test: PROATC_SELFTEST=<result file>. The engine is asked to check that every
+ * Test hook for the packaged-app smoke test: PROATC_SELFTEST=<result file>. The engine is asked to check that every
  * dependency loads (see server.py); this side checks that the window loaded and that the
  * engine accepts a connection with the token. The result file starts with "ok" or "fail".
  */
@@ -155,9 +166,10 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('connection', () => connection)
   ipcMain.handle('engine-log', () => ({ lines: engineLog, failure: engineFailure }))
   ipcMain.handle('app-version', () => app.getVersion())
-  // Only a flight log or a problem report the engine wrote may be shown in the file manager.
+  // Only a flight log or a problem report the engine wrote in its logs folder may be shown in
+  // the file manager.
   ipcMain.handle('reveal', (_event, path: unknown) => {
-    if (!mayReveal(path)) return false
+    if (!engineLogs || !mayReveal(path, engineLogs)) return false
     shell.showItemInFolder(path)
     return true
   })
@@ -167,6 +179,11 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('update-open', () => openReleases())
 
   void app.whenReady().then(async () => {
+    // Every other permission (camera, microphone, location, notifications…) is refused.
+    session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) =>
+      callback(ALLOWED_PERMISSIONS.has(permission))
+    )
+    session.defaultSession.setPermissionCheckHandler((_contents, permission) => ALLOWED_PERMISSIONS.has(permission))
     createWindow()
     runSelfTest()
     await launchEngine()

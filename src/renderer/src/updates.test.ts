@@ -28,11 +28,14 @@ describe('update pill', () => {
   })
 
   it('offers the restart once the download is done, and a retry after a failure', () => {
-    expect(updateView({ state: 'ready', version: '0.3.0' }, '0.2.0')).toMatchObject({
+    const ready = updateView({ state: 'ready', version: '0.3.0' }, '0.2.0')
+    expect(ready).toMatchObject({
       label: 'Restart to update to v0.3.0',
       action: 'install',
       tone: 'ok'
     })
+    // The update is installed only from this button, never silently when the app closes.
+    expect(ready.hint).toContain('Nothing is installed until you click')
     expect(updateView({ state: 'error', message: 'The update could not be downloaded.' }, '0.2.0')).toMatchObject({
       action: 'check',
       tone: 'bad',
