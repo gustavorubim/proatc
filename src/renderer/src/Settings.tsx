@@ -271,6 +271,12 @@ export function SettingsDialog({
           >
             <Toggle on={values.atc.second_radio} onChange={(on) => change('atc', 'second_radio', on)} />
           </Row>
+          <Row
+            label="Real-world runways"
+            hint="On real weather, use the runways the real airport is using now, from its digital ATIS (about 75 US airports). Only the airport's code is sent, to atis.info"
+          >
+            <Toggle on={values.atc.real_atis} onChange={(on) => change('atc', 'real_atis', on)} />
+          </Row>
           <Row label="Other traffic" hint="Traffic calls and runway sequencing against X-Plane's AI aircraft">
             <Toggle on={values.atc.traffic} onChange={(on) => change('atc', 'traffic', on)} />
           </Row>

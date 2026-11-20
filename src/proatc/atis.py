@@ -25,6 +25,19 @@ _PLANNED_ARRIVAL: dict[str, str] = {}
 # Runway ends no taxiway reaches in the scenery, by airport, as the engine found them in the taxi network: left out of
 # the runways in use, so that the ATIS does not give a runway no controller will.
 _CLOSED: dict[str, frozenset[str]] = {}
+# What the airport's real digital ATIS says of its runways (datis.RealRunways), by airport: the runways landing
+# and departing there now, and the ones closed. Where it is known it comes before the wind and the flight plan:
+# an airport is not always run the way the wind suggests. Set by the engine, on real weather only.
+_REAL: dict[str, object] = {}
+
+
+class RunwaysInUse(list):
+    """The runways in use where it is known which land and which depart: the list of all of them, with the two
+    uses kept. `split_runways` gives them back as they are, not by halves."""
+
+    def __init__(self, landing, departing):
+        super().__init__([*landing, *(end for end in departing if end not in landing)])
+        self.landing, self.departing = list(landing), list(departing)
 
 
 def uses_faa_style(ident: str) -> bool:
@@ -47,9 +60,30 @@ def close_runways(ident: str, ends) -> None:
     _CLOSED[ident.upper()] = frozenset(ends)
 
 
+def real_runways(ident: str, found) -> None:
+    """What the airport's real ATIS says of its runways, or None when nothing is known (or it is not to be used)."""
+    if found is None:
+        _REAL.pop(ident.upper(), None)
+    else:
+        _REAL[ident.upper()] = found
+
+
+def really_in_use(ident: str) -> frozenset:
+    """The runways the airport's real ATIS gives as landing or departing; empty when it is not known."""
+    found = _REAL.get(ident.upper())
+    return found.in_use if found else frozenset()
+
+
+def really_closed(ident: str) -> frozenset:
+    """The runways the airport's real ATIS gives as closed."""
+    found = _REAL.get(ident.upper())
+    return found.closed if found else frozenset()
+
+
 def forget_runways() -> None:
     """A new session, perhaps with other scenery: nothing is known of any airport's runways or of a plan."""
     _CLOSED.clear()
+    _REAL.clear()
     plan_runways(None, None, None, None)
 
 
@@ -66,17 +100,21 @@ def wind_allows(heading_true: float, wind_dir_true: float, wind_kt: float) -> bo
 
 
 def runways_in_use(airport: Airport, wind_dir_true: float, wind_kt: float) -> list[str]:
-    """Runway ends with the best headwind, including parallels; the flight plan's runway and its parallels instead,
-    where the wind allows it. Short runways are ignored, and so are grass, dirt and gravel ones where the airport has
-    a paved runway. Runways no taxiway reaches are left out while another runway long enough remains."""
+    """The runways the airport's real ATIS gives, where that is known. Otherwise the runway ends with the best
+    headwind, including parallels; the flight plan's runway and its parallels instead, where the wind allows it.
+    Short runways are ignored, and so are grass, dirt and gravel ones where the airport has a paved runway. Runways
+    no taxiway reaches, or closed in the real ATIS, are left out while another runway long enough remains."""
     if not airport.runways:
         return []
+    real = _REAL.get(airport.ident)
+    if real and real.in_use:
+        return RunwaysInUse(real.landing, real.departing)
     hard = [r for r in airport.runways if r.surface not in SOFT_SURFACES] or airport.runways
     longest = max(r.length_m for r in hard)
     ends = [(ident, heading, r.length_m) for r in hard if r.length_m >= IN_USE_FRACTION * longest for ident, heading in r.ends()]
     # The longest runway counts even when closed: a scenery that leaves the main runway out of its taxi network
     # does not make a short strip beside it the runway in use.
-    closed = _CLOSED.get(airport.ident, frozenset())
+    closed = _CLOSED.get(airport.ident, frozenset()) | (real.closed if real else frozenset())
     ends = [end for end in ends if end[0] not in closed] or ends
     departure, arrival = _PLANNED_DEPARTURE.get(airport.ident), _PLANNED_ARRIVAL.get(airport.ident)
     planned = [end for end in ends if end[0] in (departure, arrival) and wind_allows(end[1], wind_dir_true, wind_kt)]
@@ -100,7 +138,10 @@ def runways_in_use(airport: Airport, wind_dir_true: float, wind_kt: float) -> li
 
 def split_runways(active: list[str]) -> tuple[list[str], list[str]]:
     """(landing, departing). With parallel runways in use, arrivals and departures are kept apart:
-    the first half lands, the second half departs, the middle one of three does both."""
+    the first half lands, the second half departs, the middle one of three does both. Where the real ATIS says
+    which land and which depart, those."""
+    if isinstance(active, RunwaysInUse):
+        return list(active.landing), list(active.departing)
     count = len(active)
     if count < 2:
         return active, active

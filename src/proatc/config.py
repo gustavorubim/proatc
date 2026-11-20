@@ -95,6 +95,9 @@ class Atc:
     # The COM radio you are not transmitting on is heard too when the aircraft's audio panel has it on:
     # an ATIS on COM2 while you work a controller on COM1.
     second_radio: bool = True
+    # On real weather, use the runways the real airport is using now, where it publishes a digital ATIS (about
+    # seventy-five airports in the United States). The airport's code is sent to atis.info, and nothing else.
+    real_atis: bool = True
 
 
 @dataclass
@@ -133,7 +136,7 @@ EDITABLE: dict[str, dict[str, object]] = {
     },  # fmt: skip
     "llm": {"model": str, "provider": PROVIDERS, "local_url": str, "local_model": str},
     "radio": {"enabled": bool},
-    "atc": {"holding": HOLDING, "copilot": COPILOT, "traffic": bool, "chatter": CHATTER, "second_radio": bool},
+    "atc": {"holding": HOLDING, "copilot": COPILOT, "traffic": bool, "chatter": CHATTER, "second_radio": bool, "real_atis": bool},
     "sim": {"allow_tuning": bool, "auto_tune": bool},
     "remote": {"enabled": bool},
 }

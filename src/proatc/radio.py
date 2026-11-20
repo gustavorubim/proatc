@@ -224,6 +224,9 @@ class SecondRadio(threading.Thread):
         weather = observe(self.db, station.airport, state)
         if weather is None:
             return
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            engine.real_runways(station.airport, state)  # the airport's real runways, before its ATIS is put together
         variation = round(magnetic_variation(state))
         _, text = self.book.text(station.airport, weather, state.get("zulu_seconds", 0.0), variation, station.place)
         if text != self._text:
@@ -311,6 +314,9 @@ class AtisBroadcaster(threading.Thread):
         weather = observe(self.db, station.airport, state)
         if weather is None:
             return
+        engine = getattr(self, "engine", None)
+        if engine is not None:
+            engine.real_runways(station.airport, state)  # the airport's real runways, before its ATIS is put together
         variation = round(magnetic_variation(state))
         _, text = self.book.text(station.airport, weather, state.get("zulu_seconds", 0.0), variation, station.place)
         if text != self._text:

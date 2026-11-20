@@ -16,7 +16,15 @@ import math
 
 from . import ifr
 from . import phraseology as say
-from .atis import RUNWAY_CROSSWIND_KT, RUNWAY_TAILWIND_KT, split_runways, uses_faa_style, wind_on_runway
+from .atis import (
+    RUNWAY_CROSSWIND_KT,
+    RUNWAY_TAILWIND_KT,
+    really_closed,
+    really_in_use,
+    split_runways,
+    uses_faa_style,
+    wind_on_runway,
+)
 from .navdata import distance_nm
 from .procedures import choose_approach
 from .weather import from_snapshot
@@ -424,6 +432,10 @@ def acceptable_runway(airport, runway: str, weather, raw: dict | None = None) ->
     ends = {end: heading for rw in airport.runways for end, heading in rw.ends()}
     if runway not in ends:
         return "no such runway"
+    if runway in really_closed(airport.ident):
+        return "runway closed"
+    if runway in really_in_use(airport.ident):
+        return None  # the airport is using it now, whatever the wind: its real ATIS says so
     length = next(rw.length_m for rw in airport.runways if runway in (rw.end1, rw.end2))
     longest = max(rw.length_m for rw in airport.runways)
     if raw is not None and length < min(SHORT_RUNWAY_M, 0.6 * longest) and aircraft_category(raw.get("aircraft_type")) != "props":

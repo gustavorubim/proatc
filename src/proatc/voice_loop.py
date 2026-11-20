@@ -27,6 +27,7 @@ from .audio_io import MIC_RATE, Player, Recorder
 from .centers import CenterIndex
 from .clock import REAL, Clock
 from .config import PROJECT_DIR, Config, _apply, openrouter_key, save_overrides, validate
+from .datis import RealAtis
 from .debrief import as_text, review
 from .engine import Engine
 from .events import Emit, console
@@ -245,7 +246,7 @@ class Session:
         self.engine = Engine(
             self.db, centers=self.centers, navaids=NavaidNames(root), navfix=self.navfix, metars=self.metars,
             holding=config.atc.holding, traffic=config.atc.traffic, airspace=open_airspace(root), clock=SimClock(self.clock),
-            airways=open_airways(root),
+            airways=open_airways(root), real_atis=RealAtis() if config.atc.real_atis else None,
         )  # fmt: skip
         self.engine.clock = self.engine.now
         radio_db = AirportDB()  # the background thread's own connection
@@ -334,6 +335,8 @@ class Session:
             self.engine.holding = atc["holding"]
         if "traffic" in atc:
             self.engine.traffic_enabled = atc["traffic"]
+        if "real_atis" in atc and bool(atc["real_atis"]) != (self.engine.real_atis is not None):
+            self.engine.real_atis = RealAtis() if atc["real_atis"] else None
 
     def _use_voice_engine(self, name: str) -> None:
         """Change the voice engine now. If the new one cannot be loaded, the one in use stays."""

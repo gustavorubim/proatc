@@ -160,7 +160,14 @@ export interface EngineState {
       }
       llm: { model: string; provider: string; local_url: string; local_model: string }
       radio: { enabled: boolean }
-      atc: { holding: string; copilot: string; traffic: boolean; chatter: string; second_radio: boolean }
+      atc: {
+        holding: string
+        copilot: string
+        traffic: boolean
+        chatter: string
+        second_radio: boolean
+        real_atis: boolean
+      }
       sim: { allow_tuning: boolean; auto_tune: boolean }
       remote: { enabled: boolean }
     }
