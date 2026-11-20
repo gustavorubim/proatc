@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -32,6 +34,31 @@ jobs:
         continue-on-error: true
         run: npm audit --omit=dev
 
+      # Electron is a devDependency for electron-builder, but its runtime ships inside the app,
+      # as do React and the font, which are bundled into the page. The step above skips them,
+      # so any advisory against these packages themselves fails here, whatever its severity.
+      # Advisories that only reach them through a build-time dependency (electron's download
+      # helpers) are left out, like the rest of the build tooling.
+      - name: npm, runtime packages bundled from devDependencies
+        id: npm_runtime
+        continue-on-error: true
+        run: |
+          npm audit --json > npm-audit.json || true
+          node -e '
+            const report = JSON.parse(require("fs").readFileSync("npm-audit.json", "utf8"))
+            if (report.error) { console.error(report.error); process.exit(1) }
+            const shipped = ["electron", "electron-updater", "react", "react-dom", "scheduler", "@fontsource-variable/nunito"]
+            const found = shipped.filter((name) =>
+              (report.vulnerabilities?.[name]?.via ?? []).some((via) => typeof via === "object"))
+            for (const name of found) {
+              for (const via of report.vulnerabilities[name].via.filter((v) => typeof v === "object")) {
+                console.log(`${name}: ${via.severity} ${via.title} ${via.url} (affects ${via.range})`)
+              }
+            }
+            if (found.length) process.exit(1)
+            console.log(`No advisories for: ${shipped.join(", ")}`)
+          '
+
       # Only what ships with the engine, not the test tools.
       - name: Python packages that ship with the engine
         id: python
@@ -41,10 +68,11 @@ jobs:
           uvx pip-audit --requirement requirements-audit.txt --disable-pip --no-deps
 
       - name: Open an issue if anything was found
-        if: steps.npm.outcome == 'failure' || steps.python.outcome == 'failure'
+        if: steps.npm.outcome == 'failure' || steps.npm_runtime.outcome == 'failure' || steps.python.outcome == 'failure'
         env:
           GH_TOKEN: ${{ github.token }}
           NPM: ${{ steps.npm.outcome }}
+          NPM_RUNTIME: ${{ steps.npm_runtime.outcome }}
           PYTHON: ${{ steps.python.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -53,6 +81,7 @@ jobs:
           body="The dependency audit found known vulnerabilities.
 
           - npm packages that ship in the app: $NPM
+          - Electron, React and the font bundled into the app: $NPM_RUNTIME
           - Python packages that ship with the engine: $PYTHON
 
           Details are in the run log: $RUN_URL
