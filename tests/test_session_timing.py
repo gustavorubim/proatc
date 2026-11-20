@@ -425,7 +425,9 @@ def test_a_readback_on_the_frequency_the_instruction_was_given_on_counts_when_an
     here = {**rig.bridge.snapshot(), "lon": 4.4, "com1_khz": APPROACH}
     engine.flight.contacted.add(approach.key)  # checked in with approach on 124.300
     rig.controller_says(0, descend_to(9000))
-    assert "descend" in engine.tick(approach, None, here).text
+    given = engine.tick(approach, None, here)
+    assert "descend" in given.text
+    engine.on_air(given)  # heard: the radio that would say it is passed by here
     assert engine.flight.pending is not None and engine.flight.pending_key == approach.key
     centre = centres.on_frequency(EAST, 51.0, 4.4)  # a different station, as if found on 124.300
     readback = Intent("readback", altitude=engine.flight.pending.expect["altitude"])
@@ -460,3 +462,67 @@ def test_with_random_small_delays_the_flight_ends_the_same_way_every_time(rigs, 
 def test_a_run_gives_the_same_transcript_every_time(rigs):
     first, second = jittered_flight(rigs, 7).transcript(), jittered_flight(rigs, 7).transcript()
     assert first == second and first
+
+
+# ---- an instruction that is decided and not yet heard ----------------------------------------
+#
+# A real flight lost its approach clearance this way. The clearance took the voice a long time to make; the "Read
+# back" button showed it from the moment it was decided; the pilot clicked it; the readback settled the instruction,
+# and the controller never said it. The journal had no trace of the clearance.
+
+
+def labels(rig):
+    return [call["label"] for call in rig.engine.suggestions(rig.station(), None, rig.bridge.snapshot())]
+
+
+def test_a_readback_is_not_offered_until_the_controller_has_started_saying_the_instruction(rigs):
+    rig = rigs(copilot="off", voice_delay=6.0)
+    rig.controller_says(5, descend_to(11000))
+    rig.run_until(8)  # decided at five seconds; its voice takes six to make
+    flight = rig.engine.flight
+    assert flight.pending is not None and "descend" in flight.pending.text and not rig.said("atc")
+    assert rig.engine.not_yet_said() and "Read back" not in labels(rig)
+    rig.run_until(13)
+    assert "descend" in rig.said("atc")[0].text  # on the air: now it is read back
+    assert not rig.engine.not_yet_said() and labels(rig)[0] == "Read back"
+
+
+def test_a_readback_made_before_the_instruction_was_heard_does_not_take_it_off_the_air(rigs):
+    rig = rigs(copilot="off", voice_delay=6.0)
+    rig.controller_says(5, descend_to(11000))
+    rig.run_until(8)
+    readback = "Descend flight level one one zero, Golf Alfa Bravo Charlie Delta"
+    rig.click(readback, Intent("readback", altitude=11000))  # a button from before, or a pilot reading the screen
+    rig.run_until(40)
+    said = [item.text for item in rig.said("atc")]
+    assert any("descend flight level one one zero" in text for text in said), rig.transcript()  # still said
+    assert rig.engine.flight.cleared_ft == 11000
+    ok(rig, rig.talked_over())
+
+
+def test_the_copilot_does_not_read_back_or_follow_a_hand_off_nobody_has_heard(rigs):
+    rig = rigs(copilot="full", voice_delay=6.0)
+    rig.controller_says(5, handoff_to_next_centre)
+    rig.run_until(9)  # decided, not said
+    rig.session.jobs.put(("after", None, None))  # something else happened on the radio meanwhile
+    rig.run_until(10.5)
+    assert not rig.said("pilot") and rig.bridge.snapshot()["com1_khz"] == WEST  # nothing read back, nothing tuned
+    rig.run_until(60)
+    handoff, readback = rig.said("atc")[0], rig.said("pilot")[0]
+    assert "contact" in handoff.text and readback.t > handoff.t
+    ok(rig, rig.settled_on(EAST, "Eastland Control"))
+
+
+def test_a_call_that_was_decided_and_not_said_is_kept_in_the_journal(rigs):
+    rig = rigs(copilot="off", voice_delay=3.0)
+    notes = []
+    rig.session.log.note = lambda kind, context=None, **fields: notes.append((kind, fields))
+    rig.controller_says(5, descend_to(11000))
+    rig.run_until(6)
+    rig.click("Westland, Golf Alfa Bravo Charlie Delta, request direct Delta", Intent("request_direct", fix="DELTA"))
+    rig.run_until(40)
+    unsaid = [fields for kind, fields in notes if kind == "unsaid"]
+    assert unsaid and "descend" in unsaid[0]["text"] and "frequency was taken" in unsaid[0]["why"]
+    assert not [item for item in rig.heard if item.type == "unsaid"]  # for the journal only: not shown in the app
+    descent = next(item for item in rig.said("atc") if "descend" in item.text)
+    assert descent.event["voice_s"] >= 3.0  # and how long the voice took is kept with the call
