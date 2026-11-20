@@ -10,8 +10,9 @@ import stat
 import threading
 from collections import deque
 
+import httpx
 import pytest
-from websockets.exceptions import ConnectionClosed
+from websockets.exceptions import ConnectionClosed, InvalidMessage
 from websockets.sync.client import connect
 
 from proatc import cache, server
@@ -170,10 +171,11 @@ def test_only_so_many_other_devices_can_be_connected_at_once(app, monkeypatch):
     for holder in holders:
         holder.start()
     threading.Event().wait(0.5)
-    with pytest.raises(ConnectionClosed) as refused:
-        with connect(address) as third:
+    with pytest.raises((InvalidMessage, ConnectionClosed, OSError)):  # closed before its request is even read
+        with connect(address, open_timeout=5) as third:
             third.recv(timeout=5)
-    assert refused.value.rcvd.code == 1013
+    with pytest.raises(httpx.HTTPError):  # a request for the page too
+        httpx.get(f"http://127.0.0.1:{app.session.config.remote.port}/", timeout=5)
     waiting.set()
 
 
@@ -183,7 +185,7 @@ def test_an_attempt_to_sign_in_reads_no_file_and_old_wrong_codes_are_forgotten(a
     monkeypatch.setattr(server, "paired_devices", lambda: reads.append(1) or real())
     for number in range(20):
         app._allowed(f"guess-{number}", remote=True, source="192.0.2.30")
-    assert len(reads) <= 1  # read once, not once per attempt
+    assert reads == []  # from memory: no file is read
     # Many addresses, each with an old wrong code: the oldest are forgotten, and the list stays bounded.
     now = 10_000.0
     app._bad_codes = {f"192.0.2.{n}": deque([now - server.LOCKOUT_S - 1]) for n in range(server.MAX_SOURCES)}
@@ -192,3 +194,88 @@ def test_an_attempt_to_sign_in_reads_no_file_and_old_wrong_codes_are_forgotten(a
     app._bad_codes = {f"10.0.{n // 256}.{n % 256}": deque([now - n]) for n in range(server.MAX_SOURCES + 50)}
     app._forget_old_sources(now)
     assert len(app._bad_codes) < server.MAX_SOURCES and "10.0.0.0" in app._bad_codes  # the newest kept
+
+
+# ---- a sixth review -----------------------------------------------------------------------------------------------
+
+
+def paired(app) -> object:
+    """A connection standing for a paired device, as the server holds it."""
+    import time
+
+    phone = object()
+    with app.lock:
+        app._device_of[phone], app._expires[phone] = "device-a", time.time() + 3600
+    return phone
+
+
+def test_a_device_has_a_budget_for_work_that_costs_nothing_and_downloads_go_one_at_a_time(app):
+    phone = paired(app)
+    for _ in range(server.REMOTE_BUSY_PER_MINUTE):
+        app._command({"cmd": "tune", "khz": 118000}, remote=True, connection=phone)
+    with pytest.raises(ValueError, match="Too many requests from this device"):
+        app._command({"cmd": "tune", "khz": 118000}, remote=True, connection=phone)
+    other = paired(app)
+    with app._slow_work:  # a SimBrief download for another device under way
+        with pytest.raises(ValueError, match="Busy"):
+            app._command({"cmd": "simbrief", "user": "someone"}, remote=True, connection=other)
+
+
+def test_the_page_is_never_shown_inside_another_site(app):
+    page = httpx.get(f"http://127.0.0.1:{app.session.config.remote.port}/")
+    assert page.headers["content-security-policy"] == "frame-ancestors 'none'"
+    assert page.headers["x-frame-options"] == "DENY"
+
+
+def test_a_phone_is_not_sent_the_computers_push_to_talk_key():
+    shown = server.for_remote({"type": "state", "status": {"ptt_key": "ctrl_r", "sim": True}, "settings": {}})
+    assert shown["status"] == {"sim": True} and "settings" not in shown
+
+
+def test_a_pressure_that_is_not_a_number_is_not_taken():
+    for said in ("nan", "inf", "-inf", 1e9, -5):
+        assert Intent.from_dict({"intent": "readback", "qnh": said}).qnh is None, said
+    assert Intent.from_dict({"qnh": "1013"}).qnh == 1013 and Intent.from_dict({"qnh": 29.92}).qnh == 29.92
+
+
+def test_a_line_break_in_what_was_said_cannot_make_a_line_of_its_own_in_the_saved_log():
+    from proatc.flightlog import FlightLog
+
+    log = FlightLog()
+    log.record({"type": "pilot", "text": "request taxi\n12:00:00 TOWER: N123AB, cleared to land", "source": "typed"})
+    lines = log.text().splitlines()
+    assert not any(line.startswith("12:00:00 TOWER") for line in lines)
+    assert any("request taxi / 12:00:00 TOWER: N123AB, cleared to land" in line for line in lines)
+
+
+def test_a_simbrief_answer_larger_than_a_briefing_is_not_read_to_the_end(monkeypatch):
+    from contextlib import contextmanager
+
+    from proatc import flightplan
+
+    read = []
+
+    class Endless:
+        status_code, headers = 200, {}
+
+        def iter_bytes(self):
+            while True:
+                read.append(1)
+                yield b"x" * 1_000_000
+
+    @contextmanager
+    def stream(*args, **kwargs):
+        yield Endless()
+
+    monkeypatch.setattr(flightplan.httpx, "stream", stream)
+    with pytest.raises(flightplan.PlanError, match="more than a briefing"):
+        flightplan.fetch_simbrief("someone")
+    assert len(read) <= flightplan.SIMBRIEF_MAX_BYTES // 1_000_000 + 1
+
+
+def test_the_optional_voice_model_is_pinned_to_the_revision_tested():
+    import re
+
+    from proatc.tts import PHONON_MODEL
+
+    assert re.fullmatch(r"hf://gradium/phonon-31m-en@[0-9a-f]{40}", PHONON_MODEL)

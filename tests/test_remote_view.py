@@ -339,11 +339,13 @@ def test_a_paired_device_must_pair_again_after_a_month(app):
     month_ago = time.time() - (server.DEVICE_DAYS + 1) * 86400
     server.save_settings({"remote_devices": [{"hash": server._digest("old-device"), "paired": month_ago},
                                              {"hash": server._digest("new-device"), "paired": time.time()}]})  # fmt: skip
+    app.reload_devices()  # as the check every few seconds does
     assert app._allowed("old-device", remote=True, source="192.0.2.20") is False
     assert app._allowed("new-device", remote=True, source="192.0.2.21") == "device"
     assert app.remote_info()["devices"] == 1
     # A device paired by 0.21.0 (a hash alone) is let in, and its month counts from now.
     server.save_settings({"remote_devices": [server._digest("from-0.21")]})
+    app.reload_devices()
     assert server._device_entries()[0]["hash"] == server._digest("from-0.21")
     assert app._allowed("from-0.21", remote=True, source="192.0.2.22") == "device"
 

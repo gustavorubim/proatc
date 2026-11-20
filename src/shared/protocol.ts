@@ -83,7 +83,8 @@ export interface EngineState {
     sim: boolean
     has_key: boolean
     model: string
-    ptt_key: string
+    /** The computer's push-to-talk key; not sent to a phone or tablet. */
+    ptt_key?: string
     stt_device: string | null
     can_tune?: boolean
     provider?: string

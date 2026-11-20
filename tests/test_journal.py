@@ -209,17 +209,17 @@ def test_records_and_notes_from_several_threads_at_once_are_all_on_disk_each_on_
     [httpx.ConnectError, httpx.ReadTimeout, httpx.ProxyError],
 )
 def test_a_simbrief_fetch_that_fails_says_what_went_wrong_without_the_username_or_the_address(monkeypatch, failure):
-    def get(url, params, **options):
-        request = httpx.Request("GET", url, params=params)
+    def get(params):
+        request = httpx.Request("GET", "https://www.simbrief.com/api/xml.fetcher.php", params=params)
         raise failure(f"failed to reach {request.url}", request=request)
 
-    monkeypatch.setattr("proatc.flightplan.httpx.get", get)
+    monkeypatch.setattr("proatc.flightplan._download", get)
     with pytest.raises(PlanError) as failed:
         fetch_simbrief(USER)
     said = str(failed.value)
     assert "SimBrief" in said and USER.lower() not in said.lower() and "http" not in said and "simbrief.com" not in said
 
-    monkeypatch.setattr("proatc.flightplan.httpx.get", lambda url, params, **options: httpx.Response(400, text=USER))
+    monkeypatch.setattr("proatc.flightplan._download", lambda params: httpx.Response(400, text=USER))
     with pytest.raises(PlanError, match="SimBrief returned 400") as refused:
         fetch_simbrief(USER)
     assert USER.lower() not in str(refused.value).lower()

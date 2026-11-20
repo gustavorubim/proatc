@@ -908,7 +908,13 @@ export function App() {
             )}
             {ready && store.log.length === 0 && (
               <div className="empty">
-                Hold <kbd>{engine?.status.ptt_key}</kbd> and speak, click a call below, or type one.
+                {inApp ? (
+                  <>
+                    Hold <kbd>{engine?.status.ptt_key}</kbd> and speak, click a call below, or type one.
+                  </>
+                ) : (
+                  'Click a call below, or type one.'
+                )}
                 {!engine?.status.sim && ' Start X-Plane and load a flight for real airports and frequencies.'}
               </div>
             )}

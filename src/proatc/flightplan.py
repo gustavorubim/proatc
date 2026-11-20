@@ -63,6 +63,20 @@ def from_simbrief(data: dict) -> FlightPlan:
     )
 
 
+SIMBRIEF_MAX_BYTES = 16_000_000  # a briefing with its whole navigation log is a few megabytes
+
+
+def _download(params: dict) -> httpx.Response:
+    """The briefing, read no further than SIMBRIEF_MAX_BYTES."""
+    with httpx.stream("GET", SIMBRIEF_URL, params=params, timeout=20, follow_redirects=True) as response:
+        body = bytearray()
+        for chunk in response.iter_bytes():
+            body += chunk
+            if len(body) > SIMBRIEF_MAX_BYTES:
+                raise PlanError("SimBrief sent more than a briefing holds.")
+        return httpx.Response(response.status_code, content=bytes(body), headers=response.headers)
+
+
 def fetch_simbrief(user: str) -> FlightPlan:
     """Download the user's latest briefing. `user` is their SimBrief username or numeric pilot ID."""
     user = user.strip()
@@ -70,7 +84,7 @@ def fetch_simbrief(user: str) -> FlightPlan:
         raise PlanError("Enter your SimBrief username or pilot ID.")
     params = {"json": "1", "userid" if user.isdigit() else "username": user}
     try:
-        response = httpx.get(SIMBRIEF_URL, params=params, timeout=20, follow_redirects=True)
+        response = _download(params)
     # httpx's own messages can quote the request, username and all: what went wrong is said in plain words,
     # since the message is shown, written to the journal and saved with the log.
     except httpx.TimeoutException as error:
