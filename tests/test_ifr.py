@@ -334,7 +334,11 @@ def test_vectors_to_the_ils_and_handoff_to_tower(world):
         f"{CALLSIGN}, Eastfield Approach, identified, descend flight level one one zero, expect I L S approach runway two seven"
     )
     engine.flight.pending = None  # read back: the next instruction waits for it
-    assert engine.tick(approach, ISSUE, at(51.1, 4.5, feet=11000, heading=90)) is None  # still outside vectoring range
+    # Outside vectoring range, down at the level given: the next descent on the way in, then nothing until lower.
+    step = engine.tick(approach, ISSUE, at(51.1, 4.5, feet=11000, heading=90))
+    assert step.text == f"{CALLSIGN}, descend flight level zero niner zero"
+    engine.flight.pending = None
+    assert engine.tick(approach, ISSUE, at(51.1, 4.55, feet=10800, heading=90)) is None
 
     abeam = at(51.1, 5.0, feet=7000, heading=90)
     downwind = engine.tick(approach, ISSUE, abeam)
@@ -463,6 +467,8 @@ def test_the_controller_notices_a_level_bust_a_wrong_heading_and_a_wrong_squawk(
     engine.handle(Intent("readback", heading=90, altitude=3500), approach, ISSUE, at(51.1, 5.0, feet=7000, heading=270))
     still_west = {**at(51.1, 5.0, feet=6000, heading=270), "vs_fpm": -800.0}
     assert engine.tick(approach, ISSUE, still_west) is None  # give the turn time
+    clock[0] += 60
+    assert engine.tick(approach, ISSUE, still_west) is None  # a turn right round takes a minute at rate one
     clock[0] += 60
     assert engine.tick(approach, ISSUE, still_west).text == f"{CALLSIGN}, fly heading zero niner zero"
     assert engine.tick(approach, ISSUE, still_west) is None

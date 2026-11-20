@@ -33,7 +33,20 @@ from .atis import uses_faa_style
 from .intents import Intent
 from .navdata import Airport, bearing, distance_nm, expect_station
 from .procedures import choose_approach, choose_sid, choose_star, circling_approach, route_fixes, spoken_name
-from .vectors import CLOSE_NM, FINAL_NM, established, locate, next_vector, turn_direction
+from .vectors import (
+    CLOSE_NM,
+    FINAL_NM,
+    GLIDE_FT_PER_NM,
+    Vector,
+    established,
+    joins_at,
+    locate,
+    next_vector,
+    pattern_ft,
+    too_high_ft,
+    turn_direction,
+    turn_out,
+)
 
 RADAR_KINDS = ("departure", "approach", "center")
 CHECK_IN = ("check_in", "initial_call", "position_report", "inbound")
@@ -63,6 +76,7 @@ LOW_AGL_FT = 1000  # descending below this height above the ground, away from th
 FIX_REACHED_NM = 2.5  # this close to an approach's initial fix, the aircraft has reached it (turns are anticipated)
 BUST_FT = 400  # how far through a cleared level before the controller says something
 HEADING_GRACE_S = 45  # time to roll onto an assigned heading before being asked about it
+TURN_DEG_PER_S = 3  # and the time the turn itself takes, at rate one: a turn back the other way takes a minute
 STAGES = ["descend", "downwind", "base", "intercept", "procedure", "tower"]
 ON_APPROACH = ("intercept", "procedure")  # cleared for the approach: by vectors, or by its own initial fix
 PROCEDURAL_KINDS = "RHP"  # R NAV, R N P and G P S approaches are flown from an initial fix when one is published
@@ -75,6 +89,13 @@ EN_ROUTE_OFF_TRACK_S = 120
 CROSSING_NM = 2.5
 SPEED_MARGIN_KT = 15
 SPEEDS_KT = {"descend": 250, "downwind": 220, "base": 180, "intercept": 160}
+FAR_FINAL_NM = 18  # cleared for the approach farther out than this, the speed is one eight zero to five miles
+FAR_FINAL_KT = 180
+STEP_DOWN_FT = 2000  # on the way in, a further descent is given when it is at least this much lower
+TURN_OUT_WITHIN_NM = 2  # too high to join the glide path this close to the joining point: turned out for the descent
+HIGH_ON_FINAL_FT = 1000  # cleared, on the localiser, and this far above the glide path: the controller says so
+CIRCLE_MARGIN_NM = 1  # final joined this far inside the sector altitude's circle is joined inside it
+HIGH_TOLD_BEYOND_NM = 6  # but not inside this distance, where it is the tower's and the pilot's to sort out
 JOIN_NM = (9, 10, 12)  # how far out final is joined; it differs from one arrival to the next
 FINAL_MAX_NM = 30  # but never so close in that the joining altitude is above a three degree path, up to this
 EXTEND_UP_TO_NM = 8  # a downwind leg is extended at most this far beyond the usual base turn
@@ -100,6 +121,8 @@ class Arrival:
     qnh_given: bool = False
     heading: int | None = None  # last heading assigned, magnetic
     heading_at: float = 0.0  # when it was assigned (engine clock)
+    heading_turn: float = 0.0  # how many degrees the aircraft had to turn onto it
+    cleared_nm: float = 0.0  # how far out along final the aircraft was when cleared for the approach
     heading_asked: bool = False
     speed_kt: int | None = None
     hold: object | None = None  # holding.HoldState while holding
@@ -115,6 +138,9 @@ class Arrival:
     via: str | None = None  # the initial approach fix an approach flown as a procedure starts at
     unavailable: bool = False  # no instrument approach, and weather that rules out a visual one
     unavailable_told: bool = False
+    high_told: bool = False  # told it is well above the glide path on final
+    closing: bool = False  # turned toward final beyond the sector altitude's circle, the approach clearance to come
+    turned_out: bool = False  # turned out once already for being too high to join the glide path
 
     @property
     def flown(self) -> str:
@@ -189,10 +215,7 @@ def clearance(engine, station, issue, raw, callsign, hello, faa, atis_part, on_c
     from .engine import Reply, _squawk
 
     flight, plan, airport = engine.flight, engine.flight.plan, station.airport
-    runway = engine._departure_runway(airport, issue, raw)
-    asked = engine.requested_runway(airport, issue)
-    if plan.departure_runway and issue and plan.departure_runway in engine.active_runways(airport, issue) and not asked:
-        runway = plan.departure_runway
+    runway = engine._departure_runway(airport, issue, raw)  # the one asked for, else the plan's where the wind allows
     procedures = engine.procedures(airport.ident)
     sid = choose_sid(procedures, runway, plan.route, plan.sid)
     destination = engine.db.airport(plan.destination)
@@ -655,14 +678,15 @@ def _flight_following(engine, intent, station, issue, callsign, hello):
 
 
 def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
-    flight, airport, plan = engine.flight, station.airport, engine.flight.plan
+    flight, airport = engine.flight, station.airport
     active = engine.active_runways(airport, issue)
     if not active:
         return None
+    planned = engine._planned_runway(airport, "arrival")
     if engine.requested_runway(airport, issue):
         runway = engine.requested_runway(airport, issue)
-    elif plan and plan.arrival_runway in active and plan.destination == airport.ident:
-        runway = plan.arrival_runway
+    elif planned in active:
+        runway = planned
     else:
         runway = engine._landing_runway(airport, issue, raw, intent)
     procedures = engine.procedures(airport.ident)
@@ -722,9 +746,11 @@ def _weather_allows(issue, visibility_sm: float, ceiling_ft: float) -> bool:
     return weather.visibility_sm >= visibility_sm and (ceiling is None or ceiling >= ceiling_ft) and not weather.fog
 
 
-def _speed(arrival: Arrival, stage: str, raw: dict, faa: bool) -> str | None:
-    """Speed control as the aircraft is brought onto final. Not said if already that slow."""
-    target = SPEEDS_KT.get(stage)
+def _speed(arrival: Arrival, stage: str, raw: dict, faa: bool, along_nm: float = 0.0) -> str | None:
+    """Speed control as the aircraft is brought onto final. Not said if already that slow. Cleared for the approach
+    far out, it is one eight zero to five miles: one six zero from twenty miles out is not asked of an airliner."""
+    far = stage == "intercept" and along_nm > FAR_FINAL_NM
+    target = FAR_FINAL_KT if far else SPEEDS_KT.get(stage)
     if not target or (arrival.speed_kt and arrival.speed_kt <= target):
         return None
     if stage == "descend" and not (raw.get("ias_kt", 0.0) > target + 10 and _feet(raw) < 14000):
@@ -734,8 +760,15 @@ def _speed(arrival: Arrival, stage: str, raw: dict, faa: bool) -> str | None:
         return None
     spoken = say.digits(target)
     if stage == "intercept":
-        return f"maintain {spoken} knots until four mile final" if faa else f"speed {spoken} knots until four miles"
+        miles = "five" if far else "four"
+        return f"maintain {spoken} knots until {miles} mile final" if faa else f"speed {spoken} knots until {miles} miles"
     return f"reduce speed to {spoken}" if faa else f"reduce speed {spoken} knots"
+
+
+def _joins_inside_circle(airport: Airport, arrival: Arrival, position) -> bool:
+    """Whether an intercept from here meets final inside the sector altitude's circle, which is centred on the airport."""
+    centre = locate(airport.lat, airport.lon, arrival.threshold, arrival.course_true)
+    return math.hypot(joins_at(position) - centre.along_nm, centre.cross_nm) < MSA_RADIUS_NM - CIRCLE_MARGIN_NM
 
 
 def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: bool):
@@ -769,10 +802,53 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     vector = next_vector(
         position, arrival.course_true, arrival.platform_ft, _feet(raw), safe, arrival.final_nm, extend, inbound, on_base, vectored
     )
-    if position.distance_nm > MSA_RADIUS_NM:
+    floor = 0
+    # The sector altitude's circle is centred on the airport, not on the runway's threshold, which at a large airport
+    # is miles away from it: measured from the threshold, a vector just outside the circle went below the terrain.
+    beyond = distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon) > MSA_RADIUS_NM
+    if beyond:
         # Outside the minimum sector altitude's circle, the terrain below sets the floor for any vector.
-        floor = max(safe, safe_floor_ft(engine, raw))
-        vector = replace(vector, altitude_ft=max(vector.altitude_ft, int(math.ceil(floor / 100) * 100)))
+        floor = int(math.ceil(max(safe, safe_floor_ft(engine, raw)) / 100) * 100)
+        vector = replace(vector, altitude_ft=max(vector.altitude_ft, floor))
+    feet = _feet(raw)
+    cleared = flight.cleared_ft if flight.cleared_ft is not None else feet
+    # Held up by the terrain's floor beyond the circle, above the altitude the approach is joined at inside it.
+    raised = beyond and vector.altitude_ft > arrival.platform_ft
+    excess = too_high_ft(position, feet, vector.altitude_ft, airport.elev_ft) if vector.stage == "intercept" else 0
+    # No answer: the glide path is below the joining altitude where final would be joined. At the floor out here that
+    # is too high, and the approach's own altitude waits inside the circle. At the approach's own altitude it is the
+    # approach as published over high ground, flown as it is.
+    high = vector.stage == "intercept" and (excess > 0 if excess is not None else raised)
+    lower = max(pattern_ft(arrival.platform_ft, safe), floor)  # what a leg flown out again is flown at
+    closing = False
+    if high and inbound and (position.along_nm > arrival.final_nm + TURN_OUT_WITHIN_NM or beyond):
+        # Too high to get down to the glide path from here, with miles still to go: down first, and cleared for the
+        # approach once it can make it. Never cleared from where it could only meet the path from above.
+        vector = Vector("descend", None, vector.altitude_ft)
+    elif high and arrival.stage == "downwind":
+        # Turned out already, or on a downwind leg: it flies on, away from the airport and down to the level it was
+        # given, until an intercept from where it is can make the glide path. Nothing new to say meanwhile.
+        return None if not first else _reply(engine, f"{callsign}, {lead.rstrip(', ')}") if lead else None
+    elif high and raised and _joins_inside_circle(airport, arrival, position):
+        # On a base leg, beyond the circle: turned toward final at the floor, once, without the approach clearance.
+        # That comes inside the circle, with the descent to the altitude the approach is joined at. Where final is
+        # joined beyond the circle (high ground all round), there is nothing to wait for: cleared as it is.
+        closing = True
+        vector = Vector("base", vector.heading_true, vector.altitude_ft, again=not arrival.closing)
+    elif high and lower < feet - 200 and not arrival.turned_out:
+        # Close in, or turning in from a base leg: out again, once, to lose the height, for a new base. Not where the
+        # leg out is no lower than the aircraft is now (high ground): nothing would be lost on it.
+        arrival.turned_out = True
+        vector = turn_out(position, arrival.course_true, lower, again=True)
+        lead = f"{lead}too high to join the glide path, "
+    # On the way in, the next descent as the aircraft comes down to the last one given; on a downwind or base leg given
+    # beyond the sector altitude's circle, the lower level due inside it.
+    step = (
+        vector.stage == arrival.stage
+        and vector.stage in ("descend", "downwind", "base")
+        and vector.altitude_ft < cleared
+        and (high or (vector.altitude_ft <= cleared - STEP_DOWN_FT and feet <= cleared + NEXT_STEP_WITHIN_FT))
+    )
     if (
         extend
         and arrival.stage == "downwind"
@@ -782,9 +858,10 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     ):
         arrival.extended = True
         return _reply(engine, f"{callsign}, extending your downwind for traffic on final, I will call your base turn")
-    if arrival.stage is not None and STAGES.index(vector.stage) <= STAGES.index(arrival.stage) and not vector.again:
+    if arrival.stage is not None and STAGES.index(vector.stage) <= STAGES.index(arrival.stage) and not vector.again and not step:
         return None if not first else _reply(engine, f"{callsign}, {lead.rstrip(', ')}") if lead else None
     arrival.stage = vector.stage
+    arrival.closing = closing
 
     parts: list[str] = []
     expect: dict = {}
@@ -797,8 +874,8 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
             parts.append(f"turn {turn_direction(current, heading)} heading {say.heading(heading)}")
         expect["heading"] = heading
         arrival.heading, arrival.heading_at, arrival.heading_asked = heading, engine.now(), False
-    cleared = flight.cleared_ft if flight.cleared_ft is not None else _feet(raw)
-    if vector.altitude_ft < min(cleared, _feet(raw) + 200):
+        arrival.heading_turn = abs((heading - current + 180) % 360 - 180)
+    if vector.altitude_ft < min(cleared, feet + 200):
         flight.cleared_ft, flight.descent_given = vector.altitude_ft, True
         transition = _transition_ft(engine, airport.ident, faa)
         text = f"descend {'and maintain ' if faa else ''}{say.level(vector.altitude_ft, transition, faa)}"
@@ -807,10 +884,11 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
             text += f", {engine._pressure(issue, faa)[0]}"
         parts.append(text)
         expect["altitude"] = vector.altitude_ft
-    speed = _speed(arrival, vector.stage, raw, faa)
+    speed = _speed(arrival, vector.stage, raw, faa, position.along_nm)
     if vector.stage == "intercept":
         parts.append(f"{say.digits(round(position.distance_nm))} miles from touchdown")
         parts.append(f"cleared {arrival.words()}")
+        arrival.cleared_nm = position.along_nm
         if speed:
             parts.append(speed)
         parts.append("report established")
@@ -860,7 +938,11 @@ def _via_initial_fix(engine, station, issue, raw, callsign, lead, position, safe
     flight, arrival, airport = engine.flight, engine.flight.arrival, station.airport
     # Direct to the fix from wherever the aircraft is: never below the minimum sector altitude, nor, beyond its 25
     # miles, below the minimum off-route altitude of the terrain under the aircraft; never below the field.
-    floor = max(safe, safe_floor_ft(engine, raw) if position.distance_nm > MSA_RADIUS_NM else 0, airport.elev_ft + 1500)
+    floor = max(
+        safe,
+        safe_floor_ft(engine, raw) if distance_nm(raw["lat"], raw["lon"], airport.lat, airport.lon) > MSA_RADIUS_NM else 0,
+        airport.elev_ft + 1500,
+    )
     found = _initial_fix(engine, airport, arrival, raw, position, floor)
     if not found:
         return None
@@ -1076,6 +1158,7 @@ def _divert(engine, intent, station, raw, variation, callsign, hello):
         base, origin=left_from, destination=target.ident, route=[], sid=None, star=None, departure_runway=None,
         arrival_runway=None, cruise_ft=level, alternate=None,
     )  # fmt: skip
+    engine.share_plan_runways()  # the new plan names no runway: the old one's no longer sets any airport's runways
     flight.rules, flight.destination = "IFR", target.spoken_name
     flight.arrival, flight.star, flight.star_procedure, flight.constraints = None, None, None, None
     flight.told_approach, flight.told_sector, flight.descent_given, flight.direct_to = False, None, False, None
@@ -1404,8 +1487,10 @@ def _on_profile(arrival: Arrival, raw: dict) -> bool:
     if "lat" not in raw or "agl_m" not in raw:
         return False
     position = locate(raw["lat"], raw["lon"], arrival.threshold, arrival.course_true)
-    # A final joined farther out than planned is flown on the same path: the height check below is what keeps it safe.
-    on_final = position.cross_nm < PROFILE_CROSS_NM and 0 < position.along_nm <= max(arrival.final_nm + 2, LONG_FINAL_NM)
+    # A final joined farther out than planned, or cleared from farther out, is flown on the same path: the height
+    # check below is what keeps it safe.
+    limit = max(arrival.final_nm + 2, LONG_FINAL_NM, arrival.cleared_nm + 1)
+    on_final = position.cross_nm < PROFILE_CROSS_NM and 0 < position.along_nm <= limit
     return on_final and raw["agl_m"] / 0.3048 >= position.along_nm * 318 - PROFILE_MARGIN_FT
 
 
@@ -1420,7 +1505,7 @@ def _watch(engine, station, raw, callsign):
         and arrival.heading is not None
         and arrival.stage in ("downwind", "base")
         and not arrival.heading_asked
-        and engine.now() - arrival.heading_at > HEADING_GRACE_S
+        and engine.now() - arrival.heading_at > HEADING_GRACE_S + arrival.heading_turn / TURN_DEG_PER_S
         and "heading_mag" in raw
         and abs((raw["heading_mag"] - arrival.heading + 180) % 360 - 180) > 25
     ):
@@ -1637,6 +1722,16 @@ def tick(engine, station, issue, raw, variation, callsign):
         # Flying in along final, not across or away from it on the way to an initial fix beyond the airport.
         inbound = abs((raw.get("heading_true", arrival.course_true) - arrival.course_true + 180) % 360 - 180) < 90
         if inbound and (established(position, arrival.final_nm) or inside):
+            above = _feet(raw) - (station.airport.elev_ft + position.along_nm * GLIDE_FT_PER_NM)
+            if above > HIGH_ON_FINAL_FT and position.along_nm > HIGH_TOLD_BEYOND_NM:
+                # Well above the glide path: said once, and the tower waits until the pilot answers ("established",
+                # or "request vectors") or the aircraft comes down to the path.
+                if arrival.high_told:
+                    return None
+                arrival.high_told = True
+                return _reply(
+                    engine, f"{callsign}, you appear well above the glide path, say intentions", event="high_on_approach"
+                )
             return _to_tower(engine, station, callsign)
         return None
     asked = engine.requested_runway(station.airport, issue)  # checked against the wind again: dropped if it fails

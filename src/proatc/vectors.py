@@ -26,6 +26,8 @@ BASE_DRIFT_NM = 1  # on a base leg that drifted in, one more mile: the heading i
 # A 30 degree intercept from CLOSE_NM off the centreline meets it this far further in: base is turned that much
 # further out, so that the intercept joins final where it should, not a mile from the runway far above the path.
 BASE_BEYOND_NM = CLOSE_NM / math.tan(math.radians(INTERCEPT_DEG)) - LATEST_JOIN_NM
+GLIDE_FT_PER_NM = 318.4  # a three degree glide path
+DESCENT_FT_PER_NM = 400  # a little over three degrees: the steepest descent counted on to reach the glide path
 
 
 @dataclass
@@ -69,7 +71,7 @@ def next_vector(
     flown a downwind leg: it is coming from outside, and may close the centreline on a dogleg. `on_base` says it
     is flying the base leg it was given, `vectored` that it is on a downwind or base leg already.
     """
-    pattern_ft = max(platform_ft + 1000, int(math.ceil(safe_ft / 100) * 100))
+    pattern = pattern_ft(platform_ft, safe_ft)
     reciprocal = (course_true + 180) % 360
     toward = 1 if position.side == "left" else -1  # sign of the turn, from the course, that points at the centreline
 
@@ -78,7 +80,7 @@ def next_vector(
         # wide the leg is, or it would fly on with nothing more said.
         # Roughly three degrees: 300 ft for every mile beyond the point where final is joined.
         target = platform_ft + 300 * (position.distance_nm - final_nm - 5)
-        return Vector("descend", None, max(pattern_ft, min(_round_up(target), _round_up(current_ft))))
+        return Vector("descend", None, max(pattern, min(_round_up(target), _round_up(current_ft))))
 
     far_enough = position.along_nm >= final_nm + BASE_BEYOND_NM
     latest = final_nm - LATEST_JOIN_NM - (BASE_DRIFT_NM if on_base else 0)
@@ -87,8 +89,7 @@ def next_vector(
         return Vector("intercept", (course_true + toward * turn) % 360, platform_ft)
     if on_base and position.along_nm < latest:
         # Drifted in so far that no intercept from here would join final in time: out again, for a new base.
-        drift = 20 if position.cross_nm < 4 else 0
-        return Vector("downwind", (reciprocal + toward * drift) % 360, pattern_ft, again=True)
+        return turn_out(position, course_true, pattern, again=True)
     if far_enough and not extend:
         # At 45 degrees the aircraft comes in as far as it is from the centreline: far off to the side, that would
         # take it past the joining point, so it gets a base leg instead.
@@ -96,11 +97,37 @@ def next_vector(
         dogleg = inbound and position.along_nm >= final_nm + BASE_BEYOND_NM + DOGLEG_BEYOND_NM and room
         return Vector("base", (course_true + toward * (DOGLEG_DEG if dogleg else 90)) % 360, platform_ft)
     if far_enough:
-        return Vector("downwind", reciprocal, pattern_ft)
+        return Vector("downwind", reciprocal, pattern)
     # Not far enough out: fly away from the airport, parallel to the runway, drifting off the
     # centreline first if the aircraft is close to it so there is room for the base turn.
+    return turn_out(position, course_true, pattern)
+
+
+def turn_out(position: Position, course_true: float, altitude_ft: int, again: bool = False) -> Vector:
+    """Away from the airport, parallel to final, drifting off the centreline first when close to it: a downwind leg."""
+    toward = 1 if position.side == "left" else -1
     drift = 20 if position.cross_nm < 4 else 0
-    return Vector("downwind", (reciprocal + toward * drift) % 360, pattern_ft)
+    return Vector("downwind", ((course_true + 180) % 360 + toward * drift) % 360, altitude_ft, again=again)
+
+
+def pattern_ft(platform_ft: int, safe_ft: int = 0) -> int:
+    """The altitude of a downwind leg: above the joining altitude, and no lower than the minimum safe altitude."""
+    return max(platform_ft + 1000, int(math.ceil(safe_ft / 100) * 100))
+
+
+def too_high_ft(position: Position, current_ft: float, joining_ft: int, elevation_ft: float) -> float | None:
+    """How far above what an intercept from here can get down from, in feet; negative when it can make it.
+
+    Cleared now, the aircraft descends to `joining_ft` and meets the glide path from below where the path comes
+    down to that altitude. It has the miles to the joining point, and along final to where the path meets the
+    joining altitude, at no more than DESCENT_FT_PER_NM. None when the joining altitude is itself above the path
+    where final is joined: no aircraft could meet the path from below there, whatever its height now."""
+    join = joins_at(position)
+    meets = (joining_ft - elevation_ft) / GLIDE_FT_PER_NM  # how far out the glide path is at the joining altitude
+    if meets > join:
+        return None
+    miles = math.hypot(position.along_nm - join, position.cross_nm) + (join - meets)
+    return current_ft - joining_ft - miles * DESCENT_FT_PER_NM
 
 
 def joins_at(position: Position) -> float:

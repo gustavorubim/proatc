@@ -73,6 +73,8 @@ def test_the_legs_flown_depend_on_the_runway_and_the_route():
     sid = parse_cifp(SID).sids["WEST2A"]
     assert names(sid.chain("SID", "27", ["ALFAX"])) == ["W27A", "WMID", "WCOM", "ALFAX"]
     assert names(sid.chain("SID", "09", ["OTHER"])) == ["W09A", "WMID", "WCOM", "OTHER"]
+    # The airport data names runway "09" as "9": the same runway part, not every runway's legs.
+    assert names(sid.chain("SID", "9", ["OTHER"])) == ["W09A", "WMID", "WCOM", "OTHER"]
     assert names(sid.chain("SID", "27", ["NOWHERE"])) == ["W27A", "WMID", "WCOM"]  # no transition matches: none is flown
     # Where two parts join, the restriction on the shared fix is kept.
     assert [(leg.fix, leg.alt_descr, leg.altitude_ft, leg.speed_kt) for leg in sid.chain("SID", "27", [])][1] == (
