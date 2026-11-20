@@ -12,33 +12,55 @@ MIC_RATE = 16000  # what speech-to-text models expect
 
 
 class Recorder:
-    def __init__(self, device: int | None = None):
+    def __init__(self, device: int | None = None, limit_s: float | None = None):
         self.device = device
+        self.limit_s = limit_s  # the most one recording keeps: then the microphone stops by itself
         self._chunks: list[np.ndarray] = []
+        self._room: int | None = None  # samples still to record before the limit
         self._lock = threading.Lock()
+        self._stream_lock = threading.Lock()
         self._stream: sd.InputStream | None = None
 
     def _callback(self, indata, frames, time_info, status) -> None:
         with self._lock:
-            self._chunks.append(indata[:, 0].copy())
+            take = indata[:, 0]
+            if self._room is not None:
+                take = take[: max(self._room, 0)]
+                self._room -= take.size
+            if take.size:
+                self._chunks.append(take.copy())
+            full = self._room is not None and self._room <= 0
+        if full:
+            raise sd.CallbackStop  # at the limit the microphone stops, whatever else the app is doing
 
     def start(self) -> None:
         with self._lock:
             self._chunks = []
-        self._stream = sd.InputStream(
-            samplerate=MIC_RATE,
-            channels=1,
-            dtype="float32",
-            device=self.device,
-            callback=self._callback,
-        )
-        self._stream.start()
+            self._room = int(self.limit_s * MIC_RATE) if self.limit_s else None
+        with self._stream_lock:
+            self._close()  # one left open
+            self._stream = sd.InputStream(
+                samplerate=MIC_RATE,
+                channels=1,
+                dtype="float32",
+                device=self.device,
+                callback=self._callback,
+            )
+            self._stream.start()
+
+    def halt(self) -> None:
+        """Stop the microphone now. What it recorded is kept for stop()."""
+        with self._stream_lock:
+            self._close()
+
+    def _close(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream:
+            stream.stop()
+            stream.close()
 
     def stop(self) -> np.ndarray:
-        if self._stream:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        self.halt()
         with self._lock:
             if not self._chunks:
                 return np.zeros(0, dtype=np.float32)

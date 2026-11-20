@@ -452,7 +452,7 @@ export function SettingsDialog({
                   </Row>
                   <Row
                     label="Paired devices"
-                    hint="Forget them all if a device is lost or no longer yours: each must pair again"
+                    hint="Each must pair again after 30 days. Forget them all if a device is lost or no longer yours"
                   >
                     <span className="mono">{remote.devices}</span>
                     <button

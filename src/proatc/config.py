@@ -209,14 +209,33 @@ def private(path: Path) -> None:
             pass  # a file system without permissions: nothing more can be done
 
 
+TOKEN_LIKE = 16  # a part of an address's path this long may be a token (".../v1/chat/completions" has none)
+
+
 def safe_url(url: str) -> str:
-    """An address without a user name, password or query, which could carry a token: for logs and reports."""
+    """An address as logs and reports show it: the scheme, host and port only. A user name, password, query or
+    path could carry a token."""
     try:
         parts = urlsplit(url)
         host = parts.hostname or ""
-        return urlunsplit((parts.scheme, f"{host}:{parts.port}" if parts.port else host, parts.path, "", ""))
+        return urlunsplit((parts.scheme, f"{host}:{parts.port}" if parts.port else host, "", "", ""))
     except ValueError:
         return "(not shown)"
+
+
+def url_secrets(url: str) -> set[str]:
+    """What in an address could let someone in: a user name, a password, query values, a token-like part of the
+    path, and then the whole address too."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return {url} if url else set()
+    found = {value for value in (parts.username, parts.password) if value}
+    found |= {value for pair in parts.query.split("&") for value in pair.split("=")[1:] if len(value) >= 4}
+    found |= {piece for piece in parts.path.split("/") if len(piece) >= TOKEN_LIKE}
+    if found:
+        found.add(url)
+    return found
 
 
 def settings_path() -> Path:

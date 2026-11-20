@@ -126,6 +126,7 @@ class Session:
         self.last_sound_check: str = checked.get("verdict", "") if isinstance(checked, dict) else ""
         self._recording = False  # the microphone was started at key-down
         self._keying = threading.Lock()  # between the key going down and a finished job letting others talk
+        self._tx_timer: threading.Timer | None = None  # ends a transmission MAX_TRANSMISSION_S after key-down
         self._missed: tuple | None = None  # a readback of the copilot's that nobody heard, tried once more
 
     # ---- events -------------------------------------------------------------
@@ -264,14 +265,14 @@ class Session:
             clock=self.clock,
         )  # fmt: skip
         self.second_radio.start()
-        self.ptt = PushToTalk(config.ptt.key, on_down=self._key_down)
+        self.ptt = PushToTalk(config.ptt.key, on_down=self._key_down, on_up=self._key_up)
         self.ptt.start()
         self.computer = system_check.this_computer(self.ptt.listening())
         for note in system_check.startup_notes(self.computer):
             emit({"type": "info", "text": note})
         self.joystick = JoystickButtons(self._joystick_button, config.ptt.joystick, config.ptt.joystick_button)
         self.joystick.start()
-        self.recorder = Recorder(config.audio.input_device)
+        self.recorder = Recorder(config.audio.input_device, limit_s=MAX_TRANSMISSION_S)
         try:
             self.options.update(audio_options())
             self.options["voices"] = self.tts.voices()
@@ -287,6 +288,12 @@ class Session:
         (the copilot may be tuning, or a reply still being spoken)."""
         with self._keying:
             self.busy.set()
+        # The limit counts from now, when the microphone starts, not from when the radio gets to the call.
+        timer = threading.Timer(MAX_TRANSMISSION_S, self._too_long, args=(None,))
+        timer.args = (timer,)
+        timer.daemon = True
+        self._tx_timer = timer
+        timer.start()
         self._keyed_khz = tuned_khz(self.bridge.snapshot()) if self.ready and self.bridge.connected else None
         recorder = getattr(self, "recorder", None)
         self._recording = False
@@ -297,6 +304,28 @@ class Session:
             except Exception as error:  # the job tries again, and reports what is wrong
                 self.emit({"type": "error", "text": f"Microphone: {error}"})
         self.jobs.put(("voice", None, None))
+
+    def _key_up(self) -> None:
+        """The transmission ended: the microphone stops now, even while the job for the call is still waiting
+        its turn. What it recorded waits for that job."""
+        timer, self._tx_timer = self._tx_timer, None
+        if timer is not None:
+            timer.cancel()
+        recorder = getattr(self, "recorder", None)
+        if recorder is not None and hasattr(recorder, "halt"):
+            try:
+                recorder.halt()
+            except Exception:
+                pass  # the job's own stop reports a microphone that misbehaves
+
+    def _too_long(self, timer) -> None:
+        """A key left down (a window or a device gone, a key the system never let go): the transmission ends."""
+        if self._tx_timer is not timer or not self.ptt.pressed.is_set():
+            return
+        self.ptt.release()  # and so _key_up: the microphone stops
+        self.emit(
+            {"type": "info", "text": f"transmission ended after {MAX_TRANSMISSION_S} seconds: release the key between calls"}
+        )
 
     def _joystick_button(self, down: bool) -> None:
         if self.capturing:
