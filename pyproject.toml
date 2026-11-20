@@ -1,6 +1,6 @@
 [project]
 name = "proatc"
-version = "0.20.0"
+version = "0.20.1"
 description = "Free voice ATC for X-Plane 12: bring your own OpenRouter key, local speech-to-text and text-to-speech"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
