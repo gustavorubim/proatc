@@ -34,7 +34,9 @@ SHA256 = {
 }
 
 ENGINES = ("kokoro", "phonon")
-PHONON_MODEL = "hf://gradium/phonon-31m-en"  # Apache 2.0; the larger Phonon models are non-commercial
+# Apache 2.0 (the larger Phonon models are non-commercial). Pinned to the revision tested, which is also the one
+# ptts 0.7.1 defaults to: a change upstream is not downloaded until it is tried and pinned here.
+PHONON_MODEL = "hf://gradium/phonon-31m-en@92741c5b07d085ff840e26fea8ce43110b87852f"
 # The catalogue's English voices, by accent and sex. Its character voices (pirates, dragons) are left out.
 PHONON_VOICES = {
     "af": ("Delia", "Everly", "Hadley", "Harper", "Juniper", "Zoey"),

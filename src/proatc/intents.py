@@ -187,6 +187,8 @@ def _clean(data: dict) -> Intent:
         intent.qnh = float(data["qnh"]) if "qnh" in data else None
     except (TypeError, ValueError):
         intent.qnh = None
+    if intent.qnh is not None and not (20 <= intent.qnh <= 1100):  # inches or hectopascals; never NaN or infinite
+        intent.qnh = None
     frequency = re.fullmatch(r"(1[123]\d)[.,]?(\d{0,3})", str(data.get("frequency", "")).replace(" ", ""))
     if frequency:
         intent.frequency = f"{frequency.group(1)}.{frequency.group(2).ljust(3, '0')}"

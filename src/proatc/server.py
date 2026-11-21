@@ -42,7 +42,7 @@ from websockets.sync.server import serve
 from . import phraseology as say
 from .airspace import CONTROLLED
 from .atis import decoded, runways_in_use, uses_faa_style
-from .config import PROJECT_DIR, Config, editable_values, load_settings, private, save_settings, settings_path
+from .config import PROJECT_DIR, Config, editable_values, load_settings, private, save_settings
 from .flightplan import PlanError, fetch_simbrief, manual
 from .intents import Intent
 from .navdata import AirportDB, distance_nm
@@ -56,7 +56,8 @@ MAX_BAD_CODES = 5  # wrong pairing codes from one source within LOCKOUT_S before
 LOCKOUT_S = 300
 MAX_BAD_PAIRING = 40  # wrong codes from anywhere while a pairing window is open before it closes
 MAX_SOURCES = 256  # addresses whose wrong codes are remembered; older ones are forgotten first
-MAX_REMOTE_CONNECTIONS = 16  # connections from other devices at once, signed in or not
+MAX_REMOTE_CONNECTIONS = 16  # connections from other devices at once, counted from the moment one is accepted
+REMOTE_OPEN_TIMEOUT_S = 5  # a connection from another device that has not finished its handshake by then is closed
 PAIRING_WINDOW_S = 300  # how long a pairing code shown on the computer is good for
 MAX_DEVICES = 8  # paired devices kept; the oldest is forgotten first
 DEVICE_DAYS = 30  # a paired device must pair again after this: its token crosses the network in the clear
@@ -72,6 +73,11 @@ REMOTE_SETTINGS = frozenset(("atc", "tts", "radio"))
 PAID_COMMANDS = frozenset(("say", "click", "phrase", "explain", "what_next", "debrief"))
 REMOTE_PAID_PER_MINUTE = 10  # for each paired device, however often it reconnects
 REMOTE_PAID_PER_HOUR = 120  # for all paired devices together: what they can spend of the key's credit
+# Free to the user but work for the computer (a download, a chart, a settings write): a budget for each device,
+# and the downloads and charts one at a time for all of them.
+REMOTE_BUSY_COMMANDS = frozenset(("chart", "simbrief", "tune", "settings", "plan"))
+REMOTE_BUSY_PER_MINUTE = 30
+REMOTE_SLOW_COMMANDS = frozenset(("chart", "simbrief"))
 # Events for the computer's own window only: they name files on it.
 PRIVATE_EVENTS = frozenset(("log_saved", "report_saved"))
 # Parts of the state a paired device is not sent: the SimBrief ID, the settings (a local model's address may
@@ -114,8 +120,12 @@ _PAGE_FILES: list = [None, {}]  # (the folder, its files): the page does not cha
 
 
 def for_remote(state: dict) -> dict:
-    """The state as a paired device is sent it."""
-    return {key: value for key, value in state.items() if key not in PRIVATE_STATE}
+    """The state as a paired device is sent it: without what is the computer's own, such as its keyboard's
+    push-to-talk key (a device cannot key the computer's microphone)."""
+    shown = {key: value for key, value in state.items() if key not in PRIVATE_STATE}
+    if isinstance(shown.get("status"), dict):
+        shown["status"] = {key: value for key, value in shown["status"].items() if key != "ptt_key"}
+    return shown
 
 
 def lan_address() -> str:
@@ -379,9 +389,8 @@ class AppServer:
         self.remote_clients: set = set()  # connections from paired devices
         self._bad_codes: dict[str, deque] = {}  # source address -> when its wrong codes came
         self._remote_slots = threading.BoundedSemaphore(MAX_REMOTE_CONNECTIONS)
-        self._known: list[str] = []  # the paired devices, as last read
-        self._known_stamp = None  # settings.json as it was then (None: read it again)
-        self._known_at = 0.0
+        self._busy: dict[str, deque] = {}  # paired device -> when its busy commands came
+        self._slow_work = threading.Lock()  # a download or a chart for another device, one at a time
         self._bad_pairing = 0  # wrong codes from anywhere while the pairing window is open
         self._code = ""  # the pairing code while a pairing window is open
         self._pairing_until = 0.0
@@ -395,6 +404,9 @@ class AppServer:
         self._address = lan_address()
         if load_settings().get("remote_devices"):
             save_settings({"remote_devices": _device_entries()})  # an age for each, and the expired gone
+        # The paired devices, held in memory: signing in reads no file. Read again by the check every few seconds
+        # (which also notices a change made outside the app) and set when a device pairs or all are forgotten.
+        self._entries: list[dict] = _device_entries()
 
     # ---- outgoing -----------------------------------------------------------
 
@@ -484,16 +496,13 @@ class AppServer:
         return False
 
     def _paired_now(self) -> list[str]:
-        """The paired devices, read again only when settings.json has changed (or every few seconds, for those
-        whose month runs out): an attempt to sign in costs no reading of files."""
-        try:
-            info = settings_path().stat()
-            stamp = (info.st_mtime_ns, info.st_size)
-        except OSError:
-            stamp = None
-        if stamp is None or stamp != self._known_stamp or time.monotonic() - self._known_at > DEVICE_RECHECK_S:
-            self._known, self._known_stamp, self._known_at = paired_devices(), stamp, time.monotonic()
-        return self._known
+        """The paired devices whose month is not up, from memory: an attempt to sign in reads no file."""
+        now = time.time()
+        return [entry["hash"] for entry in self._entries if now - entry["paired"] < DEVICE_DAYS * 86400]
+
+    def reload_devices(self) -> None:
+        """Read the paired devices again from settings.json."""
+        self._entries = _device_entries()
 
     def _forget_old_sources(self, now: float) -> None:
         """Wrong codes from long ago are forgotten, and only the newest addresses are kept."""
@@ -509,17 +518,27 @@ class AppServer:
         return origin is None or urlparse(origin).netloc == headers.get("Host", "")
 
     def _handle(self, connection, remote: bool = False) -> None:
-        """One connection. From other devices, no more than MAX_REMOTE_CONNECTIONS at once, signed in or not."""
-        if not remote:
-            self._serve(connection, remote)
-            return
-        if not self._remote_slots.acquire(blocking=False):
-            connection.close(1013, "too many connections")
-            return
-        try:
-            self._serve(connection, remote)
-        finally:
-            self._remote_slots.release()
+        self._serve(connection, remote)
+
+    def _bounded(self, listener) -> None:
+        """No more than MAX_REMOTE_CONNECTIONS from other devices at once, counted from the moment one is accepted:
+        one over is closed before anything it sends is read, page request and handshake alike. Each accepted
+        socket is given to `listener.handler` on a thread of its own (websockets' sync server); a refused one
+        is taken off the list of those threads, as websockets' own handler does when it finishes."""
+        inner = listener.handler
+
+        def bounded(sock, address) -> None:
+            if self._remote_slots.acquire(blocking=False):
+                try:
+                    inner(sock, address)
+                finally:
+                    self._remote_slots.release()
+                return
+            _quietly(sock.close)
+            with listener.lock:
+                listener.handler_threads.discard(threading.current_thread())
+
+        listener.handler = bounded
 
     def _serve(self, connection, remote: bool) -> None:
         query = parse_qs(urlparse(connection.request.path).query)
@@ -530,7 +549,7 @@ class AppServer:
             if granted:
                 if granted == "paired":
                     device = self._new_device()
-                    self._known_stamp = None  # the list has changed: read it again
+                    self.reload_devices()
                 outbox = self._outbox[connection] = Outbox(connection)
                 # What it has missed goes first, and is in its outbox before anything sent from now on.
                 if device:
@@ -591,7 +610,8 @@ class AppServer:
         """Every paired device must pair again; those connected now are cut off."""
         with self.lock:  # no device is let in while this runs: each is either cut off below or refused
             save_settings({"remote_devices": []})
-            self._known, self._known_stamp = [], None
+            self._entries = []
+            self._busy.clear()
             self.close_pairing()
             connected = list(self.remote_clients)
             for client in connected:
@@ -606,6 +626,7 @@ class AppServer:
         now = time.time()
         with self.lock:  # the same lock as letting a device in: one pairing now is either in this list or not yet in
             paired = set(paired_devices())
+            self.reload_devices()
             gone = [connection for connection, device in self._device_of.items()
                     if device not in paired or now >= self._expires.get(connection, 0)]  # fmt: skip
             for connection in gone:
@@ -633,8 +654,26 @@ class AppServer:
             self._paid_all.append(now)
         return True
 
-    def _command(self, command: dict, remote: bool = False, connection=None) -> None:
+    def _busy_allowed(self, connection) -> bool:
+        """A paired device's commands that are work for this computer: REMOTE_BUSY_PER_MINUTE a minute each."""
+        now = time.monotonic()
+        with self.lock:
+            times = self._busy.setdefault(self._device_of.get(connection, ""), deque(maxlen=REMOTE_BUSY_PER_MINUTE))
+            if len(times) == REMOTE_BUSY_PER_MINUTE and now - times[0] < 60:
+                return False
+            times.append(now)
+        return True
+
+    def _command(self, command: dict, remote: bool = False, connection=None, slot_held: bool = False) -> None:
         session, name = self.session, command.get("cmd")
+        if remote and name in REMOTE_SLOW_COMMANDS and not slot_held:
+            # A download or a chart for another device: one at a time, never queued behind another.
+            if not self._slow_work.acquire(blocking=False):
+                raise ValueError("Busy with another download: try again in a moment.")
+            try:
+                return self._command(command, remote, connection, slot_held=True)
+            finally:
+                self._slow_work.release()
         if remote and not self._still_paired(connection):
             if connection is not None:
                 _cut_off(connection, "pair again")
@@ -645,6 +684,8 @@ class AppServer:
             raise ValueError("That can only be done in the app on the computer.")
         if remote and name in PAID_COMMANDS and not self._paid_allowed(connection):
             raise ValueError("Too many requests from other devices: wait a minute, or use the app on the computer.")
+        if remote and name in REMOTE_BUSY_COMMANDS and not self._busy_allowed(connection):
+            raise ValueError("Too many requests from this device: wait a minute, or use the app on the computer.")
         if name == "pair_device":
             self.open_pairing()
             return
@@ -754,7 +795,9 @@ class AppServer:
             raise ValueError("The view for other devices needs the desktop app: its page was not found.")
         port = self.session.config.remote.port
         try:
-            self.remote = serve(lambda connection: self._handle(connection, True), "0.0.0.0", port, process_request=self._page)
+            self.remote = serve(lambda connection: self._handle(connection, True), "0.0.0.0", port,
+                                process_request=self._page, open_timeout=REMOTE_OPEN_TIMEOUT_S)  # fmt: skip
+            self._bounded(self.remote)
         except OSError as error:
             raise ValueError(f"Port {port} could not be opened for other devices: {error}") from error
         threading.Thread(target=self.remote.serve_forever, name="remote-view", daemon=True).start()
@@ -778,6 +821,10 @@ class AppServer:
                 "Content-Length": str(len(body)),
                 "Cache-Control": "no-cache",
                 "X-Content-Type-Options": "nosniff",
+                # Never inside another site's frame, where a click could be steered; and no address sent on.
+                "Content-Security-Policy": "frame-ancestors 'none'",
+                "X-Frame-Options": "DENY",
+                "Referrer-Policy": "no-referrer",
             }
         )
         return Response(200, "OK", headers, body)

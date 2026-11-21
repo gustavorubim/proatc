@@ -49,6 +49,10 @@ def known_secrets() -> list[str]:
     return found
 
 
+def _one_line(text: str) -> str:
+    return " / ".join(part.strip() for part in re.split(r"[\r\n\u2028\u2029\x0b\x0c\x85]+", text) if part.strip()) or ""
+
+
 class FlightLog:
     def __init__(self):
         self.records: deque = deque(maxlen=KEPT)
@@ -122,9 +126,11 @@ class FlightLog:
             self._write(entry)
 
     def text(self) -> str:
-        """The conversation as a readable transcript."""
+        """The conversation as a readable transcript. Each record is one line however it was written: a line
+        break inside what was said or typed is shown as " / ", so it cannot pass for a line of its own."""
         lines = [f"Pro ATC flight log, started {self.started:%Y-%m-%d %H:%M}", ""]
         for entry in self.entries():
+            entry = {key: _one_line(value) if isinstance(value, str) else value for key, value in entry.items()}
             stamp = datetime.fromtimestamp(entry["t"]).strftime("%H:%M:%S")
             kind = entry["type"]
             where = entry.get("context", {})
