@@ -447,7 +447,7 @@ def _offer_ready(engine, question, station, issue, raw, add) -> None:
 def _offer_established(engine, question, station, issue, raw, add) -> None:
     arrival = engine.flight.arrival
     if arrival:
-        add("Established", f"established {arrival.approach} runway {say.runway(arrival.flown)}", "established")
+        add("Established", f"established {arrival.named} runway {say.runway(arrival.flown)}", "established")
     add("Request vectors", "unable to establish, request vectors", "request_vectors")
 
 

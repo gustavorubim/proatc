@@ -32,7 +32,15 @@ from . import phraseology as say
 from .atis import RunwaysInUse, split_runways, uses_faa_style
 from .intents import Intent
 from .navdata import Airport, bearing, distance_nm, expect_station
-from .procedures import choose_approach, choose_sid, choose_star, circling_approach, route_fixes, spoken_name
+from .procedures import (
+    APPROACH_FAMILIES,
+    choose_approach,
+    choose_sid,
+    choose_star,
+    circling_approach,
+    route_fixes,
+    spoken_name,
+)
 from .vectors import (
     CLOSE_NM,
     FINAL_NM,
@@ -141,6 +149,12 @@ class Arrival:
     high_told: bool = False  # told it is well above the glide path on final
     closing: bool = False  # turned toward final beyond the sector altitude's circle, the approach clearance to come
     turned_out: bool = False  # turned out once already for being too high to join the glide path
+    variant: str | None = None  # the approach's letter, when it has one: Z of the R NAV Z runway 21
+
+    @property
+    def named(self) -> str:
+        """The approach as a controller names it: 'R NAV Zulu', so that the R NAV Y and Z to one runway are told apart."""
+        return f"{self.approach} {say.PHONETIC[self.variant]}" if self.variant in say.PHONETIC else self.approach
 
     @property
     def flown(self) -> str:
@@ -149,7 +163,7 @@ class Arrival:
 
     def words(self) -> str:
         """'I L S approach runway two seven right', with the circling runway when there is one."""
-        text = f"{self.approach} approach runway {say.runway(self.flown)}"
+        text = f"{self.named} approach runway {say.runway(self.flown)}"
         return f"{text}, circle to land runway {say.runway(self.runway)}" if self.approach_runway else text
 
 
@@ -690,8 +704,10 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
     else:
         runway = engine._landing_runway(airport, issue, raw, intent)
     procedures = engine.procedures(airport.ident)
-    wanted = flight.requested_approach
-    approach = (wanted and choose_approach(procedures, runway, wanted)) or choose_approach(procedures, runway)
+    wanted, fixes = flight.requested_approach, arrival_fixes(engine, airport)
+    approach = (wanted and choose_approach(procedures, runway, wanted, flight.requested_variant, fixes)) or choose_approach(
+        procedures, runway, arrival_fixes=fixes
+    )
     flown = runway
     unavailable = False
     if approach is None:
@@ -715,7 +731,7 @@ def _setup_arrival(engine, station, issue, raw, intent) -> Arrival | None:
         airport.ident, runway, approach.spoken if approach else "visual", platform, course, engine._threshold(airport, flown),
         final_nm=min(join, FINAL_MAX_NM), approach_runway=flown if flown != runway else None,
         missed_ft=approach.missed_ft if approach else None, go_arounds=flight.go_arounds, unavailable=unavailable,
-        procedure=approach,
+        procedure=approach, variant=approach.variant if approach else None,
     )  # fmt: skip
     return flight.arrival
 
@@ -913,12 +929,52 @@ def _vector(engine, station, issue, raw, variation, callsign, lead: str, first: 
     return _reply(engine, f"{callsign}, {lead}{', '.join(parts)}", expect)
 
 
+def arrival_fixes(engine, airport) -> set[str]:
+    """The fixes of the arrival (STAR) the flight was given into this airport; none when it has none."""
+    plan = engine.flight.plan
+    if not plan or plan.destination != airport.ident:
+        return set()
+    star = _star(engine, airport)
+    return set(star.fixes()) if star else set()
+
+
+def procedure_points(engine, approach, fix: str, airport) -> list[tuple[float, float]]:
+    """Where the published legs from the initial approach fix `fix` go, to the last fix before the runway: the
+    transition, then the final segment. Curved legs are taken as straight lines between their fixes."""
+    legs = next((legs for legs in approach.transitions.values() if next((leg.fix for leg in legs if leg.fix), None) == fix), None)
+    if legs is None or not engine.navfix:
+        return []
+    points: list[tuple[float, float]] = []
+    for leg in (*legs, *approach.final):
+        if leg.fix.startswith("RW"):
+            break  # the runway: what follows is the missed approach
+        if not leg.fix:
+            continue
+        where = engine.navfix.position(leg.fix, airport.lat, airport.lon, 80)
+        if where and where in points[:-1]:
+            break  # back to a fix already passed: the missed approach, where the data has no runway fix to end on
+        if where and (not points or where != points[-1]):
+            points.append(where)
+        if leg.role == "M":
+            break  # the missed approach point ends the final segment
+    return points
+
+
+def _track_nm(points: list[tuple[float, float]], threshold: tuple[float, float]) -> float:
+    path = [*points, threshold]
+    return sum(distance_nm(*a, *b) for a, b in zip(path, path[1:]))
+
+
 def _initial_fix(engine, airport, arrival, raw, position, floor: float = 0):
     """(fix, crossing altitude, position) of the published initial approach fix that suits where the aircraft is:
-    one it can get down from to the runway, given the floor it must be held at until the fix."""
+    one it can get down from to the runway, given the floor it must be held at until the fix. The one the flight's
+    arrival leads to comes first, as a controller clears it: the arrival and the approach's transitions are
+    published to meet there. That one may lie beyond the runway: its published legs curve round onto final."""
     approach = arrival.procedure
     if not approach or approach.kind not in PROCEDURAL_KINDS or not engine.navfix:
         return None
+    leads_to = arrival_fixes(engine, airport)
+    on_arrival = {fix for fix, _ in approach.initial_fixes() if fix in leads_to}
     best = None
     for fix, altitude in approach.initial_fixes():
         where = engine.navfix.position(fix, airport.lat, airport.lon, 80)
@@ -927,13 +983,15 @@ def _initial_fix(engine, airport, arrival, raw, position, floor: float = 0):
         out = distance_nm(*where, *arrival.threshold)
         if out < 5 or position.distance_nm < out - 3:
             continue  # too close in to be a way in, or already behind the aircraft
-        if locate(*where, arrival.threshold, arrival.course_true).along_nm < 3:
-            continue  # beyond the runway: the way in from there turns back over the airport, which is not watched here
-        if max(altitude or arrival.platform_ft, floor) - airport.elev_ft > out * IAF_FT_PER_NM:
+        joined = fix in on_arrival
+        if not joined and locate(*where, arrival.threshold, arrival.course_true).along_nm < 3:
+            continue  # beyond the runway, with no arrival leading there: the long way round, over the airport
+        track = _track_nm(procedure_points(engine, approach, fix, airport), arrival.threshold) if joined else out
+        if max(altitude or arrival.platform_ft, floor) - airport.elev_ft > max(out, track) * IAF_FT_PER_NM:
             continue  # held at the sector altitude to the fix, the flight could not get down from it in time
         miles = distance_nm(raw["lat"], raw["lon"], *where)
-        if best is None or miles < best[0]:
-            best = (miles, fix, altitude, where)
+        if best is None or (not joined, miles) < best[0]:
+            best = ((not joined, miles), fix, altitude, where)
     return best[1:] if best else None
 
 
@@ -1098,14 +1156,17 @@ def _other_approach(engine, intent, station, callsign, lead: str):
     if family not in FAMILY_WORDS:
         return None
     if arrival.stage in ("intercept", "tower"):
-        return _reply(engine, f"{callsign}, {lead}unable, continue the {arrival.approach} approach")
-    found = choose_approach(engine.procedures(station.airport.ident), arrival.flown, family)
+        return _reply(engine, f"{callsign}, {lead}unable, continue the {arrival.named} approach")
+    fixes = arrival_fixes(engine, station.airport)
+    found = choose_approach(engine.procedures(station.airport.ident), arrival.flown, family, intent.variant, fixes)
     if not found:
         runway = say.runway(arrival.flown)
         return _reply(
             engine, f"{callsign}, {lead}unable, no {FAMILY_WORDS[family]} approach runway {runway}, expect {arrival.words()}"
         )
+    engine.flight.requested_approach, engine.flight.requested_variant = family, intent.variant
     arrival.approach, arrival.missed_ft, arrival.procedure = found.spoken, found.missed_ft, found
+    arrival.variant = found.variant
     # The next tick starts again for this approach: by its initial fix if it has one, otherwise by vectors.
     arrival.stage, arrival.heading = ("descend" if arrival.stage else None), None
     if found.platform_ft:
@@ -1746,6 +1807,24 @@ def tick(engine, station, issue, raw, variation, callsign):
     return _vector(engine, station, issue, raw, variation, callsign, "", first=False)
 
 
+def _approach_choices(procedures, arrival, family: str | None) -> list[tuple[str, str, str | None]]:
+    """(label, words, letter) of each approach of `family` to the runway that could be asked for instead of the one
+    expected: one for each letter when there are several ('RNAV Z', 'R NAV Zulu'), else the family's own."""
+    if family is None:
+        return []
+    kinds = APPROACH_FAMILIES[family]
+    found = [a for a in procedures.approaches.values() if a.runway == arrival.flown and a.kind in kinds]
+    letters = sorted({a.variant for a in found if a.variant})
+    if len(letters) < 2:
+        return [] if not found or arrival.procedure in found else [(family, FAMILY_WORDS[family], None)]
+    flying = arrival.procedure is not None and arrival.procedure.kind in kinds
+    return [
+        (f"{family} {letter}", f"{FAMILY_WORDS[family]} {say.PHONETIC[letter]}", letter)
+        for letter in letters
+        if not (flying and arrival.variant == letter)
+    ]
+
+
 def suggestions(engine, station, raw, add, callsign) -> None:
     """Click-to-transmit calls for radar frequencies."""
     flight, plan = engine.flight, engine.flight.plan
@@ -1776,14 +1855,16 @@ def suggestions(engine, station, raw, add, callsign) -> None:
             add("Request hold", "request holding", "request_hold")
         arrival = flight.arrival
         if arrival and arrival.stage in ON_APPROACH:
-            add("Established", f"established {arrival.approach} runway {say.runway(arrival.flown)}", "established")
+            add("Established", f"established {arrival.named} runway {say.runway(arrival.flown)}", "established")
         if arrival and arrival.stage in ("descend", "downwind", "base", "intercept") and arrival.approach != "visual":
             add("Field in sight", "field in sight, request visual approach", "request_visual")
         if arrival and arrival.stage in (None, "descend", "downwind") and not arrival.hold and station.airport:
             other = "RNAV" if arrival.approach in ("I L S", "G L S", "localiser") else "ILS"
-            if choose_approach(engine.procedures(station.airport.ident), arrival.flown, other):
-                words = FAMILY_WORDS[other]
-                add(f"Request {other} approach", f"request the {words} approach", "request_approach", approach=other)
+            procedures = engine.procedures(station.airport.ident)
+            for family in (other, "RNAV" if other == "ILS" else None):
+                for label, words, variant in _approach_choices(procedures, arrival, family):
+                    add(f"Request {label} approach", f"request the {words} approach", "request_approach",
+                        approach=family, variant=variant)  # fmt: skip
         if (flight.go_arounds or (arrival and arrival.unavailable)) and plan and plan.alternate:
             add(f"Divert to {plan.alternate}", f"request diversion to {plan.alternate}", "request_diversion",
                 destination=plan.alternate)  # fmt: skip

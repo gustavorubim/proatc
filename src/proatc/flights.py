@@ -372,6 +372,7 @@ class GateToGate:
         self.expected_runway: str | None = None  # "expect ... approach runway X"
         self.landing_cleared: str | None = None
         self.turned_out = False  # flying its own approach, it has gone out to turn back in
+        self.past_iaf = False  # cleared via an initial approach fix, and past it: down the procedure's profile
         self.side: str | None = None  # side of the final approach course while intercepting it
         self.silent_nm = 0.0
         self.in_contact = False
@@ -648,7 +649,7 @@ class GateToGate:
             self.landing_runway = _runway_said(text, airport, "circle to land runway") or cleared
             via = re.search(r" via ([A-Za-z ]+?), report", text)
             if via and self.lateral[0] not in ("procedure", "final"):
-                self._fly_procedure(via.group(1), cleared)
+                self._fly_procedure(via.group(1), cleared, text)
             elif "visual approach" in text and self.lateral[0] not in ("own", "final"):
                 self.lateral = ("own", None)
         if station.kind == "tower" and self.approach_runway is None:
@@ -662,20 +663,25 @@ class GateToGate:
             if self.landing_runway and self.landing_cleared != self.landing_runway:
                 self.problem("cleared to land on another runway", f"approach runway {self.landing_runway}: {text}", stop=True)
 
-    def _fly_procedure(self, fix_words: str, runway: str) -> None:
-        """Cleared for the approach via its initial fix: the fix, from the approach chart, then onto final."""
+    def _fly_procedure(self, fix_words: str, runway: str, text: str = "") -> None:
+        """Cleared for the approach via its initial fix: the fix, from the approach chart, then the chart's legs from
+        there onto final, of the approach named (the R NAV Zulu, when the runway has a Y and a Z)."""
         engine, airport = self.engine, self.destination
         found = None
         for approach in engine.procedures(airport.ident).approaches.values():
+            named = f"{approach.spoken} {say.PHONETIC[approach.variant]}" if approach.variant else approach.spoken
             for fix, _ in approach.initial_fixes() if approach.runway == runway else []:
                 if ifr._fix_word(engine, fix, airport.lat, airport.lon) == fix_words.strip():
-                    found = fix
-        where = engine.navfix.position(found, airport.lat, airport.lon, 80) if found and engine.navfix else None
+                    if found is None or f"cleared {named} approach" in text:
+                        found = (approach, fix)
+        where = engine.navfix.position(found[1], airport.lat, airport.lon, 80) if found and engine.navfix else None
         if where is None:
             self.problem("approach fix not on the chart", f"via {fix_words} for runway {runway}", stop=True)
             return
         threshold, course = engine._threshold(airport, runway), _runway_course(airport, runway)
-        self.lateral = ("procedure", [where, _on_centreline(threshold, course, JOIN_NM)])
+        legs = ifr.procedure_points(engine, found[0], found[1], airport)
+        self.lateral = ("procedure", legs if legs and legs[0] == where else [where, _on_centreline(threshold, course, JOIN_NM)])
+        self.past_iaf = False
 
     def _check_altitude(self, feet: float, text: str) -> None:
         """No descent below the minimum safe altitude where the aircraft is: the sector altitude near an airport
@@ -1055,6 +1061,7 @@ class GateToGate:
         if mode in ("route", "procedure"):
             while value and distance_nm(plane.lat, plane.lon, *value[0]) < WAYPOINT_NM:
                 value.pop(0)
+                self.past_iaf = self.past_iaf or mode == "procedure"
             if mode == "procedure" and (self._joins_final() or not value):
                 self.lateral = ("final", None)
                 return self._wanted_heading()
@@ -1126,15 +1133,20 @@ class GateToGate:
             target = min(target, self._own_descent(plane, elevation))
         if self.lateral[0] == "own":
             target = min(target, elevation + 3000)
-        elif self.lateral[0] == "procedure" and len(self.lateral[1]) <= 1:
-            # Past the initial fix, cleared for the approach: down the procedure's profile, about three degrees.
-            joining = self.lateral[1][0] if self.lateral[1] else (plane.lat, plane.lon)
-            remaining = distance_nm(plane.lat, plane.lon, *joining) + JOIN_NM
+        elif self.lateral[0] == "procedure" and self.past_iaf:
+            # Past the initial fix, cleared for the approach: down the procedure's profile, about three degrees, over
+            # the track miles of its legs still to fly.
+            path = [(plane.lat, plane.lon), *self.lateral[1], self._final()[0]]
+            remaining = sum(distance_nm(*a, *b) for a, b in zip(path, path[1:]))
             target = min(target, elevation + 50 + remaining * GLIDE_FT_PER_NM)
         elif self.lateral[0] == "final":
             position = self._final_position()
             if position.cross_nm < 1.0:
                 target = min(target, elevation + 50 + max(position.along_nm, 0.0) * GLIDE_FT_PER_NM)
+            elif self.past_iaf:
+                # Off a procedure's curved legs onto a short final at an angle: still down the path to the runway.
+                remaining = distance_nm(plane.lat, plane.lon, *self._final()[0])
+                target = min(target, elevation + 50 + remaining * GLIDE_FT_PER_NM)
             elif self.approach_runway is None:
                 target = min(target, elevation + 3000)
         return target

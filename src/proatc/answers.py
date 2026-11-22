@@ -296,10 +296,13 @@ def expected_approach(engine, airport, issue, raw: dict) -> str | None:
     weather = issue.weather if issue else weather_at(engine, airport, raw)
     runway = engine.requested_runway(airport, weather=weather) or landing[0]
     procedures = engine.procedures(airport.ident)
-    found = (flight.requested_approach and choose_approach(procedures, runway, flight.requested_approach)) or choose_approach(
-        procedures, runway
+    fixes = ifr.arrival_fixes(engine, airport)
+    wanted = flight.requested_approach and choose_approach(
+        procedures, runway, flight.requested_approach, flight.requested_variant, fixes
     )
-    return f"{found.spoken if found else 'visual'} approach runway {say.runway(runway)}"
+    found = wanted or choose_approach(procedures, runway, arrival_fixes=fixes)
+    named = f"{found.spoken} {say.PHONETIC[found.variant]}" if found and found.variant else found.spoken if found else "visual"
+    return f"{named} approach runway {say.runway(runway)}"
 
 
 def _approach(engine, intent, station, issue, raw, variation) -> str:
@@ -651,7 +654,8 @@ def confirm_words(engine, intent, station, raw) -> str:
         target = engine.db.airport(asked) if len(asked) == 4 and asked.isalnum() else None
         return f"you request a diversion to {target.spoken_name}" if target else "you request a diversion"
     if name == "request_approach" and intent.approach in ifr.FAMILY_WORDS:
-        return f"you request the {ifr.FAMILY_WORDS[intent.approach]} approach"
+        letter = f" {say.PHONETIC[intent.variant]}" if intent.variant else ""
+        return f"you request the {ifr.FAMILY_WORDS[intent.approach]}{letter} approach"
     if name == "request_deviation" and intent.direction in ("left", "right"):
         return f"you request a deviation {intent.direction} of track"
     if name == "request_return":
@@ -762,11 +766,11 @@ def approach_preference(engine, intent, station, raw, callsign, hello):
     words = ifr.FAMILY_WORDS[family]
     active = runways_at(engine, airport, None, raw)
     if not active:
-        engine.flight.requested_approach = family
+        engine.flight.requested_approach, engine.flight.requested_variant = family, intent.variant
         return _reply(engine, f"{callsign}, {hello}roger, {words} approach requested, approach will advise")
     runway = engine.requested_runway(airport, weather=weather_at(engine, airport, raw)) or split_runways(active)[0][0]
     if not choose_approach(engine.procedures(airport.ident), runway, family):
         current = expected_approach(engine, airport, None, raw)
         return _reply(engine, f"{callsign}, {hello}unable, no {words} approach runway {say.runway(runway)}, expect {current}")
-    engine.flight.requested_approach = family
+    engine.flight.requested_approach, engine.flight.requested_variant = family, intent.variant
     return _reply(engine, f"{callsign}, {hello}roger, expect {expected_approach(engine, airport, None, raw)}")
