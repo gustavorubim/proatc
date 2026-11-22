@@ -219,7 +219,7 @@ def test_a_simbrief_fetch_that_fails_says_what_went_wrong_without_the_username_o
     said = str(failed.value)
     assert "SimBrief" in said and USER.lower() not in said.lower() and "http" not in said and "simbrief.com" not in said
 
-    monkeypatch.setattr("proatc.flightplan._download", lambda params: httpx.Response(400, text=USER))
+    monkeypatch.setattr("proatc.flightplan._download", lambda params: (400, USER.encode()))
     with pytest.raises(PlanError, match="SimBrief returned 400") as refused:
         fetch_simbrief(USER)
     assert USER.lower() not in str(refused.value).lower()

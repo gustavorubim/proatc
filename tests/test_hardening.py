@@ -273,6 +273,31 @@ def test_a_simbrief_answer_larger_than_a_briefing_is_not_read_to_the_end(monkeyp
     assert len(read) <= flightplan.SIMBRIEF_MAX_BYTES // 1_000_000 + 1
 
 
+def test_a_briefing_sent_compressed_is_read(monkeypatch):
+    """SimBrief sends its briefing gzip-compressed; 0.21.5 decompressed it twice and said SimBrief could not be
+    reached."""
+    import gzip
+    import json
+    from contextlib import contextmanager
+
+    from proatc import flightplan
+
+    briefing = {
+        "general": {"route": "ALFAX UL9 BRAVO", "initial_altitude": "36000"},
+        "origin": {"icao_code": "EGXX"},
+        "destination": {"icao_code": "LFXX"},
+    }
+    sent = gzip.compress(json.dumps(briefing).encode())
+
+    @contextmanager
+    def stream(*args, **kwargs):  # what httpx gives: its iter_bytes undoes the compression
+        yield httpx.Response(200, content=sent, headers={"Content-Encoding": "gzip", "Content-Length": str(len(sent))})
+
+    monkeypatch.setattr(flightplan.httpx, "stream", stream)
+    plan = flightplan.fetch_simbrief("someone")
+    assert (plan.origin, plan.destination, plan.cruise_ft) == ("EGXX", "LFXX", 36000)
+
+
 def test_the_optional_voice_model_is_pinned_to_the_revision_tested():
     import re
 
