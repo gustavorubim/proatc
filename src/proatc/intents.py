@@ -98,7 +98,7 @@ FIELDS_TEMPLATE = """Keys:
 - "fix": the waypoint or navaid of a "direct to" request, as its identifier in capital letters (e.g. "BIBAX"), or null
 - "service": for a radar service request, "basic", "traffic" or "deconfliction" if one of those is named, else null
 - "compass": a direction of flight or of the aircraft from the airfield, as "north", "north east", "east", "south east", "south", "south west", "west" or "north west", or null
-- "approach": the type of approach asked for or read back: "ILS", "LOC", "RNAV", "VOR", "NDB" or "visual", or null
+- "approach": the type of approach asked for or read back: "ILS", "LOC", "RNAV", "VOR", "NDB" or "visual", or null; followed by its letter when one is said ("RNAV Z" for "R NAV Zulu" or "RNAV Z", "ILS Y" for "I L S Yankee")
 - "touch_and_go": true if a touch and go is requested or read back, else false
 - "item": for "request_information" or "say_again", the one thing asked about: one of {items}; or null. "Confirm cleared level" is "altitude"; "runway in use", "expected runway", "which runway am I landing on" and "request runway assignment" are "runway"; "current approach in use" is "approach"; "which transition", "how will I join the approach", "vectors or own navigation" and "which initial approach fix" are "transition"; "track miles" is "distance"
 
@@ -139,6 +139,7 @@ class Intent:
     fix: str | None = None
     direction: str | None = None
     approach: str | None = None
+    variant: str | None = None  # the approach's letter, when one is named: "Z" for "R NAV Zulu"
     service: str | None = None
     compass: str | None = None
     item: str | None = None  # what a request for information is about: one of ITEMS
@@ -151,6 +152,14 @@ class Intent:
 
 
 TEXT_MAX = 40  # a callsign, a destination or a fix as said on the radio
+# An approach as named, its letter included: "RNAV Z", "RNAV (GPS) Y", "ILS ZULU". Spaces and brackets are gone first.
+LETTER_WORDS = {word.upper(): letter for letter, word in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", (
+    "Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India Juliett Kilo Lima Mike November Oscar Papa Quebec Romeo "
+    "Sierra Tango Uniform Victor Whiskey Xray Yankee Zulu").split())}  # fmt: skip
+LETTER_WORDS |= {"ALFA": "A", "JULIET": "J"}
+APPROACH_SAID = re.compile(
+    r"(ILS|LOC|LOCALI[SZ]ER|RNAV|RNP|GPS|GNSS|GLS|VOR|NDB)(GPS|RNP|GNSS)?(" + "|".join(LETTER_WORDS) + r"|[A-Z])?"
+)
 
 
 def _clean(data: dict) -> Intent:
@@ -196,14 +205,24 @@ def _clean(data: dict) -> Intent:
         intent.direction = data["direction"]
     if data.get("position") in ("downwind", "base", "final"):
         intent.position = data["position"]
-    approach = str(data.get("approach", "")).upper().replace(" ", "").replace(".", "")
+    approach = re.sub(r"[\s.()-]", "", str(data.get("approach", "")).upper())
+    named = APPROACH_SAID.fullmatch(approach)
+    if named:
+        approach = named.group(1)
+        letter = named.group(3) or ""
+        intent.variant = LETTER_WORDS.get(letter, letter if len(letter) == 1 else None)
     approach = {"RNP": "RNAV", "GPS": "RNAV", "GNSS": "RNAV", "LOCALISER": "LOC", "LOCALIZER": "LOC", "GLS": "ILS"}.get(
         approach, approach
     )
     if approach in ("ILS", "LOC", "RNAV", "VOR", "NDB"):
         intent.approach = approach
-    elif approach == "VISUAL":
-        intent.approach = "visual"
+        variant = str(data.get("variant", "")).upper()
+        if len(variant) == 1 and variant.isalpha():  # a suggested call names it on its own
+            intent.variant = variant
+    else:
+        intent.variant = None  # a letter only goes with an instrument approach
+        if approach == "VISUAL":
+            intent.approach = "visual"
     if data.get("service") in ("basic", "traffic", "deconfliction"):
         intent.service = data["service"]
     points = str(data.get("compass", "")).lower().replace("-", " ").replace("northeast", "north east")

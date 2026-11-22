@@ -169,6 +169,7 @@ UNDERSTOOD = (
     ("one one eight decimal five speedbird one two three", "Speedbird one two three, contact Heathrow Tower one one eight decimal five", {"intent": "readback", "frequency": "118.500"}),
     ("established ILS runway 27 left", "", {"intent": "established", "runway": "27L"}),
     ("request the RNAV approach", "", {"intent": "request_approach", "approach": "RNAV"}),
+    ("request the RNAV zulu approach runway 21", "", {"intent": "request_approach", "approach": "RNAV", "variant": "Z"}),
     ("can we have the ILS instead", "", {"intent": "request_approach", "approach": "ILS"}),
     ("field in sight request visual approach", "", {"intent": "request_visual"}),
     ("request holding", "", {"intent": "request_hold"}),

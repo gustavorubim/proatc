@@ -145,6 +145,7 @@ class Flight:
     away_from: str | None = None  # the station the pilot was allowed to leave for a while; it stays quiet until called
     handoffs_held_until: float = 0.0  # after "unable" to a hand-off, radar controllers wait before giving another
     requested_approach: str | None = None  # the approach family asked for before reaching approach ("RNAV")
+    requested_variant: str | None = None  # and its letter, when the pilot named one: "Z" for the R NAV Z
     star_procedure: object | None = None  # procedures.Procedure
     constraints: list | None = None  # restrictions.Constraint along the STAR; None until looked up
     deviating: bool = False  # off track around weather
@@ -1823,7 +1824,7 @@ class Engine:
             elif station.kind == "tower":
                 runway = f" runway {say.runway(flight.runway)}" if flight.runway else ""
                 if flight.arrival and flight.arrival.stage == "tower":
-                    add("Check in", f"established {flight.arrival.approach}{runway}", "established")
+                    add("Check in", f"established {flight.arrival.named}{runway}", "established")
                 add("Inbound for landing", f"{information}inbound for landing", "inbound")
                 add("Downwind", f"downwind{runway}", "position_report", position="downwind")
                 add("Final", f"final{runway}", "position_report", position="final")
@@ -1938,7 +1939,7 @@ class Engine:
             "sid": flight.sid,
             "star": flight.star,
             "cleared_altitude_ft": flight.cleared_ft,
-            "approach": f"{flight.arrival.approach} runway {flight.arrival.approach_runway or flight.arrival.runway}"
+            "approach": f"{flight.arrival.named} runway {flight.arrival.approach_runway or flight.arrival.runway}"
             if flight.arrival
             else None,
             "heading": flight.arrival.heading

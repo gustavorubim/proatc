@@ -170,6 +170,16 @@ class Approach:
     def spoken(self) -> str:
         return APPROACH_TYPES.get(self.kind, "instrument")
 
+    @property
+    def variant(self) -> str | None:
+        """The letter that tells apart two approaches of one kind to one runway: Z of the R NAV Z runway 21."""
+        match = APPROACH_IDENT.fullmatch(self.ident)
+        return match.group(3) if match else None
+
+    def starts_at(self, fixes) -> list[str]:
+        """Its initial approach fixes among `fixes`: where an arrival through those fixes joins it."""
+        return [fix for fix, _ in self.initial_fixes() if fix in fixes]
+
 
 @dataclass
 class Procedures:
@@ -324,12 +334,20 @@ def choose_star(procedures: Procedures, route: list[str], filed: str | None = No
     return None
 
 
-def choose_approach(procedures: Procedures, runway: str, family: str | None = None) -> Approach | None:
-    """The most precise approach published for this runway, or the best of one family ('RNAV', 'VOR', ...)."""
+def choose_approach(
+    procedures: Procedures, runway: str, family: str | None = None, variant: str | None = None, arrival_fixes=()
+) -> Approach | None:
+    """The most precise approach published for this runway, or the best of one family ('RNAV', 'VOR', ...).
+
+    `variant` is the letter the pilot asked for (the Z of 'R NAV Z'), taken when one of that letter is published.
+    Of two of the same kind, the one the arrival (`arrival_fixes`, the STAR's fixes) leads into, as a controller
+    clears an aircraft for the approach its arrival was built for."""
     order = list(APPROACH_TYPES)
     kinds = APPROACH_FAMILIES.get(family, "") if family else order
     options = [a for a in procedures.approaches.values() if a.runway == runway and a.kind in order and a.kind in kinds]
-    return min(options, key=lambda a: (order.index(a.kind), a.ident), default=None)
+    if variant and any(a.variant == variant for a in options):
+        options = [a for a in options if a.variant == variant]
+    return min(options, key=lambda a: (order.index(a.kind), not a.starts_at(arrival_fixes), a.ident), default=None)
 
 
 def circling_approach(procedures: Procedures, runways: list[str]) -> Approach | None:
