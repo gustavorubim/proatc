@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 
 import httpx
@@ -66,15 +67,17 @@ def from_simbrief(data: dict) -> FlightPlan:
 SIMBRIEF_MAX_BYTES = 16_000_000  # a briefing with its whole navigation log is a few megabytes
 
 
-def _download(params: dict) -> httpx.Response:
-    """The briefing, read no further than SIMBRIEF_MAX_BYTES."""
+def _download(params: dict) -> tuple[int, bytes]:
+    """SimBrief's status and the briefing, already decompressed, read no further than SIMBRIEF_MAX_BYTES. The
+    bytes are returned as they are: wrapped in a new response with SimBrief's headers, a briefing sent compressed
+    (as SimBrief sends it) would be decompressed a second time and fail."""
     with httpx.stream("GET", SIMBRIEF_URL, params=params, timeout=20, follow_redirects=True) as response:
         body = bytearray()
         for chunk in response.iter_bytes():
             body += chunk
             if len(body) > SIMBRIEF_MAX_BYTES:
                 raise PlanError("SimBrief sent more than a briefing holds.")
-        return httpx.Response(response.status_code, content=bytes(body), headers=response.headers)
+        return response.status_code, bytes(body)
 
 
 def fetch_simbrief(user: str) -> FlightPlan:
@@ -84,17 +87,17 @@ def fetch_simbrief(user: str) -> FlightPlan:
         raise PlanError("Enter your SimBrief username or pilot ID.")
     params = {"json": "1", "userid" if user.isdigit() else "username": user}
     try:
-        response = _download(params)
+        status, body = _download(params)
     # httpx's own messages can quote the request, username and all: what went wrong is said in plain words,
     # since the message is shown, written to the journal and saved with the log.
     except httpx.TimeoutException as error:
         raise PlanError("SimBrief did not answer in time. Try again in a moment.") from error
     except httpx.HTTPError as error:
         raise PlanError("SimBrief could not be reached. Check the internet connection.") from error
-    if response.status_code != 200:
-        raise PlanError(f"SimBrief returned {response.status_code}. Check the username, and that a flight is planned.")
+    if status != 200:
+        raise PlanError(f"SimBrief returned {status}. Check the username, and that a flight is planned.")
     try:
-        return from_simbrief(response.json())
+        return from_simbrief(json.loads(body))
     except ValueError as error:
         raise PlanError("SimBrief sent something that is not a briefing.") from error
 
