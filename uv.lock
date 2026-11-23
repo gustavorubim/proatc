@@ -502,7 +502,7 @@ wheels = [
 
 [[package]]
 name = "proatc"
-version = "0.21.7"
+version = "0.21.8"
 source = { editable = "." }
 dependencies = [
     { name = "faster-whisper" },
