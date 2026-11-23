@@ -19,6 +19,7 @@ from . import phraseology as say
 from .atis import (
     RUNWAY_CROSSWIND_KT,
     RUNWAY_TAILWIND_KT,
+    RunwaysInUse,
     really_closed,
     really_in_use,
     split_runways,
@@ -284,6 +285,20 @@ def _route(engine, intent, station, issue, raw, variation) -> str:
     return f"taxi to {engine._goal_words(faa)}{via}{limit}"
 
 
+def landing_runway(engine, airport, active: list[str], weather) -> str:
+    """The runway the flight will be told to expect, as approach chooses it: the one asked for and granted; else the
+    plan's when it is one of those landing; else the first landing. Found at Miami: the real ATIS landed 27 and 30,
+    the plan said 30, and the centre said to expect 27, the first in the list, while approach would clear 30."""
+    asked = engine.requested_runway(airport, weather=weather)
+    if asked:
+        return asked
+    landing = split_runways(active)[0]
+    planned = engine._planned_runway(airport, "arrival")
+    if planned in (landing if isinstance(active, RunwaysInUse) else active):
+        return planned
+    return landing[0]
+
+
 def expected_approach(engine, airport, issue, raw: dict) -> str | None:
     """'I L S approach runway two seven', the approach this flight will be given at the airport."""
     flight = engine.flight
@@ -292,9 +307,8 @@ def expected_approach(engine, airport, issue, raw: dict) -> str | None:
     active = runways_at(engine, airport, issue, raw)
     if not active:
         return None
-    landing = split_runways(active)[0]
     weather = issue.weather if issue else weather_at(engine, airport, raw)
-    runway = engine.requested_runway(airport, weather=weather) or landing[0]
+    runway = landing_runway(engine, airport, active, weather)
     procedures = engine.procedures(airport.ident)
     fixes = ifr.arrival_fixes(engine, airport)
     wanted = flight.requested_approach and choose_approach(
@@ -768,7 +782,7 @@ def approach_preference(engine, intent, station, raw, callsign, hello):
     if not active:
         engine.flight.requested_approach, engine.flight.requested_variant = family, intent.variant
         return _reply(engine, f"{callsign}, {hello}roger, {words} approach requested, approach will advise")
-    runway = engine.requested_runway(airport, weather=weather_at(engine, airport, raw)) or split_runways(active)[0][0]
+    runway = landing_runway(engine, airport, active, weather_at(engine, airport, raw))
     if not choose_approach(engine.procedures(airport.ident), runway, family):
         current = expected_approach(engine, airport, None, raw)
         return _reply(engine, f"{callsign}, {hello}unable, no {words} approach runway {say.runway(runway)}, expect {current}")

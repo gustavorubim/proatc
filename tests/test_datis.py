@@ -262,3 +262,20 @@ def test_an_answer_far_larger_than_an_atis_is_not_read(monkeypatch):
 
     monkeypatch.setattr(httpx, "stream", lambda *args, **kwargs: Huge())
     assert datis.fetch("KLAS") is None
+
+
+def test_of_two_runways_landing_the_centre_expects_the_plans_as_approach_will_clear_it(tmp_path):
+    # Found at Miami: the real ATIS landed 27 and 30, the plan said 30. Asked for the expected approach, the centre
+    # said runway 27, the first the ATIS named, while approach would have cleared the plan's 30.
+    from proatc.answers import expected_approach
+    from proatc.flightplan import FlightPlan
+
+    db, engine, _ = real_world(tmp_path, {"KXXX": [{"type": "combined", "datis": LAS}]})  # lands 26L and 1L
+    testville = db.airport("KXXX")
+    engine.set_plan(FlightPlan("KYYY", "KXXX", [], 24000, arrival_runway="1L", source="simbrief"))
+    engine.flight.has_been_airborne = True
+    engine.active_runways(testville, issue(SOUTH), raw=REAL_WEATHER)
+    assert expected_approach(engine, testville, issue(SOUTH), REAL_WEATHER) == "visual approach runway one left"
+    # A plan's runway the airport is not landing on is not expected: the first one landing is.
+    engine.set_plan(FlightPlan("KYYY", "KXXX", [], 24000, arrival_runway="1R", source="simbrief"))
+    assert expected_approach(engine, testville, issue(SOUTH), REAL_WEATHER) == "visual approach runway two six left"
