@@ -1487,9 +1487,20 @@ class Engine:
 
     # ---- sim-driven state and unprompted calls ------------------------------
 
+    def _radar(self, raw: dict) -> None:
+        """Put in the sim's state the altitude the controller's radar shows (`ifr.radar_feet`), against the transition
+        altitude of the airport the flight is leaving, or, once descending, the one it is going to."""
+        flight, plan = self.flight, self.flight.plan
+        ident = plan.destination if flight.descent_given and plan else flight.origin_ident or (plan.origin if plan else None)
+        faa = uses_faa_style(ident) if ident else False
+        feet = ifr.radar_feet(raw, ifr._transition_ft(self, ident, faa))
+        if feet is not None:
+            raw["radar_ft"] = feet
+
     def _observe(self, raw: dict) -> None:
         """Follow the flight from the sim: takeoff, landing, and where it was parked."""
         flight = self.flight
+        self._radar(raw)
         self.last_raw = raw
         if "on_ground" not in raw:
             return
@@ -1730,6 +1741,7 @@ class Engine:
         controller asked come first and carry `answers`; `primary` marks the call most expected now.
         """
         with self.lock:
+            self._radar(raw)
             items = self._suggestions(station, issue, raw)
             return questions.arrange(self, station, issue, raw, items, self.opening(station, raw))
 

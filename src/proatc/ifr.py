@@ -168,7 +168,26 @@ class Arrival:
 
 
 def _feet(raw: dict) -> float:
+    """The aircraft's altitude as the controller's radar shows it (`radar_feet`), once the engine has worked it out;
+    else its true altitude."""
+    if "radar_ft" in raw:
+        return raw["radar_ft"]
     return raw.get("elevation_m", 0.0) / 0.3048
+
+
+def radar_feet(raw: dict, transition_ft: int) -> float | None:
+    """The altitude radar shows from the transponder's pressure altitude: a flight level at and above the transition
+    altitude, and below it the altitude on the local QNH, as the pilot's altimeter reads it. Not the true altitude:
+    in air warmer than standard an aircraft level at flight level two five zero is a thousand feet higher than that,
+    and was told it had not descended. None where the sim gives no pressure altitude."""
+    pressure = raw.get("pressure_alt_ft")
+    if pressure is None:
+        return None
+    if pressure >= transition_ft or not raw.get("wx_qnh_pas"):
+        return pressure
+    qnh_hpa = raw["wx_qnh_pas"] / 100
+    # Standard atmosphere: the pressure altitude of the QNH, the zero of an altimeter set to it.
+    return pressure - 145366.45 * (1 - (qnh_hpa / 1013.25) ** 0.190284)
 
 
 def _transition_ft(engine, ident: str | None, faa: bool) -> int:

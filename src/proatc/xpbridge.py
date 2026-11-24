@@ -24,6 +24,7 @@ DATAREFS = {
     "lat": "sim/flightmodel/position/latitude",
     "lon": "sim/flightmodel/position/longitude",
     "elevation_m": "sim/flightmodel/position/elevation",
+    "pressure_alt_ft": "sim/flightmodel2/position/pressure_altitude",  # what the transponder reports, as radar sees it
     "agl_m": "sim/flightmodel/position/y_agl",
     "groundspeed_ms": "sim/flightmodel/position/groundspeed",
     "ias_kt": "sim/flightmodel/position/indicated_airspeed",
