@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { EngineMessage } from '../../shared/protocol'
-import { fillDestination, initialStore, MAX_LINES, reduce, type Store } from './store'
+import { fillDestination, initialStore, MAX_LINES, reduce, stillOffered, type Store } from './store'
 
 function feed(messages: EngineMessage[], start: Store = initialStore): Store {
   return messages.reduce((store, message) => reduce(store, { type: 'message', message }), start)
@@ -232,5 +232,38 @@ describe('store', () => {
     expect(fillDestination('Delivery, request I F R clearance to {destination}', ' Paris ')).toBe(
       'Delivery, request I F R clearance to Paris'
     )
+  })
+
+  it('keeps asking for the destination only while the call that needs it is offered', () => {
+    const asked = {
+      label: 'Request IFR clearance…',
+      text: 'Delivery, N123AB, request I F R clearance to {destination}',
+      intent: { intent: 'request_clearance', flight_rules: 'IFR' },
+      needs: 'destination' as const
+    }
+    const radioCheck = {
+      label: 'Radio check',
+      text: 'Delivery, N123AB, radio check',
+      intent: { intent: 'radio_check' }
+    }
+    expect(
+      stillOffered(asked, [
+        { ...asked, text: 'Delivery, N123AB, information B, request I F R clearance to {destination}' },
+        radioCheck
+      ])
+    ).toBe(true)
+    // the flight plan arrived: the request names its destination and needs nothing
+    const named = {
+      ...asked,
+      label: 'Request IFR clearance',
+      text: 'Delivery, N123AB, request I F R clearance to KMIA'
+    }
+    delete (named as { needs?: string }).needs
+    expect(stillOffered(asked, [named, radioCheck])).toBe(false)
+    // the clearance was given: on Ground, push and start
+    expect(
+      stillOffered(asked, [{ label: 'Request push and start', text: 'push', intent: { intent: 'request_pushback' } }])
+    ).toBe(false)
+    expect(stillOffered(asked, undefined)).toBe(true)
   })
 })

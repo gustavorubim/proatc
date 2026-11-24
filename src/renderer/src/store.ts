@@ -1,6 +1,6 @@
 // What the window shows, as a pure function of the messages received from the engine.
 
-import type { Chart, Debrief, EngineMessage, EngineState, SoundCheckEvent } from '../../shared/protocol'
+import type { Chart, Debrief, EngineMessage, EngineState, SoundCheckEvent, Suggestion } from '../../shared/protocol'
 
 export type LineKind = 'pilot' | 'atc' | 'atis' | 'note' | 'error' | 'coach' | 'chatter'
 
@@ -169,4 +169,11 @@ export function reduce(store: Store, action: Action): Store {
 /** Fill in the value a suggested call asked for. */
 export function fillDestination(text: string, destination: string): string {
   return text.replace('{destination}', destination.trim())
+}
+
+/** Whether the call the pilot is filling in is still offered. A clearance request that asks for the destination
+ * stops being offered once the flight plan gives it or the clearance is given, and the box asking for it closes. */
+export function stillOffered(asked: Suggestion, offered: Suggestion[] | undefined): boolean {
+  if (!offered) return true // no state yet: nothing has changed
+  return offered.some((call) => call.needs === asked.needs && call.intent.intent === asked.intent.intent)
 }

@@ -3,7 +3,7 @@ import type { Command, Debrief, EngineMessage, EngineState, Suggestion, UpdateSt
 import { AirportMap } from './AirportMap'
 import logo from './assets/logo.svg'
 import { SettingsDialog } from './Settings'
-import { fillDestination, initialStore, type Line, reduce } from './store'
+import { fillDestination, initialStore, type Line, reduce, stillOffered } from './store'
 import { updateView } from './updates'
 
 const KIND_LABEL: Record<string, string> = {
@@ -771,6 +771,11 @@ export function App() {
   }, [reportPath])
 
   const ready = Boolean(engine?.ready) && store.link === 'open'
+  if (asking && !stillOffered(asking, engine?.suggestions)) {
+    // The plan gave the destination or the clearance came: the box would hide the calls that are offered now.
+    setAsking(null)
+    setDestination('')
+  }
   const click = (suggestion: Suggestion): void => {
     if (suggestion.needs === 'destination') {
       setAsking(suggestion)
