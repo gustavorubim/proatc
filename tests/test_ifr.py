@@ -2,6 +2,7 @@
 
 import pytest
 
+from proatc import ifr
 from proatc import phraseology as say
 from proatc.atis import Issue
 from proatc.centers import CenterIndex, parse_atc
@@ -554,3 +555,32 @@ def test_simbrief_user_defaults_to_the_env_file(tmp_path, monkeypatch):
     assert server.load_settings() == {"simbrief_user": "123456"} and config.openrouter_key() == "k"
     server.save_settings({"simbrief_user": "someone"})
     assert server.load_settings()["simbrief_user"] == "someone"  # an account used in the app wins
+
+
+def test_the_level_is_read_from_pressure_altitude_as_radar_reads_it_not_from_true_altitude(world):
+    # Found on a real flight in Florida, ten degrees warmer than standard: level at flight level two five zero on
+    # standard pressure, the aircraft was a thousand feet higher than that, and was told "check your altitude" and
+    # "expedite descent". Radar reads the transponder's pressure altitude, as the altimeter on standard does.
+    db, engine, centers = world
+    flight = engine.flight
+    flight.has_been_airborne, flight.origin_ident, flight.squawk = True, "EGXX", "4521"
+    west = centers.on_frequency(127500, 51.0, 0.0)
+    engine.handle(Intent("check_in"), west, None, at(51.0, 0.0, feet=30000, heading=90))
+    engine.handle(Intent("readback", altitude=36000), west, None, at(51.0, 0.0, feet=30000, heading=90))
+
+    def warm(pressure_ft, true_ft):
+        return {**at(51.0, 0.1, feet=true_ft, heading=90), "pressure_alt_ft": pressure_ft, "vs_fpm": 1500.0,
+                "wx_qnh_pas": 101700.0}  # fmt: skip
+
+    assert engine.tick(west, None, warm(36000, 37400)) is None  # level, though a thousand feet higher in truth
+    assert "check your level" in engine.tick(west, None, warm(36500, 37900)).text  # through it on the altimeter
+    # A sim that gives no pressure altitude: its true altitude, as before.
+    assert ifr._feet(at(51.0, 0.0, feet=5000)) == 5000
+
+
+def test_below_the_transition_altitude_radar_gives_the_altitude_on_the_local_qnh():
+    pressure = {"pressure_alt_ft": 3000.0, "wx_qnh_pas": 102325.0}  # QNH 1023: ten hectopascals above standard
+    assert abs(ifr.radar_feet(pressure, 6000) - 3273) < 5  # about 27 feet a hectopascal near the ground
+    assert ifr.radar_feet({**pressure, "wx_qnh_pas": 100325.0}, 6000) < 3000  # low pressure: lower on the altimeter
+    assert ifr.radar_feet({**pressure, "pressure_alt_ft": 25000.0}, 18000) == 25000  # a flight level: standard
+    assert ifr.radar_feet({"elevation_m": 900.0}, 6000) is None  # no pressure altitude given

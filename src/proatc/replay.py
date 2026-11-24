@@ -41,7 +41,7 @@ from .xpbridge import magnetic_variation
 
 # What the log keeps of the sim's state with each call: enough to find the station and decide the answer.
 RAW_KEYS = (
-    "lat", "lon", "elevation_m", "agl_m", "on_ground", "groundspeed_ms", "ias_kt", "heading_mag", "heading_true", "vs_fpm",
+    "lat", "lon", "elevation_m", "pressure_alt_ft", "agl_m", "on_ground", "groundspeed_ms", "ias_kt", "heading_mag", "heading_true", "vs_fpm",
     "squawk", "tail_number", "aircraft_type", "zulu_seconds", "com1_khz", "com2_khz", "com_selection", "paused",
     "wx_qnh_pas", "wx_visibility_sm", "wx_wind_alt_m", "wx_wind_kt", "wx_wind_dir", "wx_cloud_cover", "wx_cloud_base_m",
     "wx_cloud_type", "wx_dewpoint_c", "wx_oat_c", "wx_sealevel_temp_c", "wx_rain", "wx_source",
