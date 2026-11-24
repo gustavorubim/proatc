@@ -277,7 +277,8 @@ Engine faults found, all fixed as general rules:
 - the approach altitude could be below the field, or, with nothing published, below the sector altitude;
 - the tower cleared a flight to land on the runway in use when approach had brought it straight in to the other end;
 - at Miami, landing 27 and 30 by its real ATIS, the centre told a flight planned for 30 to expect 27, the first the ATIS named, while approach would have cleared 30;
-- the aircraft's altitude was its true height, not its pressure altitude: level at flight level 250 on standard pressure in air ten degrees warmer than standard, a flight was told "check your altitude" and "expedite descent".
+- the aircraft's altitude was its true height, not its pressure altitude: level at flight level 250 on standard pressure in air ten degrees warmer than standard, a flight was told "check your altitude" and "expedite descent";
+- the box asking for the destination of a clearance request, opened before the flight plan had loaded, stayed open once the plan gave the destination and the clearance was given, hiding the calls offered from then on.
 
 Two attempts to fix faults were wrong and were taken back after review: taxi routes along a runway (a backtrack needs its own clearance from the tower, read back and checked against traffic, which is not modelled), and an initial fix cleared at its own published altitude below the sector altitude, up to 45 miles out. An airport whose taxiways reach a runway only along it has no taxi route, as before.
 
